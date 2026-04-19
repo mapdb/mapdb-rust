@@ -1,0 +1,18 @@
+[package]
+name = "mapdb-collections"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance primitive collections for Rust, code-generated from mapdb-codegen"
+license = "EPL-1.0"
+
+# Library proper has zero dependencies. serde + serde_json are used by the
+# `validate` and `nanprobe` binaries under src/bin/, which read JSON scenarios
+# for the cross-language validation harness.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+kata = []
+
+[dev-dependencies]

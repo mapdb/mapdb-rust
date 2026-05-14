@@ -1,104 +1,101 @@
 # mapdb-collections (Rust)
 
-High-performance primitive-specialized and generic collections for Rust, inspired by [Eclipse Collections](https://eclipse.dev/collections/).
+Generic collections for Rust, ported from [Eclipse Collections](https://eclipse.dev/collections/).
 
-## Why?
+## Why generic, not per-primitive?
 
-Each primitive collection type is specialized per primitive type (`i8`, `i16`, `i32`, `i64`, `f32`, `f64`, `bool`, `char`) — no boxing, no trait objects, contiguous memory layout. Generic object collections (`ArrayList<T>`, `HashSet<T>`, etc.) complement the primitive types for general-purpose use.
+The Java port has `IntIntHashMap`, `LongObjectHashMap`, … as hand-written per-primitive classes because Java's `List<Integer>` boxes every `int` into a heap `Integer` object. There is no way to get a contiguous `int[]`-backed map in Java without code duplication.
 
-## Primitive Collections
+Rust doesn't have this problem. **Monomorphisation** specialises `OpenHashMap<i32, i32>` and `OpenHashMap<f32, f32>` at compile time — no boxing, no indirection, identical performance to a hand-written `IntIntHashMap`. So we ship one algorithm body and let the compiler do the specialisation.
 
-| Type | Mutable | Immutable | Variants |
-|------|---------|-----------|----------|
-| **ArrayList** | `I32ArrayList` | `ImmutableI32ArrayList` | 8 types |
-| **HashSet** | `I32HashSet` | `ImmutableI32HashSet` | 8 types |
-| **HashBag** | `I32HashBag` | `ImmutableI32HashBag` | 8 types |
-| **ArrayStack** | `I32ArrayStack` | `ImmutableI32ArrayStack` | 8 types |
-| **HashMap** | `I32I64HashMap` | `ImmutableI32I64HashMap` | 64 pairs (8x8) |
-| **TreeSet** | `I32TreeSet` | — | 8 types |
-| **TreeMap** | `I32I64TreeMap` | — | 64 pairs |
-| **Pair** | `I32I64Pair` | — | 64 pairs |
-| **Multimap** | `Multimap<K, V>` | — | Generic |
-| **Stream** | generators + collectors | — | Generic |
+| Java needs | Rust gets via |
+|---|---|
+| `IntArrayList` | `Vec<i32>` |
+| `IntIntHashMap` | `OpenHashMap<i32, i32>` |
+| `IntHashSet` | `OpenHashSet<i32>` |
+| `FloatFloatHashMap` | `OpenHashMap<HashableF32, f32>` |
+| `IntIntPair` | `Pair<i32, i32>` |
+| `ImmutableIntHashSet` | `ImmutableHashSet<i32>` (= `Arc<OpenHashSet<i32>>`) |
+| `Collections.synchronizedList(l)` | `synchronized(l)` returning `Synchronized<L>` |
 
-## Object Collections
-
-Generic collections that work with any type:
-
-| Type | Description |
-|------|-------------|
-| `ArrayList<T>` | Ordered list backed by `Vec<T>` |
-| `HashSet<T>` | Unordered set backed by `std::collections::HashSet` |
-| `HashMap<K, V>` | Key-value map backed by `std::collections::HashMap` |
-| `HashBag<T>` | Counting bag backed by `HashMap<T, usize>` |
-| `ArrayStack<T>` | LIFO stack backed by `Vec<T>` |
-| `HashBiMap<K, V>` | Bidirectional map with unique keys and values |
-
-## Quick Start
+## Core types
 
 ```rust
-use mapdb_collections::arraylist::i32_array_list::I32ArrayList;
-use mapdb_collections::hashmap::i32_i64_hash_map::I32I64HashMap;
-use mapdb_collections::object::{ArrayList, HashBag, Collection, MutableList, MutableBag};
-
-// Primitive ArrayList
-let mut list = I32ArrayList::of(&[3, 1, 4, 1, 5]);
-list.sort();
-assert_eq!(list.to_vec(), vec![1, 1, 3, 4, 5]);
-assert_eq!(list.select(|v| v > 2).len(), 3);
-
-// Primitive HashMap
-let mut map = I32I64HashMap::new();
-map.insert(1, 100);
-map.insert(2, 200);
-assert_eq!(map.get(1), Some(100));
-
-// Generic ArrayList
-let names = ArrayList::of(vec!["Alice", "Bob", "Charlie"]);
-assert_eq!(names.detect(|n| n.starts_with("B")), Some(&"Bob"));
-
-// Generic HashBag
-let mut bag = HashBag::new();
-bag.add("apple");
-bag.add_occurrences("apple", 3);
-assert_eq!(bag.occurrences_of(&"apple"), 4);
+use mapdb_collections::{
+    OpenHashMap, OpenHashSet,           // ported from Java's hashmap algorithm
+    HashableF32, HashableF64,           // newtype for f32/f64 as Hash + Eq + Ord
+    Synchronized, synchronized,         // Java-style sync wrapper
+    ImmutableHashMap, ImmutableHashSet, // frozen via Arc, O(1) lookup
+    ImmutableList,                      // frozen Arc<[T]>
+    Pair,                               // generic 2-tuple
+};
 ```
 
-## Stream API
+The Java-side algorithm port (open-addressing, linear probing, Robin Hood backward-shift deletion, interleaved `{occupied, key, value}` entries for cache locality) lives in `src/hash_table.rs`.
+
+## Quick start
 
 ```rust
-use mapdb_collections::stream::generators;
-use mapdb_collections::stream::collectors;
+use mapdb_collections::{OpenHashMap, OpenHashSet, HashableF32, synchronized};
 
-let squares: Vec<i32> = generators::range(1, 6).map(|x| x * x).collect();
-assert_eq!(squares, vec![1, 4, 9, 16, 25]);
+let mut m: OpenHashMap<i32, i32> = OpenHashMap::new();
+m.insert(1, 100);
+m.insert(2, 200);
+assert_eq!(m.get(&1), Some(&100));
 
-let groups = collectors::group_by(vec![1, 2, 3, 4, 5, 6].into_iter(), |v| v % 2);
-assert_eq!(groups[&0].len(), 3);
+// V can be any type — including non-Copy:
+let mut by_id: OpenHashMap<i32, String> = OpenHashMap::new();
+by_id.insert(7, "seven".to_string());
+
+// Float keys via the HashableF32/F64 newtype — NaN-aware, ±0 distinct:
+let mut prices: OpenHashMap<HashableF32, &str> = OpenHashMap::new();
+prices.insert(HashableF32(1.99), "soda");
+prices.insert(HashableF32(f32::NAN), "missing");
+assert!(prices.contains_key(&HashableF32(f32::NAN))); // NaN-keyed lookups work
+
+// Thread-safe view, Java-style factory:
+let sync_map = synchronized(OpenHashMap::<i32, i32>::new());
+sync_map.with_mut(|m| { m.insert(1, 10); });
+sync_map.with(|m| assert_eq!(m.get(&1), Some(&10)));
+
+// Set:
+let mut s: OpenHashSet<i32> = OpenHashSet::new();
+s.add(1); s.add(2); s.add(3);
+assert!(s.contains(&2));
 ```
 
-## Immutable Collections
+## Float handling
 
-Immutable variants use `Arc<[T]>` for O(1) clone. Modifications return new instances.
+`HashableF32` / `HashableF64` are `#[repr(transparent)]` newtypes around `f32`/`f64`. They implement:
+- `Hash` + `Eq` via the IEEE bit pattern — same NaN bits → equal, `+0.0 ≠ -0.0`.
+- `Ord` via `total_cmp` — total ordering even with NaN (NaN sorts at the extremes).
 
-```rust
-use mapdb_collections::immutable::immutable_i32_array_list::ImmutableI32ArrayList;
+There is zero runtime cost: a `HashableF32` is bit-identical to an `f32`.
 
-let im = ImmutableI32ArrayList::of(&[1, 2, 3]);
-let im2 = im.clone(); // O(1) — shared Arc
-let mut mutable = im.to_mutable();
-mutable.push(4);
-assert_eq!(im.len(), 3); // unchanged
+## Cross-language algorithm parity
+
+This crate uses our ported `OpenHashMap` (not `std::collections::HashMap`) for everything that needs a hash map, including:
+- The primary `OpenHashMap<K, V>` public type
+- `object::HashMap<K, V>` / `object::HashSet<T>` wrappers
+- `Multimap<K, V>` (one-key-to-many-values) backing store
+- `ImmutableHashMap<K, V>` / `ImmutableHashSet<T>` frozen views
+
+This preserves the cache-locality interleaved-entry layout that Eclipse Collections uses on the Java side. `std::BTreeMap`/`BTreeSet`/`BinaryHeap` are used where the algorithm matches (sorted maps, priority queues).
+
+## Layout
+
 ```
-
-## Float Handling
-
-Float types (`f32`, `f64`) use `to_bits()` for equality and hashing — NaN-safe.
-`HashableF32` / `HashableF64` wrappers available for use as HashMap keys.
-
-## Stats
-
-- **580 source files**, **4,517 tests** passing
-- **0 clippy warnings**
-- All 8 Rust primitive types + generic object types
-- Zero external dependencies (library crate)
+src/
+├── hash_table.rs        — OpenHashMap<K, V>, OpenHashSet<T> (the algorithm)
+├── hashable_float.rs    — HashableF32, HashableF64
+├── synchronized.rs      — Synchronized<C> + factory
+├── immutable.rs         — ImmutableHashMap / ImmutableHashSet / ImmutableList
+├── pair.rs              — Pair<A, B>
+├── traits.rs            — PrimitiveCollection<T>, PrimitiveList, PrimitiveMap, …
+├── multimap/            — Multimap<K, V>
+├── object/              — HashMap / HashSet / ArrayList / TreeMap / …
+├── stream/              — Stream-style generators + collectors
+└── bin/
+    ├── nanprobe.rs      — NaN-semantics probe (cross-language harness)
+    └── validate.rs      — JSON scenario runner (cross-language harness)
+```

@@ -2,37 +2,38 @@
 // Derived from Eclipse Collections (Copyright (c) Goldman Sachs and others).
 // Licensed under the Eclipse Public License v1.0 and Eclipse Distribution License v1.0.
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
-// USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-// Hand-written — generic multimap (one key to many values).
+// Generic multimap (one key to many values), built on the project's ported
+// `OpenHashMap` rather than `std::HashMap`.
 
-use std::collections::HashMap;
+use crate::hash_table::OpenHashMap;
 use std::fmt;
 use std::hash::Hash;
 
 /// A multimap that maps each key to a list of values.
-/// Generic over key and value types.
 #[derive(Debug, Clone)]
 pub struct Multimap<K: Eq + Hash, V> {
-    data: HashMap<K, Vec<V>>,
+    data: OpenHashMap<K, Vec<V>>,
     size: usize,
 }
 
 impl<K: Eq + Hash, V> Multimap<K, V> {
     pub fn new() -> Self {
         Multimap {
-            data: HashMap::new(),
+            data: OpenHashMap::new(),
             size: 0,
         }
     }
 
-    /// Adds a single value for the key.
     pub fn put(&mut self, key: K, value: V) {
-        self.data.entry(key).or_default().push(value);
+        if let Some(bucket) = self.data.get_mut(&key) {
+            bucket.push(value);
+        } else {
+            self.data.insert(key, vec![value]);
+        }
         self.size += 1;
     }
 
-    /// Returns the values for the key, or an empty slice.
     pub fn get(&self, key: &K) -> &[V] {
         self.data.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -41,7 +42,6 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         self.data.contains_key(key)
     }
 
-    /// Removes all values for the key. Returns the removed values.
     pub fn remove_all(&mut self, key: &K) -> Vec<V> {
         if let Some(values) = self.data.remove(key) {
             self.size -= values.len();
@@ -51,12 +51,10 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         }
     }
 
-    /// Total number of key-value pairs (counting duplicates).
     pub fn size(&self) -> usize {
         self.size
     }
 
-    /// Number of distinct keys.
     pub fn size_distinct(&self) -> usize {
         self.data.len()
     }
@@ -74,7 +72,6 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         self.data.keys()
     }
 
-    /// Iterates over all (key, value) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> + '_ {
         self.data
             .iter()
@@ -82,7 +79,7 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
     }
 
     pub fn for_each_key(&self, mut f: impl FnMut(&K, &[V])) {
-        for (k, vs) in &self.data {
+        for (k, vs) in self.data.iter() {
             f(k, vs);
         }
     }
@@ -104,7 +101,7 @@ impl<K: Eq + Hash + fmt::Display, V: fmt::Display> fmt::Display for Multimap<K, 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
         let mut first = true;
-        for (k, vs) in &self.data {
+        for (k, vs) in self.data.iter() {
             if !first {
                 write!(f, ", ")?;
             }

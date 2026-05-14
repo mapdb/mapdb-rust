@@ -5,24 +5,26 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
-use std::collections::HashMap as StdHashMap;
+use crate::hash_table::OpenHashMap;
 use std::hash::Hash;
 
-/// Generic unordered map backed by `std::collections::HashMap`.
+/// Generic unordered map backed by [`crate::hash_table::OpenHashMap`] — the
+/// project's port of Eclipse Collections' open-addressing hash map with
+/// interleaved key/value entries for cache locality. (Not `std::HashMap`.)
 #[derive(Debug, Clone)]
 pub struct HashMap<K: Eq + Hash, V> {
-    inner: StdHashMap<K, V>,
+    inner: OpenHashMap<K, V>,
 }
 
 impl<K: Eq + Hash, V> HashMap<K, V> {
     pub fn new() -> Self {
         HashMap {
-            inner: StdHashMap::new(),
+            inner: OpenHashMap::new(),
         }
     }
     pub fn with_capacity(cap: usize) -> Self {
         HashMap {
-            inner: StdHashMap::with_capacity(cap),
+            inner: OpenHashMap::with_capacity(cap),
         }
     }
 }
@@ -56,16 +58,16 @@ impl<K: Eq + Hash, V> MutableMap<K, V> for HashMap<K, V> {
 
 impl<K: Eq + Hash, V> HashMap<K, V> {
     pub fn keys_to_vec(&self) -> Vec<&K> {
-        self.inner.keys().collect()
+        self.inner.iter().map(|(k, _)| k).collect()
     }
     pub fn values_to_vec(&self) -> Vec<&V> {
-        self.inner.values().collect()
+        self.inner.iter().map(|(_, v)| v).collect()
     }
     pub fn contains_value(&self, value: &V) -> bool
     where
         V: PartialEq,
     {
-        self.inner.values().any(|v| v == value)
+        self.inner.iter().any(|(_, v)| v == value)
     }
     pub fn count_where(&self, predicate: impl Fn(&K, &V) -> bool) -> usize {
         self.inner.iter().filter(|(k, v)| predicate(k, v)).count()
@@ -77,24 +79,22 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
 
 impl<K: Eq + Hash + Clone, V: Clone> HashMap<K, V> {
     pub fn select(&self, predicate: impl Fn(&K, &V) -> bool) -> Self {
-        HashMap {
-            inner: self
-                .inner
-                .iter()
-                .filter(|(k, v)| predicate(k, v))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+        let mut out = HashMap::new();
+        for (k, v) in self.inner.iter() {
+            if predicate(k, v) {
+                out.inner.insert(k.clone(), v.clone());
+            }
         }
+        out
     }
     pub fn reject(&self, predicate: impl Fn(&K, &V) -> bool) -> Self {
-        HashMap {
-            inner: self
-                .inner
-                .iter()
-                .filter(|(k, v)| !predicate(k, v))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+        let mut out = HashMap::new();
+        for (k, v) in self.inner.iter() {
+            if !predicate(k, v) {
+                out.inner.insert(k.clone(), v.clone());
+            }
         }
+        out
     }
 }
 

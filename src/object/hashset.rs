@@ -5,24 +5,28 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
-use std::collections::HashSet as StdHashSet;
+use crate::hash_table::OpenHashSet;
 
-/// Generic unordered set backed by `std::collections::HashSet`.
+/// Generic unordered set backed by [`crate::hash_table::OpenHashSet`] — the
+/// project's port of Eclipse Collections' open-addressing hash set. (Not
+/// `std::HashSet`.)
 #[derive(Debug, Clone)]
 pub struct HashSet<T: Eq + std::hash::Hash> {
-    inner: StdHashSet<T>,
+    inner: OpenHashSet<T>,
 }
 
 impl<T: Eq + std::hash::Hash> HashSet<T> {
     pub fn new() -> Self {
         HashSet {
-            inner: StdHashSet::new(),
+            inner: OpenHashSet::new(),
         }
     }
     pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        HashSet {
-            inner: values.into_iter().collect(),
+        let mut s = HashSet::new();
+        for v in values {
+            s.inner.add(v);
         }
+        s
     }
 }
 
@@ -48,7 +52,7 @@ impl<T: Eq + std::hash::Hash> Set<T> for HashSet<T> {}
 
 impl<T: Eq + std::hash::Hash> MutableSet<T> for HashSet<T> {
     fn add(&mut self, value: T) -> bool {
-        self.inner.insert(value)
+        self.inner.add(value)
     }
     fn remove(&mut self, value: &T) -> bool {
         self.inner.remove(value)
@@ -57,28 +61,37 @@ impl<T: Eq + std::hash::Hash> MutableSet<T> for HashSet<T> {
 
 impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
     pub fn union(&self, other: &Self) -> Self {
-        HashSet {
-            inner: self.inner.union(&other.inner).cloned().collect(),
+        let mut out = self.clone();
+        for v in other.inner.iter() {
+            out.inner.add(v.clone());
         }
+        out
     }
     pub fn intersect(&self, other: &Self) -> Self {
-        HashSet {
-            inner: self.inner.intersection(&other.inner).cloned().collect(),
+        let mut out = HashSet::new();
+        for v in self.inner.iter() {
+            if other.inner.contains(v) {
+                out.inner.add(v.clone());
+            }
         }
+        out
     }
     pub fn difference(&self, other: &Self) -> Self {
-        HashSet {
-            inner: self.inner.difference(&other.inner).cloned().collect(),
+        let mut out = HashSet::new();
+        for v in self.inner.iter() {
+            if !other.inner.contains(v) {
+                out.inner.add(v.clone());
+            }
         }
+        out
     }
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        HashSet {
-            inner: self
-                .inner
-                .symmetric_difference(&other.inner)
-                .cloned()
-                .collect(),
+        let mut out = self.difference(other);
+        let rev = other.difference(self);
+        for v in rev.inner.iter() {
+            out.inner.add(v.clone());
         }
+        out
     }
 }
 

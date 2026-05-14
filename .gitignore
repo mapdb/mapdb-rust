@@ -1,0 +1,7 @@
+# Cargo build output.
+/target/
+
+# IDE / editor noise.
+.idea/
+.vscode/
+*.swp

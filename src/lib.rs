@@ -12,6 +12,7 @@
     clippy::new_without_default
 )]
 
+pub mod array_deque;
 pub mod hash_table;
 pub mod hashable_float;
 pub mod immutable;
@@ -22,6 +23,7 @@ pub mod stream;
 pub mod synchronized;
 pub mod traits;
 
+pub use array_deque::ArrayDeque;
 pub use hash_table::{OpenHashMap, OpenHashSet};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};

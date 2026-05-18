@@ -32,6 +32,7 @@ pub use hash_table::{OpenHashMap, OpenHashSet};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};
 pub use interval::{Interval, SignedPrimInt};
+pub use multimap::{Multimap, SetMultimap};
 pub use pair::Pair;
 pub use priority_queue::PriorityQueue;
 pub use synchronized::{synchronized, Synchronized};

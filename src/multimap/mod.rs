@@ -5,3 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 pub mod hash_multimap;
+pub mod set_multimap;
+
+pub use hash_multimap::Multimap;
+pub use set_multimap::SetMultimap;

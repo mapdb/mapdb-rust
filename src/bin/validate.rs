@@ -5,7 +5,7 @@
 //! Cross-language validation runner. Reads a JSON scenario file, runs the
 //! described operations through Rust collections, and prints the assertion
 //! outputs in the canonical per-line `<key>: <value>` format consumed by
-//! cross-language-validation/validate.sh.
+//! the cross-language validation harness.
 //!
 //! Routed through the generic collections (OpenHashMap, OpenHashSet, Vec,
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive

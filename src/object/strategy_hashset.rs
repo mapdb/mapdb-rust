@@ -275,7 +275,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Person {
         name: String,
-        age: i32,
+        _age: i32,
     }
 
     #[test]
@@ -284,21 +284,21 @@ mod tests {
         let mut s = HashSetWithStrategy::new(strategy);
         s.add(Person {
             name: "Alice".into(),
-            age: 30,
+            _age: 30,
         });
         s.add(Person {
             name: "Alice".into(),
-            age: 25,
+            _age: 25,
         }); // same name -> duplicate
         s.add(Person {
             name: "Bob".into(),
-            age: 30,
+            _age: 30,
         });
 
         assert_eq!(s.len(), 2);
         assert!(s.contains(&Person {
             name: "Alice".into(),
-            age: 99
+            _age: 99
         }));
     }
 

@@ -1,4 +1,3 @@
-// AUTO-GENERATED. DO NOT EDIT.
 
 #![allow(
     clippy::needless_borrow,

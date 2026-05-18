@@ -177,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_min_max_by() {
-        let data = vec![3, 1, 4, 1, 5];
+        let data = [3, 1, 4, 1, 5];
         assert_eq!(min_by(data.iter(), |a, b| a < b), Some(&1));
         assert_eq!(max_by(data.iter(), |a, b| a < b), Some(&5));
     }

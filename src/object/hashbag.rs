@@ -42,7 +42,7 @@ impl<T: Eq + Hash> Collection<T> for HashBag<T> {
         Box::new(
             self.counts
                 .iter()
-                .flat_map(|(v, &c)| std::iter::repeat(v).take(c)),
+                .flat_map(|(v, &c)| std::iter::repeat_n(v, c)),
         )
     }
 }

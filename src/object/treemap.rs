@@ -40,9 +40,7 @@ pub struct TreeMap<K, V> {
 
 impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for TreeMap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map()
-            .entries(self.iter().map(|(k, v)| (k, v)))
-            .finish()
+        f.debug_map().entries(self.iter()).finish()
     }
 }
 
@@ -195,13 +193,10 @@ impl<K, V> TreeMap<K, V> {
         key: &K,
         removed: &mut Option<V>,
     ) -> Option<Box<Node<K, V>>> {
-        let mut node = match node {
-            None => return None,
-            Some(n) => n,
-        };
+        let mut node = node?;
 
         if cmp.compare(key, &node.key) == Ordering::Less {
-            if !is_red(&node.left) && !node.left.as_ref().map_or(false, |l| is_red(&l.left)) {
+            if !is_red(&node.left) && !node.left.as_ref().is_some_and(|l| is_red(&l.left)) {
                 node = move_red_left(node);
             }
             node.left = Self::remove_rec(cmp, node.left.take(), key, removed);
@@ -213,7 +208,7 @@ impl<K, V> TreeMap<K, V> {
                 *removed = Some(node.value);
                 return None;
             }
-            if !is_red(&node.right) && !node.right.as_ref().map_or(false, |r| is_red(&r.left)) {
+            if !is_red(&node.right) && !node.right.as_ref().is_some_and(|r| is_red(&r.left)) {
                 node = move_red_right(node);
             }
             if cmp.compare(key, &node.key) == Ordering::Equal {
@@ -234,7 +229,7 @@ impl<K, V> TreeMap<K, V> {
 // ── Free functions for tree manipulation ────────────────────────────
 
 fn is_red<K, V>(node: &Option<Box<Node<K, V>>>) -> bool {
-    node.as_ref().map_or(false, |n| n.red)
+    node.as_ref().is_some_and(|n| n.red)
 }
 
 fn rotate_left<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
@@ -269,7 +264,7 @@ fn fix_up<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
     if is_red(&node.right) && !is_red(&node.left) {
         node = rotate_left(node);
     }
-    if is_red(&node.left) && node.left.as_ref().map_or(false, |l| is_red(&l.left)) {
+    if is_red(&node.left) && node.left.as_ref().is_some_and(|l| is_red(&l.left)) {
         node = rotate_right(node);
     }
     if is_red(&node.left) && is_red(&node.right) {
@@ -280,7 +275,7 @@ fn fix_up<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
 
 fn move_red_left<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
     flip_colors(&mut node);
-    if node.right.as_ref().map_or(false, |r| is_red(&r.left)) {
+    if node.right.as_ref().is_some_and(|r| is_red(&r.left)) {
         let r = rotate_right(node.right.take().unwrap());
         node.right = Some(r);
         node = rotate_left(node);
@@ -291,7 +286,7 @@ fn move_red_left<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
 
 fn move_red_right<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
     flip_colors(&mut node);
-    if node.left.as_ref().map_or(false, |l| is_red(&l.left)) {
+    if node.left.as_ref().is_some_and(|l| is_red(&l.left)) {
         node = rotate_right(node);
         flip_colors(&mut node);
     }
@@ -305,7 +300,7 @@ fn delete_min_node<K, V>(node: Option<Box<Node<K, V>>>) -> (Option<Box<Node<K, V
         return (None, node.key, node.value);
     }
 
-    if !is_red(&node.left) && !node.left.as_ref().map_or(false, |l| is_red(&l.left)) {
+    if !is_red(&node.left) && !node.left.as_ref().is_some_and(|l| is_red(&l.left)) {
         node = move_red_left(node);
     }
 
@@ -452,7 +447,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Person {
         name: String,
-        age: i32,
+        _age: i32,
     }
 
     #[test]
@@ -461,21 +456,21 @@ mod tests {
         m.insert(
             Person {
                 name: "Charlie".into(),
-                age: 30,
+                _age: 30,
             },
             "c",
         );
         m.insert(
             Person {
                 name: "Alice".into(),
-                age: 25,
+                _age: 25,
             },
             "a",
         );
         m.insert(
             Person {
                 name: "Bob".into(),
-                age: 35,
+                _age: 35,
             },
             "b",
         );

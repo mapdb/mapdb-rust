@@ -40,9 +40,7 @@ pub struct HashMapWithStrategy<K, V> {
 
 impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for HashMapWithStrategy<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map()
-            .entries(self.iter().map(|(k, v)| (k, v)))
-            .finish()
+        f.debug_map().entries(self.iter()).finish()
     }
 }
 
@@ -277,7 +275,7 @@ mod tests {
     #[derive(Debug, Clone)]
     struct Person {
         name: String,
-        age: i32,
+        _age: i32,
     }
 
     #[test]
@@ -287,14 +285,14 @@ mod tests {
         m.insert(
             Person {
                 name: "Alice".into(),
-                age: 30,
+                _age: 30,
             },
             "first".to_string(),
         );
         let old = m.insert(
             Person {
                 name: "Alice".into(),
-                age: 25,
+                _age: 25,
             },
             "second".to_string(),
         ); // overwrites by name
@@ -302,7 +300,7 @@ mod tests {
         assert_eq!(m.len(), 1);
         let v = m.get(&Person {
             name: "Alice".into(),
-            age: 0,
+            _age: 0,
         });
         assert_eq!(v, Some(&"second".to_string()));
     }

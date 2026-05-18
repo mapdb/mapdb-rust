@@ -15,6 +15,11 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+
+type HashFn<T> = dyn Fn(&T) -> u64;
+type EqFn<T> = dyn Fn(&T, &T) -> bool;
+type CmpFn<T> = dyn Fn(&T, &T) -> Ordering;
 
 // ── HashingStrategy ─────────────────────────────────────────────────
 
@@ -24,13 +29,13 @@ use std::hash::{Hash, Hasher};
 /// the collection delegates to the strategy. This enables case-insensitive
 /// keys, identity by extracted field, etc.
 pub struct HashingStrategy<T: ?Sized> {
-    pub hash: Box<dyn Fn(&T) -> u64>,
-    pub eq: Box<dyn Fn(&T, &T) -> bool>,
+    pub hash: Box<HashFn<T>>,
+    pub eq: Box<EqFn<T>>,
 }
 
 impl<T: ?Sized> HashingStrategy<T> {
     /// Creates a new hashing strategy from hash and equality functions.
-    pub fn new(hash: Box<dyn Fn(&T) -> u64>, eq: Box<dyn Fn(&T, &T) -> bool>) -> Self {
+    pub fn new(hash: Box<HashFn<T>>, eq: Box<EqFn<T>>) -> Self {
         HashingStrategy { hash, eq }
     }
 
@@ -82,7 +87,12 @@ pub fn case_insensitive_hashing_strategy() -> HashingStrategy<String> {
 /// ```ignore
 /// let strategy = by_field(|p: &Person| p.name.clone());
 /// ```
-pub fn by_field<T: 'static, F: Hash + Eq + 'static>(extract: fn(&T) -> F) -> HashingStrategy<T> {
+pub fn by_field<T: 'static, F: Hash + Eq + 'static, E>(extract: E) -> HashingStrategy<T>
+where
+    E: Fn(&T) -> F + 'static,
+{
+    let extract: Arc<dyn Fn(&T) -> F> = Arc::new(extract);
+    let eq_extract = Arc::clone(&extract);
     HashingStrategy {
         hash: Box::new(move |v: &T| {
             let f = extract(v);
@@ -90,7 +100,7 @@ pub fn by_field<T: 'static, F: Hash + Eq + 'static>(extract: fn(&T) -> F) -> Has
             f.hash(&mut h);
             h.finish()
         }),
-        eq: Box::new(move |a: &T, b: &T| extract(a) == extract(b)),
+        eq: Box::new(move |a: &T, b: &T| eq_extract(a) == eq_extract(b)),
     }
 }
 
@@ -100,12 +110,12 @@ pub fn by_field<T: 'static, F: Hash + Eq + 'static>(extract: fn(&T) -> F) -> Has
 ///
 /// Stored as a boxed closure so it can capture state (e.g. field extractors).
 pub struct Comparator<T: ?Sized> {
-    cmp: Box<dyn Fn(&T, &T) -> Ordering>,
+    cmp: Box<CmpFn<T>>,
 }
 
 impl<T: ?Sized> Comparator<T> {
     /// Creates a new comparator from a comparison function.
-    pub fn new(cmp: Box<dyn Fn(&T, &T) -> Ordering>) -> Self {
+    pub fn new(cmp: Box<CmpFn<T>>) -> Self {
         Comparator { cmp }
     }
 
@@ -141,7 +151,10 @@ pub fn reverse_comparator<T: Ord + 'static>() -> Comparator<T> {
 /// ```ignore
 /// let cmp = comparator_by_field(|p: &Person| p.name.clone());
 /// ```
-pub fn comparator_by_field<T: 'static, F: Ord + 'static>(extract: fn(&T) -> F) -> Comparator<T> {
+pub fn comparator_by_field<T: 'static, F: Ord + 'static, E>(extract: E) -> Comparator<T>
+where
+    E: Fn(&T) -> F + 'static,
+{
     Comparator {
         cmp: Box::new(move |a: &T, b: &T| extract(a).cmp(&extract(b))),
     }
@@ -171,10 +184,13 @@ pub fn reversed<T: 'static>(cmp: Comparator<T>) -> Comparator<T> {
 ///     a.to_lowercase().cmp(&b.to_lowercase())));
 /// let by_name_ci = comparator_by_field_with(|p: &Person| p.name.clone(), ci);
 /// ```
-pub fn comparator_by_field_with<T: 'static, F: 'static>(
-    extract: fn(&T) -> F,
+pub fn comparator_by_field_with<T: 'static, F: 'static, E>(
+    extract: E,
     sub: Comparator<F>,
-) -> Comparator<T> {
+) -> Comparator<T>
+where
+    E: Fn(&T) -> F + 'static,
+{
     Comparator {
         cmp: Box::new(move |a: &T, b: &T| sub.compare(&extract(a), &extract(b))),
     }
@@ -284,7 +300,7 @@ mod tests {
         let by_age = comparator_by_field(|p: &Person| p.age);
         let by_age_desc = reversed(by_age);
 
-        let mut people = vec![
+        let mut people = [
             Person {
                 name: "A".into(),
                 age: 20,
@@ -311,7 +327,7 @@ mod tests {
         }));
         let by_name_ci = comparator_by_field_with(|p: &Person| p.name.clone(), ci_str);
 
-        let mut people = vec![
+        let mut people = [
             Person {
                 name: "bob".into(),
                 age: 0,

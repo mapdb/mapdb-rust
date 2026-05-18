@@ -7,13 +7,35 @@
 // Stream generators — lazy iterators for common patterns.
 // Rust's Iterator trait is already powerful, so these are convenience constructors.
 
+use std::ops::Add;
+
+/// Values that can be advanced by one with discrete range semantics.
+///
+/// Floats intentionally do not implement this trait: repeated `+ 1.0`
+/// stepping gives surprising inclusive-end behavior around precision limits.
+pub trait StepOne: Copy + Ord + Add<Output = Self> {
+    fn one() -> Self;
+}
+
+macro_rules! impl_step_one {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl StepOne for $t {
+                fn one() -> Self {
+                    1
+                }
+            }
+        )*
+    };
+}
+
+impl_step_one!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
+
 /// Creates an iterator that yields values from start (inclusive) to end (exclusive).
-pub fn range<T>(start: T, end: T) -> impl Iterator<Item = T>
-where
-    T: Copy + PartialOrd + std::ops::Add<Output = T> + From<u8>,
-{
-    let one = T::from(1u8);
-    std::iter::successors(Some(start), move |&prev| {
+pub fn range<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
+    let one = T::one();
+    let initial = if start < end { Some(start) } else { None };
+    std::iter::successors(initial, move |&prev| {
         let next = prev + one;
         if next < end {
             Some(next)
@@ -24,13 +46,11 @@ where
 }
 
 /// Creates an iterator that yields values from start to end (both inclusive).
-pub fn range_closed<T>(start: T, end: T) -> impl Iterator<Item = T>
-where
-    T: Copy + PartialOrd + std::ops::Add<Output = T> + From<u8>,
-{
-    let one = T::from(1u8);
+pub fn range_closed<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
+    let one = T::one();
     let mut done = false;
-    std::iter::successors(Some(start), move |&prev| {
+    let initial = if start <= end { Some(start) } else { None };
+    std::iter::successors(initial, move |&prev| {
         if done {
             return None;
         }
@@ -81,12 +101,24 @@ mod tests {
     fn test_range() {
         let v: Vec<i32> = range(1, 5).collect();
         assert_eq!(v, vec![1, 2, 3, 4]);
+
+        let empty: Vec<i32> = range(5, 5).collect();
+        assert!(empty.is_empty());
+
+        let reversed: Vec<i32> = range(5, 1).collect();
+        assert!(reversed.is_empty());
     }
 
     #[test]
     fn test_range_closed() {
         let v: Vec<i32> = range_closed(1, 5).collect();
         assert_eq!(v, vec![1, 2, 3, 4, 5]);
+
+        let single: Vec<i32> = range_closed(5, 5).collect();
+        assert_eq!(single, vec![5]);
+
+        let reversed: Vec<i32> = range_closed(5, 1).collect();
+        assert!(reversed.is_empty());
     }
 
     #[test]

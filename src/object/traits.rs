@@ -18,42 +18,66 @@ pub trait Collection<T: PartialEq> {
     fn to_vec(&self) -> Vec<T>
     where
         T: Clone,
+        Self: Sized,
     {
         self.iter().cloned().collect()
     }
-    fn for_each(&self, mut f: impl FnMut(&T)) {
+    fn for_each(&self, mut f: impl FnMut(&T))
+    where
+        Self: Sized,
+    {
         for v in self.iter() {
             f(v);
         }
     }
-    fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
-        self.iter().any(|v| predicate(v))
+    fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool
+    where
+        Self: Sized,
+    {
+        self.iter().any(predicate)
     }
-    fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
-        self.iter().all(|v| predicate(v))
+    fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool
+    where
+        Self: Sized,
+    {
+        self.iter().all(predicate)
     }
-    fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
-        !self.iter().any(|v| predicate(v))
+    fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool
+    where
+        Self: Sized,
+    {
+        !self.iter().any(predicate)
     }
-    fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize {
+    fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize
+    where
+        Self: Sized,
+    {
         self.iter().filter(|v| predicate(v)).count()
     }
-    fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T> {
+    fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T>
+    where
+        Self: Sized,
+    {
         self.iter().find(|v| predicate(v))
     }
     fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<T>
     where
         T: Clone,
+        Self: Sized,
     {
         self.iter().filter(|v| predicate(v)).cloned().collect()
     }
     fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T>
     where
         T: Clone,
+        Self: Sized,
     {
         self.iter().filter(|v| !predicate(v)).cloned().collect()
     }
-    fn inject_into<R>(&self, initial: R, mut f: impl FnMut(R, &T) -> R) -> R {
+    fn inject_into<R>(&self, initial: R, mut f: impl FnMut(R, &T) -> R) -> R
+    where
+        Self: Sized,
+    {
         let mut acc = initial;
         for v in self.iter() {
             acc = f(acc, v);
@@ -119,18 +143,30 @@ pub trait MapIterable<K, V> {
         self.len() == 0
     }
     fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_>;
-    fn for_each(&self, mut f: impl FnMut(&K, &V)) {
+    fn for_each(&self, mut f: impl FnMut(&K, &V))
+    where
+        Self: Sized,
+    {
         for (k, v) in self.iter() {
             f(k, v);
         }
     }
-    fn any_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+    fn any_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool
+    where
+        Self: Sized,
+    {
         self.iter().any(|(k, v)| predicate(k, v))
     }
-    fn all_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+    fn all_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool
+    where
+        Self: Sized,
+    {
         self.iter().all(|(k, v)| predicate(k, v))
     }
-    fn none_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+    fn none_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool
+    where
+        Self: Sized,
+    {
         !self.iter().any(|(k, v)| predicate(k, v))
     }
 }

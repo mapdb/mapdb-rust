@@ -91,6 +91,30 @@ impl<T: Clone> ArrayDeque<T> {
     }
 }
 
+// Bridge to the parallel module. `VecDeque` is not a contiguous slice, so we
+// cannot hand out `&[T]`; instead we section by element index (`VecDeque`
+// indexing is O(1)) and implement `BatchIterable` directly. Driving it with
+// `parallel::batch::for_each_in_batches` then gives parallel iteration with no
+// copy. This is a trait impl, not a `par_*` method — see `parallel` module.
+impl<T> crate::parallel::batch::BatchIterable<T> for ArrayDeque<T> {
+    fn size(&self) -> usize {
+        self.data.len()
+    }
+
+    fn batch_for_each(
+        &self,
+        mut action: impl FnMut(&T),
+        section_index: usize,
+        section_count: usize,
+    ) {
+        let (lo, hi) =
+            crate::parallel::batch::section_bounds(self.data.len(), section_index, section_count);
+        for i in lo..hi {
+            action(&self.data[i]);
+        }
+    }
+}
+
 impl<T> Default for ArrayDeque<T> {
     fn default() -> Self {
         Self::new()

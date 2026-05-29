@@ -417,6 +417,118 @@ mod exec {
         });
         partials.into_iter().sum()
     }
+
+    // ── generic driver over any BatchIterable ─────────────────────────────
+    //
+    // The Eclipse Collections `ParallelIterate`-over-`BatchIterable` model:
+    // hand each of `task_count` fixed sections to its own scoped thread, with
+    // no work stealing and no copy. Works for any collection that implements
+    // `BatchIterable` (slices, `ArrayDeque`, the multimaps, …), so non-
+    // contiguous collections get parallel iteration without exposing a slice.
+
+    /// Drives `source` in parallel, applying `f` to every element across
+    /// `default_task_count()` fixed sections. Falls back to sequential below
+    /// `DEFAULT_MIN_FORK_SIZE` elements.
+    pub fn for_each_in_batches<T, B, F>(source: &B, f: F)
+    where
+        B: BatchIterable<T> + Sync + ?Sized,
+        F: Fn(&T) + Sync,
+    {
+        for_each_in_batches_with(source, f, DEFAULT_MIN_FORK_SIZE, default_task_count());
+    }
+
+    /// [`for_each_in_batches`] with explicit `min_fork_size` and `task_count`.
+    pub fn for_each_in_batches_with<T, B, F>(
+        source: &B,
+        f: F,
+        min_fork_size: usize,
+        task_count: usize,
+    ) where
+        B: BatchIterable<T> + Sync + ?Sized,
+        F: Fn(&T) + Sync,
+    {
+        let n = source.size();
+        if n == 0 {
+            return;
+        }
+        if !parallelize(n, min_fork_size, task_count) {
+            source.batch_for_each(&f, 0, 1);
+            return;
+        }
+        let f = &f;
+        std::thread::scope(|scope| {
+            for i in 0..task_count {
+                scope.spawn(move || source.batch_for_each(f, i, task_count));
+            }
+        });
+    }
+
+    /// Counts elements satisfying `predicate` while driving any
+    /// [`BatchIterable`] across fixed parallel sections.
+    pub fn count_in_batches<T, B, F>(source: &B, predicate: F) -> usize
+    where
+        B: BatchIterable<T> + Sync + ?Sized,
+        F: Fn(&T) -> bool + Sync,
+    {
+        count_in_batches_with(
+            source,
+            predicate,
+            DEFAULT_MIN_FORK_SIZE,
+            default_task_count(),
+        )
+    }
+
+    /// [`count_in_batches`] with explicit `min_fork_size` and `task_count`.
+    pub fn count_in_batches_with<T, B, F>(
+        source: &B,
+        predicate: F,
+        min_fork_size: usize,
+        task_count: usize,
+    ) -> usize
+    where
+        B: BatchIterable<T> + Sync + ?Sized,
+        F: Fn(&T) -> bool + Sync,
+    {
+        let n = source.size();
+        if n == 0 {
+            return 0;
+        }
+        if !parallelize(n, min_fork_size, task_count) {
+            let mut c = 0;
+            source.batch_for_each(
+                |v| {
+                    if predicate(v) {
+                        c += 1
+                    }
+                },
+                0,
+                1,
+            );
+            return c;
+        }
+        let predicate = &predicate;
+        let counts: Vec<usize> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..task_count)
+                .map(|i| {
+                    scope.spawn(move || {
+                        let mut c = 0usize;
+                        source.batch_for_each(
+                            |v| {
+                                if predicate(v) {
+                                    c += 1
+                                }
+                            },
+                            i,
+                            task_count,
+                        );
+                        c
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        counts.into_iter().sum()
+    }
 }
 
 #[cfg(feature = "parallel")]
@@ -564,5 +676,103 @@ mod tests {
             sum_by_with(&data, |v| *v, usize::MAX, 16),
             data.iter().sum::<i64>()
         );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn generic_driver_over_slice() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        // `[T]` is itself a BatchIterable, so the generic driver works on it.
+        let data: Vec<u64> = (0..50_000).collect();
+        let sum = AtomicU64::new(0);
+        for_each_in_batches_with(
+            data.as_slice(),
+            |v| {
+                sum.fetch_add(*v, Ordering::Relaxed);
+            },
+            1,
+            8,
+        );
+        assert_eq!(sum.load(Ordering::Relaxed), data.iter().sum::<u64>());
+        assert_eq!(
+            count_in_batches_with(data.as_slice(), |v| *v % 2 == 0, 1, 8),
+            25_000
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn generic_driver_over_array_deque() {
+        use crate::ArrayDeque;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let dq = ArrayDeque::of(0..20_000u64);
+        let sum = AtomicU64::new(0);
+        // Zero-copy parallel iteration over a non-contiguous VecDeque-backed
+        // collection, via its BatchIterable impl.
+        for_each_in_batches_with(
+            &dq,
+            |v| {
+                sum.fetch_add(*v, Ordering::Relaxed);
+            },
+            1,
+            8,
+        );
+        assert_eq!(sum.load(Ordering::Relaxed), (0..20_000u64).sum());
+        assert_eq!(count_in_batches_with(&dq, |v| *v >= 10_000, 1, 8), 10_000);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn generic_driver_over_multimaps() {
+        use crate::{Multimap, SetMultimap};
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        let mut mm: Multimap<i32, i64> = Multimap::new();
+        let mut expected = 0i64;
+        for k in 0..500 {
+            for j in 0..10 {
+                let v = (k * 10 + j) as i64;
+                mm.put(k, v);
+                expected += v;
+            }
+        }
+        let sum = AtomicI64::new(0);
+        for_each_in_batches_with(
+            &mm,
+            |v| {
+                sum.fetch_add(*v, Ordering::Relaxed);
+            },
+            1,
+            8,
+        );
+        // Every value is visited exactly once across key-sections.
+        assert_eq!(sum.load(Ordering::Relaxed), expected);
+        assert_eq!(count_in_batches_with(&mm, |_| true, 1, 8), mm.size());
+
+        // SetMultimap dedupes; each distinct value visited once.
+        let mut sm: SetMultimap<i32, i64> = SetMultimap::new();
+        for k in 0..200 {
+            sm.put(k, 1);
+            sm.put(k, 1); // dropped
+            sm.put(k, 2);
+        }
+        assert_eq!(count_in_batches_with(&sm, |_| true, 1, 8), sm.size());
+        assert_eq!(sm.size(), 400); // 200 keys × 2 distinct values
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn reference_bridge_parallelizes_hash_collections() {
+        use crate::OpenHashSet;
+
+        // Non-contiguous hash collections bridge by collecting borrowed refs
+        // once (no element clone), then running the slice executor on `&[&T]`.
+        let mut set: OpenHashSet<i64> = OpenHashSet::new();
+        for v in 0..30_000 {
+            set.add(v);
+        }
+        let refs: Vec<&i64> = set.iter().collect();
+        assert_eq!(count_with(&refs, |r| **r % 2 == 0, 1, 8), 15_000);
+        assert_eq!(sum_by_with(&refs, |r| **r, 1, 8), (0..30_000i64).sum());
     }
 }

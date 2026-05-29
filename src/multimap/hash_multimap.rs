@@ -36,6 +36,12 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         self.size += 1;
     }
 
+    /// Returns the values for `key` as an immutable view.
+    ///
+    /// This is intentionally zero-copy: safe Rust cannot mutate the
+    /// backing multimap through `&[V]`, and the borrow is tied to `self`.
+    /// Call `.to_vec()` on the returned slice when an owned snapshot is
+    /// needed.
     pub fn get(&self, key: &K) -> &[V] {
         self.data.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
@@ -80,6 +86,8 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
             .flat_map(|(k, vs)| vs.iter().map(move |v| (k, v)))
     }
 
+    /// Calls `f` once per key with an immutable, lifetime-bound view of
+    /// that key's values.
     pub fn for_each_key(&self, mut f: impl FnMut(&K, &[V])) {
         for (k, vs) in self.data.iter() {
             f(k, vs);
@@ -89,6 +97,46 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
     pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
         for (k, v) in self.iter() {
             f(k, v);
+        }
+    }
+}
+
+// Bridge to the parallel module: iterate the multimap's *values* in fixed
+// sections. Sections are whole keys (a contiguous range of the key set), so a
+// section holds every value of its keys — value counts per section may differ.
+// Drive with `parallel::batch::for_each_in_batches` for parallel value
+// iteration with no copy. `get_batch_count` is therefore key-based.
+impl<K: Eq + Hash, V> crate::parallel::batch::BatchIterable<V> for Multimap<K, V> {
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn batch_for_each(
+        &self,
+        mut action: impl FnMut(&V),
+        section_index: usize,
+        section_count: usize,
+    ) {
+        let (lo, hi) =
+            crate::parallel::batch::section_bounds(self.data.len(), section_index, section_count);
+        for (i, (_k, vs)) in self.data.iter().enumerate() {
+            if i >= hi {
+                break;
+            }
+            if i >= lo {
+                for v in vs {
+                    action(v);
+                }
+            }
+        }
+    }
+
+    fn get_batch_count(&self, batch_size: usize) -> usize {
+        let keys = self.data.len();
+        if batch_size == 0 || keys == 0 {
+            1
+        } else {
+            keys.div_ceil(batch_size)
         }
     }
 }

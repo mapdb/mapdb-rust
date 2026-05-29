@@ -155,6 +155,14 @@ impl<T> ImmutableList<T> {
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.inner.iter()
     }
+
+    /// Borrows the backing storage as a contiguous slice — the bridge to the
+    /// [`parallel`](crate::parallel) module (see [`ArrayList::as_slice`]).
+    ///
+    /// [`ArrayList::as_slice`]: crate::object::ArrayList::as_slice
+    pub fn as_slice(&self) -> &[T] {
+        &self.inner
+    }
 }
 
 impl<T> std::ops::Index<usize> for ImmutableList<T> {

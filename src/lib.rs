@@ -4,7 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-
 #![allow(
     clippy::needless_borrow,
     clippy::unnecessary_cast,
@@ -21,6 +20,7 @@ pub mod interval;
 pub mod multimap;
 pub mod object;
 pub mod pair;
+pub mod parallel;
 pub mod priority_queue;
 pub mod stream;
 pub mod synchronized;
@@ -34,5 +34,9 @@ pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};
 pub use interval::{Interval, SignedPrimInt};
 pub use multimap::{Multimap, SetMultimap};
 pub use pair::Pair;
+pub use parallel::spliterator::{SliceSpliterator, Spliterator};
+pub use parallel::BatchIterable;
+#[cfg(feature = "parallel")]
+pub use parallel::{as_parallel, ParallelSlice};
 pub use priority_queue::PriorityQueue;
 pub use synchronized::{synchronized, Synchronized};

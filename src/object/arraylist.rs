@@ -26,6 +26,15 @@ impl<T> ArrayList<T> {
             items: values.into_iter().collect(),
         }
     }
+
+    /// Borrows the backing storage as a contiguous slice.
+    ///
+    /// This is the bridge to the [`parallel`](crate::parallel) module: the
+    /// slice-based `BatchIterable`, `SliceSpliterator`, batch executor, and
+    /// `as_parallel` all apply directly to `list.as_slice()`.
+    pub fn as_slice(&self) -> &[T] {
+        &self.items
+    }
 }
 
 impl<T: PartialEq> Collection<T> for ArrayList<T> {

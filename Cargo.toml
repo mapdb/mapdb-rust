@@ -6,17 +6,23 @@ rust-version = "1.82"
 description = "High-performance primitive collections for Rust"
 license = "EPL-1.0"
 
-# Library proper has zero dependencies. serde + serde_json are used by the
-# `validate` and `nanprobe` binaries under src/bin/, which read JSON scenarios
-# for the cross-language validation harness.
+# The default build has zero dependencies. Optional deps power opt-in features:
+#   - serde + serde_json: the `validate`/`nanprobe` binaries (validation harness).
+#   - rayon: the work-stealing `ParallelIterable` (the `parallel` feature). The
+#     Spliterator and BatchIterable primitives — and the fixed-chunk batch
+#     executor — are pure-std and need no dependency; only rayon's work-stealing
+#     path is gated. rayon is a Rust-only choice; sibling language repos use
+#     their own runtimes (Go goroutines, etc.).
 [dependencies]
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
+rayon = { version = "1", optional = true }
 
 [features]
 default = []
 kata = []
 validation = ["dep:serde", "dep:serde_json"]
+parallel = ["dep:rayon"]
 
 [[bin]]
 name = "validate"
@@ -26,5 +32,12 @@ required-features = ["validation"]
 [[bin]]
 name = "nanprobe"
 path = "src/bin/nanprobe.rs"
+
+# Dependency-free benchmark of the parallel executors; needs the `parallel`
+# feature, so it is excluded from the default-feature `cargo build --examples`.
+[[example]]
+name = "parallel_bench"
+path = "examples/parallel_bench.rs"
+required-features = ["parallel"]
 
 [dev-dependencies]

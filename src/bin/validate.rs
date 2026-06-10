@@ -15,6 +15,7 @@
 
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
+use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
@@ -216,6 +217,7 @@ fn main() {
 
     match collection {
         "HashMap<i32, i32>" => run_hashmap(name, operations, assertions),
+        "HashMap<i64, i32>" => run_i64_hashmap(name, operations, assertions),
         "ArrayList<i32>" => run_arraylist(name, operations, assertions),
         "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
         "HashBag<i32>" => run_hashbag(name, operations, assertions),
@@ -311,6 +313,80 @@ fn eval_map_assertion(key: &str, map: &OpenHashMap<i32, i32>) -> String {
         }
         _ if key.starts_with("contains_") => {
             let k: i32 = key[9..].parse().unwrap();
+            map.contains_key(&k).to_string()
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+// ---- HashMap<i64, i32> ---------------------------------------------------
+
+// Wide-integer (i64) operand encoding — see cross-language-validation/README.md
+// §"Wide-integer (i64) operand encoding". An i64 KEY is a decimal STRING (small
+// keys may also be bare JSON numbers); it is parsed straight to i64 (never via
+// f64). The value stays an i32 JSON number. Routes through the generic
+// production OpenHashMap<i64, i32> (real hash spread + i64 key identity).
+fn parse_i64_operand(v: &Value) -> i64 {
+    if let Some(s) = v.as_str() {
+        s.parse::<i64>()
+            .unwrap_or_else(|_| panic!("invalid i64 decimal-string key: {:?}", s))
+    } else if let Some(n) = v.as_i64() {
+        n
+    } else {
+        panic!("expected i64 key (decimal string or number), got {:?}", v);
+    }
+}
+
+fn run_i64_hashmap(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let mut map: OpenHashMap<i64, i32> = OpenHashMap::new();
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "put" => {
+                let k = parse_i64_operand(&op["key"]);
+                let v = op["value"].as_i64().unwrap() as i32;
+                map.insert(k, v);
+            }
+            "remove" => {
+                let k = parse_i64_operand(&op["key"]);
+                map.remove(&k);
+            }
+            "clear" => map.clear(),
+            other => panic!("unknown i64-hashmap op: {}", other),
+        }
+    }
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_i64_map_assertion(key, &map);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_i64_map_assertion(key: &str, map: &OpenHashMap<i64, i32>) -> String {
+    match key {
+        "size" => map.len().to_string(),
+        "is_empty" => map.is_empty().to_string(),
+        "sorted_keys" => {
+            // i64 keys exceed 2^53, so serialize each as a decimal STRING in a
+            // quoted array, sorted numerically as i64 ascending.
+            let mut keys: Vec<i64> = map.iter().map(|(k, _)| *k).collect();
+            keys.sort();
+            let parts: Vec<String> = keys.iter().map(|k| format!("\"{}\"", k)).collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ if key.starts_with("get_") => {
+            let k: i64 = key[4..].parse().unwrap();
+            map.get(&k)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "null".into())
+        }
+        _ if key.starts_with("contains_") => {
+            let k: i64 = key[9..].parse().unwrap();
             map.contains_key(&k).to_string()
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
@@ -951,10 +1027,14 @@ fn run_f32_arraylist(
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
 ) {
-    let mut list: Vec<f32> = Vec::new();
+    // Route through the PRODUCTION generic list keyed by HashableF32 (whose Ord
+    // is the IEEE total order). Matches the Go/Zig f32-list runners: no local
+    // Vec<f32> with its own total_cmp/sum — sorted/min/max/sum are all proved
+    // against the real collection code.
+    let mut list: ArrayList<HashableF32> = ArrayList::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
-            "add" => list.push(parse_f32(&op["value"])),
+            "add" => list.push(HashableF32(parse_f32(&op["value"]))),
             "clear" => list.clear(),
             other => panic!("unknown f32-arraylist op: {}", other),
         }
@@ -967,25 +1047,31 @@ fn run_f32_arraylist(
             "size" => list.len().to_string(),
             "is_empty" => list.is_empty().to_string(),
             "sum" => {
-                let s: f32 = list.iter().copied().sum();
+                // f32 list sum is a per-add f32 left-fold (IEEE arithmetic),
+                // NOT a widened/f64 accumulation — matches Go's
+                // Float32ArrayList.Sum() and the TS per-add fround fold.
+                // Driven by the production inject_into fold.
+                let s = list.inject_into(0.0f32, |acc, v| acc + v.0);
                 format_f32(s)
             }
-            "min" => list
-                .iter()
-                .copied()
-                .min_by(|a, b| a.total_cmp(b))
-                .map(format_f32)
-                .unwrap_or_else(|| "null".into()),
-            "max" => list
-                .iter()
-                .copied()
-                .max_by(|a, b| a.total_cmp(b))
-                .map(format_f32)
-                .unwrap_or_else(|| "null".into()),
+            // min/max via the production total-order sort (HashableF32 Ord),
+            // then take the ends — no runner-side comparator.
+            "min" | "max" => {
+                let mut sorted = ArrayList::of(list.iter().copied());
+                sorted.sort();
+                let pick = if key == "min" {
+                    sorted.iter().next()
+                } else {
+                    sorted.iter().last()
+                };
+                pick.map(|v| format_f32(v.0)).unwrap_or_else(|| "null".into())
+            }
             "sorted" | "to_sorted_array" => {
-                let mut v = list.clone();
-                v.sort_by(|a, b| a.total_cmp(b));
-                let parts: Vec<String> = v.into_iter().map(format_f32).collect();
+                // Sort a COPY through the production total-order Sort() so the
+                // assertion proves conformance without mutating the live list.
+                let mut sorted = ArrayList::of(list.iter().copied());
+                sorted.sort();
+                let parts: Vec<String> = sorted.iter().map(|v| format_f32(v.0)).collect();
                 format!("[{}]", parts.join(","))
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),

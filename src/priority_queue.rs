@@ -241,9 +241,6 @@ mod tests {
         ]);
         let sorted = q.drain_sorted();
         let raw: Vec<f64> = sorted.iter().map(|h| h.0).collect();
-        assert_eq!(
-            raw,
-            vec![f64::NEG_INFINITY, -1.0, 2.0, 3.5, f64::INFINITY]
-        );
+        assert_eq!(raw, vec![f64::NEG_INFINITY, -1.0, 2.0, 3.5, f64::INFINITY]);
     }
 }

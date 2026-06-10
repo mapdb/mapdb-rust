@@ -17,6 +17,85 @@ use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+// Set whenever any assertion mismatches. The process exits non-zero at the
+// end so the harness treats assertion failures as the primary pass/fail.
+static ANY_FAIL: AtomicBool = AtomicBool::new(false);
+
+/// Emit a computed assertion: skip unrecognised keys silently (per the
+/// README unknown-assertion-skip rule — no print, no UNKNOWN_ASSERTION
+/// line), otherwise print the canonical `key: value` line and compare
+/// against the expected JSON value.
+fn emit(scenario: &str, key: &str, computed: &str, expected: &Value, float_mode: FloatMode) {
+    if computed.starts_with("UNKNOWN_ASSERTION:") {
+        return; // unrecognised key -> skip (do not print, do not fail)
+    }
+    println!("{}: {}", key, computed);
+    let expected_str = render_expected(expected, key, float_mode);
+    if computed != expected_str {
+        println!("FAIL {} {}: expected={} got={}", scenario, key, expected_str, computed);
+        ANY_FAIL.store(true, Ordering::Relaxed);
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
+enum FloatMode {
+    /// Integer collections: arrays/scalars render as plain JSON i32/bool/null.
+    None,
+    /// f32 map/set keyed by floats but whose *scalar* assertions (size,
+    /// get_N, contains_N) are i32/bool — only float *arrays* (sorted_keys,
+    /// sorted_values) render as quoted float labels ("NaN").
+    F32Keyed,
+    /// f32 ArrayList: scalar assertions (sum, min, max) are floats and the
+    /// `sorted` array renders each element unquoted (NaN).
+    F32List,
+}
+
+/// Canonical rendering of an expected JSON value, matching runner output.
+fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
+    match v {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => {
+            // f32 scalars (sum/min/max) under F32List render as floats; the
+            // structural `size` count stays an integer even in float mode.
+            if mode == FloatMode::F32List && key != "size" {
+                format_f32(n.as_f64().unwrap() as f32)
+            } else {
+                // i32 scalar (None) or i32 map value under F32Keyed.
+                n.to_string()
+            }
+        }
+        Value::String(s) => {
+            // Float label scalar (e.g. sum: "NaN", max: "NaN").
+            format_f32(parse_f32_label(s))
+        }
+        Value::Array(arr) => {
+            let parts: Vec<String> = arr
+                .iter()
+                .map(|e| match mode {
+                    FloatMode::None => match e {
+                        Value::Number(n) => n.to_string(),
+                        _ => e.to_string(),
+                    },
+                    FloatMode::F32Keyed => format!("\"{}\"", format_f32(element_to_f32(e))),
+                    FloatMode::F32List => format_f32(element_to_f32(e)),
+                })
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        other => other.to_string(),
+    }
+}
+
+fn element_to_f32(e: &Value) -> f32 {
+    match e {
+        Value::String(s) => parse_f32_label(s),
+        Value::Number(n) => n.as_f64().unwrap() as f32,
+        _ => panic!("unexpected float array element: {:?}", e),
+    }
+}
 
 fn parse_f32(v: &Value) -> f32 {
     if let Some(s) = v.as_str() {
@@ -68,19 +147,23 @@ fn main() {
     println!("=== scenario: {} ===", name);
 
     match collection {
-        "HashMap<i32, i32>" => run_hashmap(operations, assertions),
-        "ArrayList<i32>" => run_arraylist(operations, assertions),
-        "HashSet<i32>" => run_hashset(operations, assertions, &scenario),
-        "HashBag<i32>" => run_hashbag(operations, assertions),
-        "TreeSet<i32>" => run_treeset(operations, assertions),
-        "TreeMap<i32, i32>" => run_treemap(operations, assertions),
-        "HashMap<f32, i32>" => run_f32_hashmap(operations, assertions),
-        "HashSet<f32>" => run_f32_hashset(operations, assertions),
-        "ArrayList<f32>" => run_f32_arraylist(operations, assertions),
+        "HashMap<i32, i32>" => run_hashmap(name, operations, assertions),
+        "ArrayList<i32>" => run_arraylist(name, operations, assertions),
+        "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
+        "HashBag<i32>" => run_hashbag(name, operations, assertions),
+        "TreeSet<i32>" => run_treeset(name, operations, assertions),
+        "TreeMap<i32, i32>" => run_treemap(name, operations, assertions),
+        "HashMap<f32, i32>" => run_f32_hashmap(name, operations, assertions),
+        "HashSet<f32>" => run_f32_hashset(name, operations, assertions),
+        "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
         other => {
             eprintln!("unsupported collection type: {}", other);
             std::process::exit(1);
         }
+    }
+
+    if ANY_FAIL.load(Ordering::Relaxed) {
+        std::process::exit(1);
     }
 }
 
@@ -91,7 +174,7 @@ fn format_array(v: &[i32]) -> String {
 
 // ---- HashMap<i32, i32> ---------------------------------------------------
 
-fn run_hashmap(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_hashmap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut map: OpenHashMap<i32, i32> = OpenHashMap::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -114,11 +197,12 @@ fn run_hashmap(operations: &[Value], assertions: &serde_json::Map<String, Value>
             other => panic!("unknown hashmap op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue; // Scenario authors use "comment" for doc strings; skip.
         }
-        println!("{}: {}", key, eval_map_assertion(key, &map));
+        let computed = eval_map_assertion(key, &map);
+        emit(scenario, key, &computed, expected, FloatMode::None);
     }
 }
 
@@ -166,7 +250,7 @@ fn eval_map_assertion(key: &str, map: &OpenHashMap<i32, i32>) -> String {
 
 // ---- ArrayList<i32> -------------------------------------------------------
 
-fn run_arraylist(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_arraylist(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut list: Vec<i32> = Vec::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -186,11 +270,12 @@ fn run_arraylist(operations: &[Value], assertions: &serde_json::Map<String, Valu
             other => panic!("unknown arraylist op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
-        println!("{}: {}", key, eval_list_assertion(key, &list));
+        let computed = eval_list_assertion(key, &list);
+        emit(scenario, key, &computed, expected, FloatMode::None);
     }
 }
 
@@ -300,6 +385,7 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
 // ---- HashSet<i32> ---------------------------------------------------------
 
 fn run_hashset(
+    scenario_name: &str,
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
     scenario: &Value,
@@ -328,15 +414,12 @@ fn run_hashset(
         }
         other
     });
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
-        println!(
-            "{}: {}",
-            key,
-            eval_set_assertion(key, &set, other_set.as_ref())
-        );
+        let computed = eval_set_assertion(key, &set, other_set.as_ref());
+        emit(scenario_name, key, &computed, expected, FloatMode::None);
     }
 }
 
@@ -421,7 +504,7 @@ fn eval_set_assertion(
 
 // ---- HashBag<i32>  → modelled as OpenHashMap<i32, usize> -----------------
 
-fn run_hashbag(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_hashbag(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut bag: OpenHashMap<i32, usize> = OpenHashMap::new();
     let mut total: usize = 0;
     for op in operations {
@@ -450,11 +533,12 @@ fn run_hashbag(operations: &[Value], assertions: &serde_json::Map<String, Value>
             other => panic!("unknown hashbag op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
-        println!("{}: {}", key, eval_bag_assertion(key, &bag, total));
+        let computed = eval_bag_assertion(key, &bag, total);
+        emit(scenario, key, &computed, expected, FloatMode::None);
     }
 }
 
@@ -493,7 +577,7 @@ fn eval_bag_assertion(key: &str, bag: &OpenHashMap<i32, usize>, total: usize) ->
 
 // ---- TreeSet<i32> ---------------------------------------------------------
 
-fn run_treeset(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut set: BTreeSet<i32> = BTreeSet::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -507,7 +591,7 @@ fn run_treeset(operations: &[Value], assertions: &serde_json::Map<String, Value>
             other => panic!("unknown treeset op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
@@ -534,13 +618,13 @@ fn run_treeset(operations: &[Value], assertions: &serde_json::Map<String, Value>
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        println!("{}: {}", key, v);
+        emit(scenario, key, &v, expected, FloatMode::None);
     }
 }
 
 // ---- TreeMap<i32, i32> ----------------------------------------------------
 
-fn run_treemap(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut map: BTreeMap<i32, i32> = BTreeMap::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -557,7 +641,7 @@ fn run_treemap(operations: &[Value], assertions: &serde_json::Map<String, Value>
             other => panic!("unknown treemap op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
@@ -594,13 +678,13 @@ fn run_treemap(operations: &[Value], assertions: &serde_json::Map<String, Value>
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        println!("{}: {}", key, v);
+        emit(scenario, key, &v, expected, FloatMode::None);
     }
 }
 
 // ---- HashMap<f32, i32> ----------------------------------------------------
 
-fn run_f32_hashmap(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_hashmap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut map: OpenHashMap<HashableF32, i32> = OpenHashMap::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -617,7 +701,7 @@ fn run_f32_hashmap(operations: &[Value], assertions: &serde_json::Map<String, Va
             other => panic!("unknown f32-hashmap op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
@@ -647,7 +731,7 @@ fn run_f32_hashmap(operations: &[Value], assertions: &serde_json::Map<String, Va
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        println!("{}: {}", key, val);
+        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
     }
 }
 
@@ -664,7 +748,7 @@ fn parse_f32_label(s: &str) -> f32 {
 
 // ---- HashSet<f32> ---------------------------------------------------------
 
-fn run_f32_hashset(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_hashset(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut set: OpenHashSet<HashableF32> = OpenHashSet::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -678,7 +762,7 @@ fn run_f32_hashset(operations: &[Value], assertions: &serde_json::Map<String, Va
             other => panic!("unknown f32-hashset op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
@@ -701,13 +785,13 @@ fn run_f32_hashset(operations: &[Value], assertions: &serde_json::Map<String, Va
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        println!("{}: {}", key, val);
+        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
     }
 }
 
 // ---- ArrayList<f32> -------------------------------------------------------
 
-fn run_f32_arraylist(operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_arraylist(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
     let mut list: Vec<f32> = Vec::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -716,7 +800,7 @@ fn run_f32_arraylist(operations: &[Value], assertions: &serde_json::Map<String, 
             other => panic!("unknown f32-arraylist op: {}", other),
         }
     }
-    for (key, _) in assertions {
+    for (key, expected) in assertions {
         if key == "comment" {
             continue;
         }
@@ -747,6 +831,6 @@ fn run_f32_arraylist(operations: &[Value], assertions: &serde_json::Map<String, 
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        println!("{}: {}", key, val);
+        emit(scenario, key, &val, expected, FloatMode::F32List);
     }
 }

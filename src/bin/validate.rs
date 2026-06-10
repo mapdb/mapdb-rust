@@ -13,6 +13,8 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::object::ArrayList;
+use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -33,13 +35,41 @@ fn emit(scenario: &str, key: &str, computed: &str, expected: &Value, float_mode:
     }
     println!("{}: {}", key, computed);
     let expected_str = render_expected(expected, key, float_mode);
-    if computed != expected_str {
+    if computed != expected_str && !loose_nan_match(expected, float_mode, computed) {
         println!(
             "FAIL {} {}: expected={} got={}",
             scenario, key, expected_str, computed
         );
         ANY_FAIL.store(true, Ordering::Relaxed);
     }
+}
+
+/// Loose-NaN scalar match. When the EXPECTED operand is a bare NaN *label*
+/// (`"NaN"`/`"+NaN"`/`"-NaN"`) — NOT a `{"bits":"0x.."}` object and NOT an
+/// array element — the assertion passes against ANY NaN the runner computed,
+/// regardless of sign/payload. This covers impl/arch-defined arithmetic NaNs
+/// such as (+Inf)+(-Inf), whose bits differ across x86 vs ARM. `{"bits"}`
+/// operands stay bitwise-exact and array elements stay exact/positional (the
+/// render_expected path is unchanged for both). See
+/// cross-language-validation/README.md §"Float operand encoding".
+fn loose_nan_match(expected: &Value, mode: FloatMode, computed: &str) -> bool {
+    if mode == FloatMode::None {
+        return false;
+    }
+    // Expected must be a bare string label that parses to a NaN.
+    let Some(s) = expected.as_str() else {
+        return false;
+    };
+    if !parse_f32_label(s).is_nan() {
+        return false;
+    }
+    // Computed must itself be a NaN bit pattern (canonical "0x........").
+    computed
+        .strip_prefix("0x")
+        .or_else(|| computed.strip_prefix("0X"))
+        .and_then(|b| u32::from_str_radix(b, 16).ok())
+        .map(|bits| f32::from_bits(bits).is_nan())
+        .unwrap_or(false)
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -74,6 +104,8 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
             // Float label scalar (e.g. sum: "NaN", max: "NaN").
             format_f32(parse_f32_label(s))
         }
+        // Bits-escape float scalar (e.g. sum: {"bits":"0xffc00000"}).
+        Value::Object(_) if mode != FloatMode::None => format_f32(parse_f32(v)),
         Value::Array(arr) => {
             let parts: Vec<String> = arr
                 .iter()
@@ -96,13 +128,27 @@ fn element_to_f32(e: &Value) -> f32 {
     match e {
         Value::String(s) => parse_f32_label(s),
         Value::Number(n) => n.as_f64().unwrap() as f32,
+        // {"bits":"0x.."} escape inside an assertion array.
+        Value::Object(_) => parse_f32(e),
         _ => panic!("unexpected float array element: {:?}", e),
     }
 }
 
+// Q4 float operand encoding (see cross-language-validation/README.md
+// §"Float operand encoding"). A float operand is one of:
+//   * JSON number            -> the exact value
+//   * human-label string     -> "NaN"/"+NaN"/"-NaN", "Infinity"/"+Infinity"/
+//                               "-Infinity", "0.0"/"+0.0"/"-0.0", or a decimal
+//   * bits-escape object      -> {"bits":"0x........"} reinterpret 32 hex bits
 fn parse_f32(v: &Value) -> f32 {
     if let Some(s) = v.as_str() {
         parse_f32_label(s)
+    } else if let Some(obj) = v.as_object() {
+        if let Some(Value::String(hex)) = obj.get("bits") {
+            f32::from_bits(parse_f32_bits(hex))
+        } else {
+            panic!("expected {{\"bits\":\"0x..\"}} float object, got {:?}", v);
+        }
     } else if let Some(n) = v.as_f64() {
         n as f32
     } else {
@@ -110,16 +156,29 @@ fn parse_f32(v: &Value) -> f32 {
     }
 }
 
+/// Parse an exact 32-bit IEEE-754 pattern from a `0x`-prefixed, 8-hex-digit
+/// (case-insensitive) string. This is the canonical NaN-payload / signed-bit
+/// escape and also the canonical serialization for NaN and ±0.0.
+fn parse_f32_bits(hex: &str) -> u32 {
+    let body = hex
+        .strip_prefix("0x")
+        .or_else(|| hex.strip_prefix("0X"))
+        .unwrap_or_else(|| panic!("f32 bits literal must start with 0x: {:?}", hex));
+    assert_eq!(body.len(), 8, "f32 bits literal must be 8 hex digits: {:?}", hex);
+    u32::from_str_radix(body, 16).unwrap_or_else(|_| panic!("invalid f32 bits literal: {:?}", hex))
+}
+
+// Canonical, bit-faithful serialization. NaN (any sign/payload) and ±0.0
+// render as their 0x-hex bit pattern so distinct payloads and signed zeros
+// stay distinguishable and every port emits the identical string; finite and
+// infinite values keep their human-readable label (all ports agree on those).
 fn format_f32(v: f32) -> String {
-    if v.is_nan() {
-        "NaN".to_string()
+    if v.is_nan() || v == 0.0 {
+        format!("0x{:08x}", v.to_bits())
     } else if v == f32::INFINITY {
         "Infinity".to_string()
     } else if v == f32::NEG_INFINITY {
         "-Infinity".to_string()
-    } else if v == 0.0 && v.is_sign_negative() {
-        // ±0 are bit-pattern-distinct in this project; preserve the sign.
-        "-0.0".to_string()
     } else if v == v.trunc() && v.abs() < 1e16 {
         // Match Java/Go's "3.0" rendering for integer-valued floats.
         format!("{}.0", v as i64)
@@ -291,13 +350,12 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
         "size" => list.len().to_string(),
         "is_empty" => list.is_empty().to_string(),
         "sum" => {
-            // Wrapping i32 sum — matches Java/Go behaviour. The cross-language
-            // assertions rely on this; see scenarios/06-overflow/i32_sum_overflow.json.
-            let mut acc: i32 = 0;
-            for &v in list {
-                acc = acc.wrapping_add(v);
-            }
-            acc.to_string()
+            // List sum() widens into an i64 accumulator (IntList.sum(): long
+            // parity) and does NOT wrap at i32 — see algorithms.md "Integer
+            // overflow contract" and scenarios/06-overflow/i32_sum_overflow.json.
+            // Routed through the production ArrayList::inject_into fold.
+            let al = ArrayList::of(list.iter().copied());
+            al.inject_into(0i64, |a, &v| a + v as i64).to_string()
         }
         "inject_into_wrapping_product" | "product" => {
             let mut acc: i32 = 1;
@@ -325,8 +383,16 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
             v.sort();
             format_array(&v)
         }
-        "inject_into_sum" => list.iter().fold(0i64, |a, &v| a + v as i64).to_string(),
-        "inject_into_product" => list.iter().fold(1i64, |a, &v| a * v as i64).to_string(),
+        "inject_into_sum" => {
+            // injectInto with a + reduction accumulates in the i32 seed type
+            // and wraps two's-complement at i32 — via the production fold.
+            let al = ArrayList::of(list.iter().copied());
+            al.inject_into(0i32, |a, &v| a.wrapping_add(v)).to_string()
+        }
+        "inject_into_product" => {
+            let al = ArrayList::of(list.iter().copied());
+            al.inject_into(1i32, |a, &v| a.wrapping_mul(v)).to_string()
+        }
         _ if key.starts_with("get_at_") => {
             let idx: usize = key[7..].parse().unwrap();
             list.get(idx)
@@ -746,13 +812,22 @@ fn run_f32_hashmap(
     }
 }
 
+// Parse a human-label / decimal / hex-bits float string. Used both for
+// string operands and for assertion-key suffixes (get_-NaN, contains_0.0,
+// contains_0x7fc00001). Canonical NaN bits: +NaN=0x7FC00000, -NaN=0xFFC00000.
 fn parse_f32_label(s: &str) -> f32 {
     match s {
-        "NaN" => f32::NAN,
+        "NaN" | "+NaN" => f32::from_bits(0x7FC0_0000),
+        "-NaN" => f32::from_bits(0xFFC0_0000),
         "Infinity" | "+Infinity" => f32::INFINITY,
         "-Infinity" => f32::NEG_INFINITY,
+        "0.0" | "+0.0" => 0.0_f32,
+        "-0.0" => -0.0_f32,
         "pos_zero" => 0.0_f32,
         "neg_zero" => -0.0_f32,
+        other if other.starts_with("0x") || other.starts_with("0X") => {
+            f32::from_bits(parse_f32_bits(other))
+        }
         other => other.parse::<f32>().expect("invalid f32 literal in key"),
     }
 }

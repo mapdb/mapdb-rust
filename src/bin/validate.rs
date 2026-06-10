@@ -15,6 +15,7 @@
 
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
+use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -93,7 +94,12 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
         Value::Number(n) => {
             // f32 scalars (sum/min/max) under F32List render as floats; the
             // structural `size` count stays an integer even in float mode.
-            if mode == FloatMode::F32List && key != "size" {
+            // Under F32Keyed, the key-typed scalars min/max are also f32 and
+            // must render via the f32 formatter (matching TS), while other
+            // scalars (size, get_N, contains_N) stay i32.
+            let f32_scalar = (mode == FloatMode::F32List && key != "size")
+                || (mode == FloatMode::F32Keyed && (key == "min" || key == "max"));
+            if f32_scalar {
                 format_f32(n.as_f64().unwrap() as f32)
             } else {
                 // i32 scalar (None) or i32 map value under F32Keyed.
@@ -217,6 +223,7 @@ fn main() {
         "TreeMap<i32, i32>" => run_treemap(name, operations, assertions),
         "HashMap<f32, i32>" => run_f32_hashmap(name, operations, assertions),
         "HashSet<f32>" => run_f32_hashset(name, operations, assertions),
+        "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
         "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
         other => {
             eprintln!("unsupported collection type: {}", other);
@@ -869,6 +876,64 @@ fn run_f32_hashset(
                 v.sort();
                 let parts: Vec<String> = v
                     .into_iter()
+                    .map(|x| format!("\"{}\"", format_f32(x.0)))
+                    .collect();
+                format!("[{}]", parts.join(","))
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
+    }
+}
+
+// ---- TreeSet<f32> ---------------------------------------------------------
+
+// Routes through the PRODUCTION object::TreeSet ordered by the natural
+// comparator over HashableF32 (whose Ord is f32::total_cmp). Sorted output is
+// the tree's in-order traversal — NEVER sorted in the runner — so this
+// exercises the production float total-order comparator directly.
+fn run_f32_treeset(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let mut set: TreeSet<HashableF32> = TreeSet::new(natural_comparator::<HashableF32>());
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "add" => {
+                set.add(HashableF32(parse_f32(&op["value"])));
+            }
+            "remove" => {
+                set.remove(&HashableF32(parse_f32(&op["value"])));
+            }
+            "clear" => set.clear(),
+            other => panic!("unknown f32-treeset op: {}", other),
+        }
+    }
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let val = match key.as_str() {
+            "size" => set.len().to_string(),
+            "is_empty" => set.is_empty().to_string(),
+            "min" => set
+                .min()
+                .map(|x| format_f32(x.0))
+                .unwrap_or_else(|| "null".into()),
+            "max" => set
+                .max()
+                .map(|x| format_f32(x.0))
+                .unwrap_or_else(|| "null".into()),
+            k if k.starts_with("contains_") => {
+                let raw = &k[9..];
+                let probe = HashableF32(parse_f32_label(raw));
+                set.contains(&probe).to_string()
+            }
+            "sorted" | "sorted_values" | "to_sorted_array" => {
+                // In-order traversal straight from the production tree.
+                let parts: Vec<String> = set
+                    .iter()
                     .map(|x| format!("\"{}\"", format_f32(x.0)))
                     .collect();
                 format!("[{}]", parts.join(","))

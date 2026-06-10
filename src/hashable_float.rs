@@ -171,4 +171,51 @@ mod tests {
         // total_cmp orders NaN positively (above +∞).
         assert!(a < nan);
     }
+
+    // NaN sign/payload ordering is verified natively here (NOT in the shared
+    // cross-language suite): in TypeScript all NaN bit patterns are a single
+    // ECMAScript language-level NaN, so an f32 NaN's SIGN and PAYLOAD are not
+    // cross-language-observable. These are the production-comparator behaviors
+    // phase 3 fixed.
+    #[test]
+    fn neg_nan_sorts_below_neg_infinity() {
+        // -NaN (0xffc00000) must sort BELOW -Infinity under total_cmp.
+        let neg_nan = HashableF32(f32::from_bits(0xffc0_0000));
+        let neg_inf = HashableF32(f32::NEG_INFINITY);
+        assert!(neg_nan < neg_inf);
+        // And below the most negative finite value.
+        let very_neg = HashableF32(f32::MIN);
+        assert!(neg_nan < very_neg);
+    }
+
+    #[test]
+    fn pos_nan_payloads_order_ascending() {
+        // Distinct positive NaN payloads order ascending by bit pattern, and
+        // both sort ABOVE +Infinity (the top of the total order).
+        let p0 = HashableF32(f32::from_bits(0x7fc0_0000));
+        let p1 = HashableF32(f32::from_bits(0x7fc0_0001));
+        let pos_inf = HashableF32(f32::INFINITY);
+        assert!(p0 < p1);
+        assert!(pos_inf < p0);
+        assert!(pos_inf < p1);
+    }
+
+    #[test]
+    fn f32_total_order_full_chain() {
+        // -NaN < -Inf < -finite < -0.0 < +0.0 < +finite < +Inf < +NaN
+        let chain = [
+            HashableF32(f32::from_bits(0xffc0_0000)), // -NaN
+            HashableF32(f32::NEG_INFINITY),
+            HashableF32(-3.0),
+            HashableF32(-0.0),
+            HashableF32(0.0),
+            HashableF32(2.0),
+            HashableF32(f32::INFINITY),
+            HashableF32(f32::from_bits(0x7fc0_0000)), // +NaN
+            HashableF32(f32::from_bits(0x7fc0_0001)), // +NaN, larger payload
+        ];
+        for w in chain.windows(2) {
+            assert!(w[0] < w[1], "expected {:?} < {:?}", w[0], w[1]);
+        }
+    }
 }

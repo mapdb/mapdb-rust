@@ -34,7 +34,10 @@ fn emit(scenario: &str, key: &str, computed: &str, expected: &Value, float_mode:
     println!("{}: {}", key, computed);
     let expected_str = render_expected(expected, key, float_mode);
     if computed != expected_str {
-        println!("FAIL {} {}: expected={} got={}", scenario, key, expected_str, computed);
+        println!(
+            "FAIL {} {}: expected={} got={}",
+            scenario, key, expected_str, computed
+        );
         ANY_FAIL.store(true, Ordering::Relaxed);
     }
 }
@@ -250,7 +253,11 @@ fn eval_map_assertion(key: &str, map: &OpenHashMap<i32, i32>) -> String {
 
 // ---- ArrayList<i32> -------------------------------------------------------
 
-fn run_arraylist(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_arraylist(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
     let mut list: Vec<i32> = Vec::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -684,7 +691,11 @@ fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
 
 // ---- HashMap<f32, i32> ----------------------------------------------------
 
-fn run_f32_hashmap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_hashmap(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
     let mut map: OpenHashMap<HashableF32, i32> = OpenHashMap::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -748,7 +759,11 @@ fn parse_f32_label(s: &str) -> f32 {
 
 // ---- HashSet<f32> ---------------------------------------------------------
 
-fn run_f32_hashset(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_hashset(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
     let mut set: OpenHashSet<HashableF32> = OpenHashSet::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -791,7 +806,11 @@ fn run_f32_hashset(scenario: &str, operations: &[Value], assertions: &serde_json
 
 // ---- ArrayList<f32> -------------------------------------------------------
 
-fn run_f32_arraylist(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_f32_arraylist(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
     let mut list: Vec<f32> = Vec::new();
     for op in operations {
         match op["op"].as_str().unwrap() {

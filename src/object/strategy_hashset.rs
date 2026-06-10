@@ -48,7 +48,10 @@ impl<T> HashSetWithStrategy<T> {
 
     /// Creates an empty set with pre-allocated capacity.
     pub fn with_capacity(strategy: HashingStrategy<T>, capacity: usize) -> Self {
-        let cap = next_pow2(capacity);
+        let cap = capacity
+            .max(DEFAULT_CAPACITY)
+            .checked_next_power_of_two()
+            .unwrap_or(usize::MAX);
         let mut entries = Vec::with_capacity(cap);
         for _ in 0..cap {
             entries.push(Entry::empty());
@@ -176,7 +179,11 @@ impl<T> HashSetWithStrategy<T> {
     // ── internal ────────────────────────────────────────────────────
 
     fn needs_resize(&self) -> bool {
-        (self.size + 1) * 4 > self.entries.len() * 3
+        // Grow strictly *below* the 0.75 load factor: the table must
+        // not hold `(size+1)` entries once that count reaches `cap*3/4`.
+        // `>=` (not `>`) ensures we grow when `cap*3 == (size+1)*4`
+        // exactly (e.g. the 12th insert into a capacity-16 table).
+        (self.size + 1) * 4 >= self.entries.len() * 3
     }
 
     fn resize(&mut self) {
@@ -225,20 +232,6 @@ impl<T: Clone> HashSetWithStrategy<T> {
     pub fn to_vec(&self) -> Vec<T> {
         self.iter().cloned().collect()
     }
-}
-
-fn next_pow2(n: usize) -> usize {
-    if n == 0 {
-        return DEFAULT_CAPACITY;
-    }
-    let mut v = n - 1;
-    v |= v >> 1;
-    v |= v >> 2;
-    v |= v >> 4;
-    v |= v >> 8;
-    v |= v >> 16;
-    v |= v >> 32;
-    v + 1
 }
 
 #[cfg(test)]
@@ -312,6 +305,37 @@ mod tests {
         for i in 0..1000 {
             assert!(s.contains(&format!("item_{}", i)));
         }
+    }
+
+    // Exercises the std `next_power_of_two()` capacity path (previously a
+    // hand-rolled `next_pow2` with an ungated `v >> 32` that panicked on
+    // 32-bit targets). A from-scratch grow drives the same code path.
+    #[test]
+    fn test_capacity_growth_via_next_power_of_two() {
+        let mut s = HashSetWithStrategy::new(string_hashing_strategy());
+        assert_eq!(s.entries.len(), 16);
+        for i in 0..200 {
+            s.add(format!("k{}", i));
+        }
+        assert!(s.entries.len() > 16);
+        assert!(s.entries.len().is_power_of_two());
+        assert_eq!(s.len(), 200);
+    }
+
+    // Spec: load factor must stay strictly below 0.75. With a capacity-16
+    // table, the 12th distinct entry (size would reach 12 == 16*0.75) must
+    // trigger a grow before it is stored.
+    #[test]
+    fn test_load_factor_strictly_below_three_quarters() {
+        let mut s = HashSetWithStrategy::new(string_hashing_strategy());
+        assert_eq!(s.entries.len(), 16);
+        for i in 0..11 {
+            s.add(format!("k{}", i));
+        }
+        assert_eq!(s.entries.len(), 16);
+        s.add("k11".to_string());
+        assert_eq!(s.entries.len(), 32);
+        assert_eq!(s.len(), 12);
     }
 
     #[test]

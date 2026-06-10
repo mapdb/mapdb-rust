@@ -133,7 +133,11 @@ impl<K, V> OpenHashMap<K, V> {
 
     #[inline]
     fn needs_resize(&self) -> bool {
-        (self.size + 1) * LOAD_FACTOR_DEN > self.cap() * LOAD_FACTOR_NUM
+        // Grow strictly *below* the 0.75 load factor: `>=` (not `>`) so
+        // the table grows when `cap*3 == (size+1)*4` exactly (e.g. the
+        // 12th insert into a capacity-16 table). Matches the
+        // `needed*4/3 + 1` form used by `try_reserve`.
+        (self.size + 1) * LOAD_FACTOR_DEN >= self.cap() * LOAD_FACTOR_NUM
     }
 }
 
@@ -405,7 +409,11 @@ impl<K> OpenHashSet<K> {
 
     #[inline]
     fn needs_resize(&self) -> bool {
-        (self.size + 1) * LOAD_FACTOR_DEN > self.entries.len() * LOAD_FACTOR_NUM
+        // Grow strictly *below* the 0.75 load factor: `>=` (not `>`) so
+        // the table grows when `cap*3 == (size+1)*4` exactly (e.g. the
+        // 12th insert into a capacity-16 table). Matches the
+        // `needed*4/3 + 1` form used by `try_reserve`.
+        (self.size + 1) * LOAD_FACTOR_DEN >= self.entries.len() * LOAD_FACTOR_NUM
     }
 }
 
@@ -618,6 +626,35 @@ mod tests {
         for i in 0..200 {
             assert_eq!(m.get(&i), Some(&(i * 10)));
         }
+    }
+
+    // Spec: load factor must stay strictly below 0.75. With a
+    // capacity-16 table, the 12th distinct entry (size would reach
+    // 12 == 16*0.75) must trigger a grow *before* it is stored.
+    #[test]
+    fn map_load_factor_strictly_below_three_quarters() {
+        let mut m = OpenHashMap::<i32, i32>::new();
+        assert_eq!(m.cap(), 16);
+        for i in 0..11 {
+            m.insert(i, i);
+        }
+        assert_eq!(m.cap(), 16);
+        m.insert(11, 11); // 12th insert
+        assert_eq!(m.cap(), 32);
+        assert_eq!(m.len(), 12);
+    }
+
+    #[test]
+    fn set_load_factor_strictly_below_three_quarters() {
+        let mut s = OpenHashSet::<i32>::new();
+        assert_eq!(s.entries.len(), 16);
+        for i in 0..11 {
+            s.add(i);
+        }
+        assert_eq!(s.entries.len(), 16);
+        s.add(11); // 12th insert
+        assert_eq!(s.entries.len(), 32);
+        assert_eq!(s.len(), 12);
     }
 
     #[test]

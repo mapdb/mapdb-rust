@@ -100,14 +100,14 @@ impl<T: Eq + Hash> HashBag<T> {
 
     pub fn top_occurrences(&self, n: usize) -> Vec<(&T, usize)> {
         let mut pairs: Vec<_> = self.counts.iter().map(|(v, &c)| (v, c)).collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        pairs.sort_by_key(|x| std::cmp::Reverse(x.1));
         pairs.truncate(n);
         pairs
     }
 
     pub fn bottom_occurrences(&self, n: usize) -> Vec<(&T, usize)> {
         let mut pairs: Vec<_> = self.counts.iter().map(|(v, &c)| (v, c)).collect();
-        pairs.sort_by(|a, b| a.1.cmp(&b.1));
+        pairs.sort_by_key(|x| x.1);
         pairs.truncate(n);
         pairs
     }
@@ -144,6 +144,27 @@ mod tests {
         assert_eq!(top[1].1, 2);
         let bot = bag.bottom_occurrences(1);
         assert_eq!(bot[0].1, 1);
+    }
+
+    // Regression: the clippy `unnecessary_sort_by` fix swapped `sort_by`
+    // for `sort_by_key`/`Reverse`. Both are stable sorts, so the count
+    // ordering must be unchanged: top_occurrences strictly descending by
+    // count, bottom_occurrences strictly ascending by count.
+    #[test]
+    fn test_occurrence_sort_order_unchanged() {
+        let bag = HashBag::of(vec!["a", "a", "a", "a", "b", "b", "b", "c", "c", "d"]);
+        // counts: a=4, b=3, c=2, d=1
+        let top = bag.top_occurrences(4);
+        let top_counts: Vec<usize> = top.iter().map(|(_, c)| *c).collect();
+        assert_eq!(top_counts, vec![4, 3, 2, 1]);
+
+        let bot = bag.bottom_occurrences(4);
+        let bot_counts: Vec<usize> = bot.iter().map(|(_, c)| *c).collect();
+        assert_eq!(bot_counts, vec![1, 2, 3, 4]);
+
+        // Truncation respects n.
+        assert_eq!(bag.top_occurrences(2).len(), 2);
+        assert_eq!(bag.bottom_occurrences(1).len(), 1);
     }
 
     #[test]

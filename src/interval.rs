@@ -59,8 +59,9 @@ impl_signed_prim_int!(i8, i16, i32, i64);
 ///   at `usize::MAX` if the count would otherwise wrap.
 /// - `contains` casts through `i64` first so the unsigned subtraction
 ///   preserves sign before wrapping.
-/// - `get(i)` widens to `i64` for `from + step * i` to dodge overflow
-///   at the boundary types (`i8`/`i16`/`i32`).
+/// - `get(i)` computes `from + step * i` in wrapping `u64` arithmetic
+///   (mod 2^64) and truncates back to `T`, per the spec wrapping overflow
+///   contract — never panics in debug, even for full-range `i64`.
 /// - `all()` iterates by index and calls `get`, never `current += step`
 ///   (which can wrap at the last step).
 /// - `reversed()` **panics** for `T::MIN` step: negating the minimum
@@ -181,14 +182,26 @@ impl<T: SignedPrimInt> Interval<T> {
         }
     }
 
-    /// `from + step * index`, computed in `i64` to dodge overflow at
-    /// the boundary types. Returns `None` for out-of-range indices.
+    /// `from + step * index`. Returns `None` for out-of-range indices.
+    ///
+    /// The arithmetic is **wrapping** (two's-complement), matching the
+    /// cross-language overflow contract in `algorithms.md` §"Interval
+    /// over signed integers": full-range `i64` intervals reach indices
+    /// far above `i64::MAX`, so `index` is widened through `u64` (a plain
+    /// `index as i64` cast would be lossy and an unchecked `+`/`*` would
+    /// panic in debug builds). `from + step * index` is computed modulo
+    /// `2^64` and re-narrowed to `T`.
     pub fn get(&self, index: usize) -> Option<T> {
         if index >= self.size() {
             return None;
         }
-        let v = self.from.to_i64() + self.step.to_i64() * (index as i64);
-        Some(T::from_i64_truncate(v))
+        // Compute `from + step * index (mod 2^64)`. `index as u64` is
+        // exact (usize fits in u64 on every target we support); the
+        // wrapping ops never panic and reproduce two's-complement wrap.
+        let from = self.from.to_i64() as u64;
+        let step = self.step.to_i64() as u64;
+        let v = from.wrapping_add(step.wrapping_mul(index as u64));
+        Some(T::from_i64_truncate(v as i64))
     }
 
     /// Iterates every element in interval order, by index (never by
@@ -369,6 +382,19 @@ mod tests {
         assert_eq!(iv.get(0), Some(i64::MIN));
         // Index 1 widens to i64 and adds step=1, giving i64::MIN+1.
         assert_eq!(iv.get(1), Some(i64::MIN + 1));
+        // High-index wrapping assertions only hold where usize is 64-bit
+        // (a plain `index as i64` cast + unchecked `+`/`*` would panic in
+        // debug; the u64 wrapping path computes `from + step*index mod 2^64`).
+        #[cfg(target_pointer_width = "64")]
+        {
+            // index = 1<<63 is above i64::MAX -> i64::MIN + (1<<63) = 0.
+            let high = 1usize << 63;
+            assert_eq!(iv.get(high), Some(0));
+            assert_eq!(iv.get(high + 1), Some(1));
+            // size caps at usize::MAX, so the last valid index is
+            // usize::MAX-1: i64::MIN + (2^64-2 mod 2^64) = i64::MAX - 1.
+            assert_eq!(iv.get(usize::MAX - 1), Some(i64::MAX - 1));
+        }
     }
 
     #[test]

@@ -33,3 +33,21 @@ removes or alters an existing public API. One line each, with rationale.
   `with`/`with_mut` closure-scoped access plus a raw `lock()`. A v2 redesign would make
   the guard the primary API (`Deref`/`DerefMut`, drop-`Sync` ergonomics) and likely drop
   the `with`/`with_mut` closure methods, which is source-breaking for existing callers.
+
+## Signature relaxations shipped in v1 (minor, with inference caveats)
+These were applied additively in Phase 7c because they follow `std` exactly and
+keep ordinary call sites compiling, but they DO alter public signatures, so they
+are recorded here for changelog completeness (not deferred to v2):
+- **`Borrow<Q>` on `get`/`contains_key`/`remove`** — generalized from `&K` to
+  `&Q where K: Borrow<Q>, Q: Hash + Eq + ?Sized` on `OpenHashMap`/`OpenHashSet`,
+  object `HashMap`/`HashSet`, and `HashBiMap` (fwd + inverse). `K: Borrow<K>`
+  keeps `map.get(&k)` compiling, but edge call sites that relied on the old
+  monomorphic signature (turbofish on the fn item, `m.get(&x.into())` with no
+  target type) may now need a type annotation. Std treats this relaxation as a
+  minor change.
+- **Inherent `iter()` vs the `MapIterable::iter` trait method** — the new
+  inherent `iter()` on the object maps returns a concrete iterator and shadows
+  the trait method (which returns `Box<dyn Iterator>`). `for` loops and
+  unannotated calls are unaffected; code with an explicit
+  `let it: Box<dyn Iterator<..>> = map.iter();` annotation now resolves to the
+  inherent method and must call the trait method by path instead.

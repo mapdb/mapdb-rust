@@ -17,6 +17,7 @@ use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
+use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -223,6 +224,8 @@ fn main() {
     match collection {
         "HashMap<i32, i32>" => run_hashmap(name, operations, assertions),
         "HashMap<i64, i32>" => run_i64_hashmap(name, operations, assertions),
+        "ListMultimap<i64, i32>" => run_i64_list_multimap(name, operations, assertions),
+        "SetMultimap<i64, i32>" => run_i64_set_multimap(name, operations, assertions),
         "ArrayList<i32>" => run_arraylist(name, operations, assertions),
         "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
         "HashBag<i32>" => run_hashbag(name, operations, assertions),
@@ -397,6 +400,79 @@ fn eval_i64_map_assertion(key: &str, map: &OpenHashMap<i64, i32>) -> String {
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
 }
+
+// ---- {List,Set}Multimap<i64, i32> ----------------------------------------
+
+// Unlike Go/TS/Zig (whose multimaps use a stdlib/builtin hash map), Rust's
+// Multimap/SetMultimap are built on the project OpenHashMap<i64, Vec<i32>>. That
+// map hashes keys with std's DefaultHasher (SipHash) and uses h.finish()
+// directly — no explicit high-bit fold (unlike Go/Zig's OpenHashMap), since
+// SipHash already mixes all bits. This runner verifies the same full-range i64
+// keys keep their identity (stay distinct and retrievable) — key identity, not
+// bucket-distribution quality.
+// Multimap (list) keeps duplicate values; SetMultimap dedups. Both expose the
+// same put / get(&k)->&[i32] / remove_all / contains_key / size_distinct / keys
+// surface, so a macro generates the two near-identical runners.
+//
+// Assertions (identical to the other ports):
+//   distinct_key_count -> distinct-key count (integer string)
+//   sorted_keys        -> DISTINCT keys, ascending i64, quoted decimal strings
+//                         (i64 keys exceed 2^53) — same as the i64-HashMap form
+//   get_<k>            -> values for the key, ascending-sorted i32 array (sort a
+//                         COPY); absent/removed => []
+//   contains_key_<k>   -> bool
+macro_rules! run_i64_multimap {
+    ($fn_name:ident, $ty:ty) => {
+        fn $fn_name(
+            scenario: &str,
+            operations: &[Value],
+            assertions: &serde_json::Map<String, Value>,
+        ) {
+            let mut map: $ty = <$ty>::new();
+            for op in operations {
+                match op["op"].as_str().unwrap() {
+                    "put" => {
+                        let k = parse_i64_operand(&op["key"]);
+                        let v = op["value"].as_i64().unwrap() as i32;
+                        map.put(k, v);
+                    }
+                    "removeAll" => {
+                        let k = parse_i64_operand(&op["key"]);
+                        map.remove_all(&k);
+                    }
+                    other => panic!("unknown i64-multimap op: {}", other),
+                }
+            }
+            for (key, expected) in assertions {
+                if key == "comment" {
+                    continue;
+                }
+                let computed = if key == "distinct_key_count" {
+                    map.size_distinct().to_string()
+                } else if key == "sorted_keys" {
+                    let mut ks: Vec<i64> = map.keys().copied().collect();
+                    ks.sort();
+                    let parts: Vec<String> = ks.iter().map(|k| format!("\"{}\"", k)).collect();
+                    format!("[{}]", parts.join(","))
+                } else if let Some(rest) = key.strip_prefix("get_") {
+                    let k: i64 = rest.parse().unwrap();
+                    let mut vals: Vec<i32> = map.get(&k).to_vec();
+                    vals.sort();
+                    format_array(&vals)
+                } else if let Some(rest) = key.strip_prefix("contains_key_") {
+                    let k: i64 = rest.parse().unwrap();
+                    map.contains_key(&k).to_string()
+                } else {
+                    format!("UNKNOWN_ASSERTION:{}", key)
+                };
+                emit(scenario, key, &computed, expected, FloatMode::None);
+            }
+        }
+    };
+}
+
+run_i64_multimap!(run_i64_list_multimap, Multimap<i64, i32>);
+run_i64_multimap!(run_i64_set_multimap, SetMultimap<i64, i32>);
 
 // ---- ArrayList<i32> -------------------------------------------------------
 

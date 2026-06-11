@@ -185,7 +185,10 @@ impl<K: Eq + Hash, V> Extend<(K, V)> for HashMap<K, V> {
 impl<K: Eq + Hash, V: PartialEq> PartialEq for HashMap<K, V> {
     fn eq(&self, other: &Self) -> bool {
         self.inner.len() == other.inner.len()
-            && self.inner.iter().all(|(k, v)| other.inner.get(k) == Some(v))
+            && self
+                .inner
+                .iter()
+                .all(|(k, v)| other.inner.get(k) == Some(v))
     }
 }
 

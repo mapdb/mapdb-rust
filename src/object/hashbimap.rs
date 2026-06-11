@@ -213,7 +213,10 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> Extend<(K, V)> for HashBiMap<K,
 impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> PartialEq for HashBiMap<K, V> {
     fn eq(&self, other: &Self) -> bool {
         self.forward.len() == other.forward.len()
-            && self.forward.iter().all(|(k, v)| other.forward.get(k) == Some(v))
+            && self
+                .forward
+                .iter()
+                .all(|(k, v)| other.forward.get(k) == Some(v))
     }
 }
 

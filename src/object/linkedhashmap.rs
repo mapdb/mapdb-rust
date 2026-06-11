@@ -150,10 +150,7 @@ impl<K: Eq + Hash + Clone, V> LinkedHashMap<K, V> {
 
 impl<'a, K: Eq + Hash + Clone, V> IntoIterator for &'a LinkedHashMap<K, V> {
     type Item = (&'a K, &'a V);
-    type IntoIter = std::iter::Map<
-        std::slice::Iter<'a, (K, V)>,
-        fn(&'a (K, V)) -> (&'a K, &'a V),
-    >;
+    type IntoIter = std::iter::Map<std::slice::Iter<'a, (K, V)>, fn(&'a (K, V)) -> (&'a K, &'a V)>;
     fn into_iter(self) -> Self::IntoIter {
         self.entries.iter().map(|(k, v)| (k, v))
     }
@@ -161,10 +158,8 @@ impl<'a, K: Eq + Hash + Clone, V> IntoIterator for &'a LinkedHashMap<K, V> {
 
 impl<'a, K: Eq + Hash + Clone, V> IntoIterator for &'a mut LinkedHashMap<K, V> {
     type Item = (&'a K, &'a mut V);
-    type IntoIter = std::iter::Map<
-        std::slice::IterMut<'a, (K, V)>,
-        fn(&'a mut (K, V)) -> (&'a K, &'a mut V),
-    >;
+    type IntoIter =
+        std::iter::Map<std::slice::IterMut<'a, (K, V)>, fn(&'a mut (K, V)) -> (&'a K, &'a mut V)>;
     fn into_iter(self) -> Self::IntoIter {
         self.entries.iter_mut().map(|(k, v)| (&*k, v))
     }
@@ -198,10 +193,7 @@ impl<K: Eq + Hash + Clone, V> Extend<(K, V)> for LinkedHashMap<K, V> {
 impl<K: Eq + Hash + Clone, V: PartialEq> PartialEq for LinkedHashMap<K, V> {
     fn eq(&self, other: &Self) -> bool {
         self.entries.len() == other.entries.len()
-            && self
-                .entries
-                .iter()
-                .all(|(k, v)| other.get(k) == Some(v))
+            && self.entries.iter().all(|(k, v)| other.get(k) == Some(v))
     }
 }
 

@@ -15,8 +15,8 @@
 
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
-use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::object::{natural_comparator, TreeSet};
+use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -171,7 +171,12 @@ fn parse_f32_bits(hex: &str) -> u32 {
         .strip_prefix("0x")
         .or_else(|| hex.strip_prefix("0X"))
         .unwrap_or_else(|| panic!("f32 bits literal must start with 0x: {:?}", hex));
-    assert_eq!(body.len(), 8, "f32 bits literal must be 8 hex digits: {:?}", hex);
+    assert_eq!(
+        body.len(),
+        8,
+        "f32 bits literal must be 8 hex digits: {:?}",
+        hex
+    );
     u32::from_str_radix(body, 16).unwrap_or_else(|_| panic!("invalid f32 bits literal: {:?}", hex))
 }
 
@@ -1064,7 +1069,8 @@ fn run_f32_arraylist(
                 } else {
                     sorted.iter().last()
                 };
-                pick.map(|v| format_f32(v.0)).unwrap_or_else(|| "null".into())
+                pick.map(|v| format_f32(v.0))
+                    .unwrap_or_else(|| "null".into())
             }
             "sorted" | "to_sorted_array" => {
                 // Sort a COPY through the production total-order Sort() so the

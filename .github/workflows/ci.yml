@@ -1,0 +1,44 @@
+# CI: format, build, test, and clippy.
+#
+# mapdb-rust is hand-written generics (no code generation), so there is no
+# codegen drift gate like the Go/TS ports — the gates here are the standard
+# Rust quality bars: `cargo fmt --check` (formatting), `cargo build` +
+# `cargo test` (the ~278-test suite), and `cargo clippy -D warnings` (lints as
+# errors). The default build is dependency-free; the validation harness binaries
+# live behind the `validation` feature, so they get their own build step.
+
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Build
+        run: cargo build --all-targets
+
+      - name: Test
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build validation harness
+        run: cargo build --features validation --bins

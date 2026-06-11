@@ -5,6 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
+use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -55,22 +56,45 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> HashBiMap<K, V> {
         old
     }
 
-    pub fn get(&self, key: &K) -> Option<&V> {
+    /// Looks up a value by any borrowed form of the key (`K: Borrow<Q>`),
+    /// e.g. `bimap.get("str")` on a `HashBiMap<String, _>`.
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.forward.get(key)
     }
 
-    pub fn get_inverse(&self, value: &V) -> Option<&K> {
+    /// Reverse lookup by any borrowed form of the value (`V: Borrow<Q>`).
+    pub fn get_inverse<Q>(&self, value: &Q) -> Option<&K>
+    where
+        V: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.inverse.get(value)
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.forward.contains_key(key)
     }
-    pub fn contains_value(&self, value: &V) -> bool {
+    pub fn contains_value<Q>(&self, value: &Q) -> bool
+    where
+        V: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.inverse.contains_key(value)
     }
 
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if let Some(v) = self.forward.remove(key) {
             self.inverse.remove(&v);
             Some(v)
@@ -79,7 +103,11 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> HashBiMap<K, V> {
         }
     }
 
-    pub fn remove_inverse(&mut self, value: &V) -> Option<K> {
+    pub fn remove_inverse<Q>(&mut self, value: &Q) -> Option<K>
+    where
+        V: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if let Some(k) = self.inverse.remove(value) {
             self.forward.remove(&k);
             Some(k)
@@ -146,9 +174,66 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> Default for HashBiMap<K, V> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+
+impl<'a, K: Eq + Hash + Clone, V: Eq + Hash + Clone> IntoIterator for &'a HashBiMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::collections::hash_map::Iter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.forward.iter()
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> IntoIterator for HashBiMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::hash_map::IntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.forward.into_iter()
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> FromIterator<(K, V)> for HashBiMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut m = Self::new();
+        m.extend(iter);
+        m
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> Extend<(K, V)> for HashBiMap<K, V> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.put(k, v);
+        }
+    }
+}
+
+/// Order-insensitive equality on the forward mapping (the bijection invariant
+/// makes the inverse follow).
+impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> PartialEq for HashBiMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.forward.len() == other.forward.len()
+            && self.forward.iter().all(|(k, v)| other.forward.get(k) == Some(v))
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> Eq for HashBiMap<K, V> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrow_lookup_str_on_string_key() {
+        let mut bm: HashBiMap<String, i32> = HashBiMap::new();
+        bm.put("alpha".to_string(), 1);
+        // get/contains_key/remove accept a borrowed form of the key (&str)
+        assert_eq!(bm.get("alpha"), Some(&1));
+        assert!(bm.contains_key("alpha"));
+        assert!(!bm.contains_key("missing"));
+        assert_eq!(bm.remove("alpha"), Some(1));
+        assert!(bm.get("alpha").is_none());
+    }
 
     #[test]
     fn test_basic() {
@@ -203,5 +288,22 @@ mod tests {
         let inv = bm.inverse();
         assert_eq!(inv.get(&1), Some(&"a"));
         assert_eq!(inv.get(&2), Some(&"b"));
+    }
+
+    #[test]
+    fn test_into_iter_and_collect() {
+        let bm: HashBiMap<&str, i32> = [("a", 1), ("b", 2)].into_iter().collect();
+        let sum: i32 = (&bm).into_iter().map(|(_, v)| *v).sum();
+        assert_eq!(sum, 3);
+        let owned: i32 = bm.into_iter().map(|(_, v)| v).sum();
+        assert_eq!(owned, 3);
+    }
+
+    #[test]
+    fn test_extend_and_eq() {
+        let mut bm = HashBiMap::new();
+        bm.extend([("a", 1), ("b", 2)]);
+        let other: HashBiMap<&str, i32> = [("b", 2), ("a", 1)].into_iter().collect();
+        assert_eq!(bm, other);
     }
 }

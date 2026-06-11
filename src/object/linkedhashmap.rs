@@ -138,6 +138,75 @@ impl<K: Eq + Hash + Clone, V> Default for LinkedHashMap<K, V> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+
+impl<K: Eq + Hash + Clone, V> LinkedHashMap<K, V> {
+    /// Mutable iterator over `(&K, &mut V)` in insertion order. Keys are not
+    /// exposed mutably, so the hash index and ordering invariants are safe.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    }
+}
+
+impl<'a, K: Eq + Hash + Clone, V> IntoIterator for &'a LinkedHashMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = std::iter::Map<
+        std::slice::Iter<'a, (K, V)>,
+        fn(&'a (K, V)) -> (&'a K, &'a V),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter().map(|(k, v)| (k, v))
+    }
+}
+
+impl<'a, K: Eq + Hash + Clone, V> IntoIterator for &'a mut LinkedHashMap<K, V> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = std::iter::Map<
+        std::slice::IterMut<'a, (K, V)>,
+        fn(&'a mut (K, V)) -> (&'a K, &'a mut V),
+    >;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter_mut().map(|(k, v)| (&*k, v))
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> IntoIterator for LinkedHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::vec::IntoIter<(K, V)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> FromIterator<(K, V)> for LinkedHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut m = Self::new();
+        m.extend(iter);
+        m
+    }
+}
+
+impl<K: Eq + Hash + Clone, V> Extend<(K, V)> for LinkedHashMap<K, V> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+/// Order-insensitive map equality: same keys mapping to equal values.
+impl<K: Eq + Hash + Clone, V: PartialEq> PartialEq for LinkedHashMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries.len() == other.entries.len()
+            && self
+                .entries
+                .iter()
+                .all(|(k, v)| other.get(k) == Some(v))
+    }
+}
+
+impl<K: Eq + Hash + Clone, V: Eq> Eq for LinkedHashMap<K, V> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,5 +289,39 @@ mod tests {
         m.insert(1, 10);
         m.clear();
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_into_iter_ref_mut_owned() {
+        let mut m = LinkedHashMap::new();
+        m.insert("a", 1);
+        m.insert("b", 2);
+        let pairs: Vec<(&&str, &i32)> = (&m).into_iter().collect();
+        assert_eq!(pairs, vec![(&"a", &1), (&"b", &2)]);
+        for (_k, v) in &mut m {
+            *v *= 10;
+        }
+        let owned: Vec<(&str, i32)> = m.into_iter().collect();
+        assert_eq!(owned, vec![("a", 10), ("b", 20)]);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut m: LinkedHashMap<&str, i32> = [("a", 1), ("b", 2)].into_iter().collect();
+        assert_eq!(m.len(), 2);
+        m.extend([("c", 3)]);
+        let keys = m.keys_to_vec();
+        assert_eq!(keys, vec![&"a", &"b", &"c"]);
+    }
+
+    #[test]
+    fn test_partial_eq_order_insensitive() {
+        let mut a = LinkedHashMap::new();
+        a.insert(1, 10);
+        a.insert(2, 20);
+        let mut b = LinkedHashMap::new();
+        b.insert(2, 20);
+        b.insert(1, 10);
+        assert_eq!(a, b);
     }
 }

@@ -63,6 +63,11 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         self.size
     }
 
+    /// Idiomatic alias of [`size`](Self::size) — total number of values.
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
     pub fn size_distinct(&self) -> usize {
         self.data.len()
     }
@@ -147,6 +152,15 @@ impl<K: Eq + Hash, V> Default for Multimap<K, V> {
     }
 }
 
+/// Borrowing iteration over flattened `(&K, &V)` pairs (one per stored value).
+impl<'a, K: Eq + Hash, V> IntoIterator for &'a Multimap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Box<dyn Iterator<Item = (&'a K, &'a V)> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
+    }
+}
+
 impl<K: Eq + Hash + fmt::Display, V: fmt::Display> fmt::Display for Multimap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
@@ -227,5 +241,23 @@ mod tests {
         let mut m = Multimap::new();
         m.put(1, "a");
         assert!(!m.to_string().is_empty());
+    }
+
+    #[test]
+    fn test_len_alias() {
+        let mut m = Multimap::new();
+        m.put(1, "a");
+        m.put(1, "b");
+        assert_eq!(m.len(), m.size());
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn test_into_iter_borrowing() {
+        let mut m = Multimap::new();
+        m.put(1, "a");
+        m.put(1, "b");
+        m.put(2, "c");
+        assert_eq!((&m).into_iter().count(), 3);
     }
 }

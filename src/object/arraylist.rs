@@ -132,6 +132,44 @@ impl<T> IntoIterator for ArrayList<T> {
     }
 }
 
+impl<'a, T> IntoIterator for &'a ArrayList<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut ArrayList<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter_mut()
+    }
+}
+
+impl<T> FromIterator<T> for ArrayList<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        ArrayList {
+            items: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T> Extend<T> for ArrayList<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.items.extend(iter);
+    }
+}
+
+impl<T> ArrayList<T> {
+    /// Mutable iterator over the backing elements, so `for x in &mut list` and
+    /// `list.iter_mut()` both work.
+    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, T> {
+        self.items.iter_mut()
+    }
+}
+
 impl<T: PartialEq> Default for ArrayList<T> {
     fn default() -> Self {
         Self::new()
@@ -197,5 +235,33 @@ mod tests {
         assert!(list.remove(&10));
         assert!(!list.remove(&10));
         assert_eq!(list.len(), 2);
+    }
+
+    #[test]
+    fn test_into_iter_ref_and_mut() {
+        let mut list = ArrayList::of(vec![1, 2, 3]);
+        let sum: i32 = (&list).into_iter().sum();
+        assert_eq!(sum, 6);
+        for v in &mut list {
+            *v *= 10;
+        }
+        assert_eq!(list.to_vec(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut list: ArrayList<i32> = (1..=3).collect();
+        assert_eq!(list.to_vec(), vec![1, 2, 3]);
+        list.extend([4, 5]);
+        assert_eq!(list.to_vec(), vec![1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn test_partial_eq_order_sensitive() {
+        let a = ArrayList::of(vec![1, 2, 3]);
+        let b = ArrayList::of(vec![1, 2, 3]);
+        let c = ArrayList::of(vec![3, 2, 1]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

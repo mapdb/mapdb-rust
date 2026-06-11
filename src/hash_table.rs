@@ -15,6 +15,7 @@
 //! [`crate::hashable_float::HashableF32`] / [`crate::hashable_float::HashableF64`]
 //! to get bit-pattern hashing (NaN-aware, ±0 distinct).
 
+use std::borrow::Borrow;
 use std::hash::{Hash, Hasher};
 
 const DEFAULT_CAPACITY: usize = 16;
@@ -63,7 +64,7 @@ impl<K> Default for SetEntry<K> {
 // (e.g. FxHash) behind a feature flag, but DefaultHasher is the safe default
 // and matches what `std::HashMap` uses out of the box.
 #[inline]
-fn spread<K: Hash>(key: &K) -> u64 {
+fn spread<K: Hash + ?Sized>(key: &K) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     key.hash(&mut h);
     h.finish()
@@ -167,7 +168,15 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
     }
 
     /// Borrows the value for `key`.
-    pub fn get<'a>(&'a self, key: &K) -> Option<&'a V> {
+    ///
+    /// Accepts any borrowed form `&Q` of the key (`K: Borrow<Q>`), so a
+    /// `OpenHashMap<String, _>` can be queried with `&str`. Existing `&K`
+    /// callers continue to work because `K: Borrow<K>` always holds.
+    pub fn get<'a, Q>(&'a self, key: &Q) -> Option<&'a V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.size == 0 {
             return None;
         }
@@ -178,14 +187,18 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             if !e.occupied {
                 return None;
             }
-            if e.key.as_ref().unwrap() == key {
+            if e.key.as_ref().unwrap().borrow() == key {
                 return e.value.as_ref();
             }
             idx = (idx + 1) & mask;
         }
     }
 
-    pub fn get_mut<'a>(&'a mut self, key: &K) -> Option<&'a mut V> {
+    pub fn get_mut<'a, Q>(&'a mut self, key: &Q) -> Option<&'a mut V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.size == 0 {
             return None;
         }
@@ -195,19 +208,27 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             if !self.entries[idx].occupied {
                 return None;
             }
-            if self.entries[idx].key.as_ref().unwrap() == key {
+            if self.entries[idx].key.as_ref().unwrap().borrow() == key {
                 return self.entries[idx].value.as_mut();
             }
             idx = (idx + 1) & mask;
         }
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         self.get(key).is_some()
     }
 
     /// Removes the key. Returns the old value if present.
-    pub fn remove(&mut self, key: &K) -> Option<V> {
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.size == 0 {
             return None;
         }
@@ -217,7 +238,7 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             if !self.entries[idx].occupied {
                 return None;
             }
-            if self.entries[idx].key.as_ref().unwrap() == key {
+            if self.entries[idx].key.as_ref().unwrap().borrow() == key {
                 let mut taken = std::mem::take(&mut self.entries[idx]);
                 self.size -= 1;
                 self.rehash_from(idx);
@@ -440,7 +461,11 @@ impl<K: Hash + Eq> OpenHashSet<K> {
         }
     }
 
-    pub fn contains(&self, value: &K) -> bool {
+    pub fn contains<Q>(&self, value: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.size == 0 {
             return false;
         }
@@ -451,14 +476,18 @@ impl<K: Hash + Eq> OpenHashSet<K> {
             if !e.occupied {
                 return false;
             }
-            if e.key.as_ref().unwrap() == value {
+            if e.key.as_ref().unwrap().borrow() == value {
                 return true;
             }
             idx = (idx + 1) & mask;
         }
     }
 
-    pub fn remove(&mut self, value: &K) -> bool {
+    pub fn remove<Q>(&mut self, value: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
         if self.size == 0 {
             return false;
         }
@@ -468,7 +497,7 @@ impl<K: Hash + Eq> OpenHashSet<K> {
             if !self.entries[idx].occupied {
                 return false;
             }
-            if self.entries[idx].key.as_ref().unwrap() == value {
+            if self.entries[idx].key.as_ref().unwrap().borrow() == value {
                 self.entries[idx] = SetEntry::default();
                 self.size -= 1;
                 self.rehash_from(idx);
@@ -594,6 +623,134 @@ impl<'a, K> Iterator for OpenHashSetIter<'a, K> {
 }
 
 // ---------------------------------------------------------------------------
+// Standard-library trait impls (additive idiom layer)
+// ---------------------------------------------------------------------------
+
+impl<'a, K: Hash + Eq, V> IntoIterator for &'a OpenHashMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = OpenHashMapIter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Owning iterator over an `OpenHashMap`'s `(K, V)` pairs (unspecified order).
+pub struct OpenHashMapIntoIter<K, V> {
+    inner: std::vec::IntoIter<MapEntry<K, V>>,
+}
+
+impl<K, V> Iterator for OpenHashMapIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<Self::Item> {
+        for mut e in self.inner.by_ref() {
+            if e.occupied {
+                return Some((e.key.take().unwrap(), e.value.take().unwrap()));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> IntoIterator for OpenHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = OpenHashMapIntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        OpenHashMapIntoIter {
+            inner: self.entries.into_iter(),
+        }
+    }
+}
+
+impl<K: Hash + Eq, V> FromIterator<(K, V)> for OpenHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut m = OpenHashMap::new();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+}
+
+impl<K: Hash + Eq, V> Extend<(K, V)> for OpenHashMap<K, V> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
+/// Order-insensitive equality: same length and every key maps to an equal value.
+impl<K: Hash + Eq, V: PartialEq> PartialEq for OpenHashMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|(k, v)| other.get(k) == Some(v))
+    }
+}
+
+impl<K: Hash + Eq, V: Eq> Eq for OpenHashMap<K, V> {}
+
+impl<'a, K: Hash + Eq> IntoIterator for &'a OpenHashSet<K> {
+    type Item = &'a K;
+    type IntoIter = OpenHashSetIter<'a, K>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// Owning iterator over an `OpenHashSet`'s elements (unspecified order).
+pub struct OpenHashSetIntoIter<K> {
+    inner: std::vec::IntoIter<SetEntry<K>>,
+}
+
+impl<K> Iterator for OpenHashSetIntoIter<K> {
+    type Item = K;
+    fn next(&mut self) -> Option<Self::Item> {
+        for mut e in self.inner.by_ref() {
+            if e.occupied {
+                return Some(e.key.take().unwrap());
+            }
+        }
+        None
+    }
+}
+
+impl<K> IntoIterator for OpenHashSet<K> {
+    type Item = K;
+    type IntoIter = OpenHashSetIntoIter<K>;
+    fn into_iter(self) -> Self::IntoIter {
+        OpenHashSetIntoIter {
+            inner: self.entries.into_iter(),
+        }
+    }
+}
+
+impl<K: Hash + Eq> FromIterator<K> for OpenHashSet<K> {
+    fn from_iter<I: IntoIterator<Item = K>>(iter: I) -> Self {
+        let mut s = OpenHashSet::new();
+        for k in iter {
+            s.add(k);
+        }
+        s
+    }
+}
+
+impl<K: Hash + Eq> Extend<K> for OpenHashSet<K> {
+    fn extend<I: IntoIterator<Item = K>>(&mut self, iter: I) {
+        for k in iter {
+            self.add(k);
+        }
+    }
+}
+
+/// Order-insensitive equality: same length and every element is present in both.
+impl<K: Hash + Eq> PartialEq for OpenHashSet<K> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.iter().all(|k| other.contains(k))
+    }
+}
+
+impl<K: Hash + Eq> Eq for OpenHashSet<K> {}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -601,6 +758,32 @@ impl<'a, K> Iterator for OpenHashSetIter<'a, K> {
 mod tests {
     use super::*;
     use crate::hashable_float::{HashableF32, HashableF64};
+
+    #[test]
+    fn open_hash_map_partial_eq_order_insensitive() {
+        let mut a = OpenHashMap::<i32, i32>::new();
+        a.insert(1, 10);
+        a.insert(2, 20);
+        let mut b = OpenHashMap::<i32, i32>::new();
+        b.insert(2, 20);
+        b.insert(1, 10);
+        assert_eq!(a, b);
+        b.insert(2, 99);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn open_hash_set_partial_eq_order_insensitive() {
+        let mut a = OpenHashSet::<i32>::new();
+        a.add(1);
+        a.add(2);
+        let mut b = OpenHashSet::<i32>::new();
+        b.add(2);
+        b.add(1);
+        assert_eq!(a, b);
+        b.add(3);
+        assert_ne!(a, b);
+    }
 
     #[test]
     fn map_insert_get_remove() {
@@ -944,5 +1127,39 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m.get(&HashableF32(nan1)), Some(&1));
         assert_eq!(m.get(&HashableF32(nan2)), Some(&2));
+    }
+
+    #[test]
+    fn borrow_lookup_string_key() {
+        let mut m = OpenHashMap::<String, i32>::new();
+        m.insert("hello".to_string(), 1);
+        // Query a String-keyed map with &str via Borrow.
+        assert_eq!(m.get("hello"), Some(&1));
+        assert!(m.contains_key("hello"));
+        assert_eq!(m.remove("hello"), Some(1));
+
+        let mut s = OpenHashSet::<String>::new();
+        s.add("world".to_string());
+        assert!(s.contains("world"));
+        assert!(s.remove("world"));
+    }
+
+    #[test]
+    fn into_iter_from_iter_extend() {
+        let mut m: OpenHashMap<i32, i32> = [(1, 10), (2, 20)].into_iter().collect();
+        let borrowed: i32 = (&m).into_iter().map(|(_, v)| *v).sum();
+        assert_eq!(borrowed, 30);
+        m.extend([(3, 30)]);
+        assert_eq!(m.len(), 3);
+        let mut owned: Vec<(i32, i32)> = m.into_iter().collect();
+        owned.sort();
+        assert_eq!(owned, vec![(1, 10), (2, 20), (3, 30)]);
+
+        let s: OpenHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let set_sum: i32 = (&s).into_iter().sum();
+        assert_eq!(set_sum, 6);
+        let mut set_owned: Vec<i32> = s.into_iter().collect();
+        set_owned.sort();
+        assert_eq!(set_owned, vec![1, 2, 3]);
     }
 }

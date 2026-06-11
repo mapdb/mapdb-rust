@@ -227,6 +227,33 @@ impl PartialEq for BitSet {
 
 impl Eq for BitSet {}
 
+/// Iterator over the indices of the set bits, ascending.
+pub struct BitSetIter<'a> {
+    bitset: &'a BitSet,
+    next: Option<usize>,
+}
+
+impl Iterator for BitSetIter<'_> {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        let bit = self.next?;
+        self.next = self.bitset.next_set_bit(bit + 1);
+        Some(bit)
+    }
+}
+
+/// Iterates the indices of the set bits, ascending: `for i in &bitset`.
+impl<'a> IntoIterator for &'a BitSet {
+    type Item = usize;
+    type IntoIter = BitSetIter<'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        BitSetIter {
+            bitset: self,
+            next: self.next_set_bit(0),
+        }
+    }
+}
+
 impl fmt::Display for BitSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
@@ -389,5 +416,21 @@ mod tests {
         assert_eq!(format!("{}", a), "{1, 3, 5}");
         let empty = BitSet::new();
         assert_eq!(format!("{}", empty), "{}");
+    }
+
+    #[test]
+    fn into_iter_yields_set_bit_indices() {
+        let mut b = BitSet::new();
+        for i in [0usize, 5, 63, 64, 200] {
+            b.set(i);
+        }
+        let collected: Vec<usize> = (&b).into_iter().collect();
+        assert_eq!(collected, vec![0, 5, 63, 64, 200]);
+        // Works in a for loop too.
+        let mut sum = 0;
+        for i in &b {
+            sum += i;
+        }
+        assert_eq!(sum, 5 + 63 + 64 + 200);
     }
 }

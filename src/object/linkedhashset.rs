@@ -134,6 +134,48 @@ impl<T: Eq + Hash + Clone> Default for LinkedHashSet<T> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+
+impl<'a, T: Eq + Hash + Clone> IntoIterator for &'a LinkedHashSet<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl<T: Eq + Hash + Clone> IntoIterator for LinkedHashSet<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<T: Eq + Hash + Clone> FromIterator<T> for LinkedHashSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::of(iter)
+    }
+}
+
+impl<T: Eq + Hash + Clone> Extend<T> for LinkedHashSet<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.add(v);
+        }
+    }
+}
+
+/// Order-insensitive set equality (same element set, ordering ignored).
+impl<T: Eq + Hash + Clone> PartialEq for LinkedHashSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries.len() == other.entries.len()
+            && self.entries.iter().all(|v| other.index.contains_key(v))
+    }
+}
+
+impl<T: Eq + Hash + Clone> Eq for LinkedHashSet<T> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -195,5 +237,32 @@ mod tests {
         let mut s = LinkedHashSet::of(vec![1, 2]);
         s.clear();
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn test_into_iter_insertion_order() {
+        let s = LinkedHashSet::of(vec![3, 1, 2]);
+        let borrowed: Vec<i32> = (&s).into_iter().copied().collect();
+        assert_eq!(borrowed, vec![3, 1, 2]);
+        let owned: Vec<i32> = s.into_iter().collect();
+        assert_eq!(owned, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut s: LinkedHashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(s.len(), 3);
+        s.extend([3, 4]);
+        let v: Vec<&i32> = s.iter().collect();
+        assert_eq!(v, vec![&1, &2, &3, &4]);
+    }
+
+    #[test]
+    fn test_partial_eq_order_insensitive() {
+        let a = LinkedHashSet::of(vec![1, 2, 3]);
+        let b = LinkedHashSet::of(vec![3, 2, 1]);
+        assert_eq!(a, b);
+        let c = LinkedHashSet::of(vec![1, 2, 4]);
+        assert_ne!(a, c);
     }
 }

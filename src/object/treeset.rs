@@ -98,6 +98,32 @@ impl<T> TreeSet<T> {
     }
 }
 
+/// Sorted-order iterator over a `TreeSet`'s elements.
+pub struct TreeSetIter<'a, T> {
+    inner: super::treemap::TreeMapIter<'a, T, ()>,
+}
+
+impl<'a, T> Iterator for TreeSetIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        self.inner.next().map(|(k, _)| k)
+    }
+}
+
+/// Borrowing iteration in sorted order: `for x in &set`.
+///
+/// Owned iteration / `FromIterator` are intentionally not provided: a
+/// `TreeSet` needs a [`Comparator`] that an iterator alone cannot supply.
+impl<'a, T> IntoIterator for &'a TreeSet<T> {
+    type Item = &'a T;
+    type IntoIter = TreeSetIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        TreeSetIter {
+            inner: self.tree.iter(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,5 +260,15 @@ mod tests {
         let s = TreeSet::new(natural_comparator::<i32>());
         assert_eq!(s.min(), None);
         assert_eq!(s.max(), None);
+    }
+
+    #[test]
+    fn test_into_iter_borrowing_sorted() {
+        let mut s = TreeSet::new(natural_comparator::<i32>());
+        s.add(3);
+        s.add(1);
+        s.add(2);
+        let v: Vec<i32> = (&s).into_iter().copied().collect();
+        assert_eq!(v, vec![1, 2, 3]);
     }
 }

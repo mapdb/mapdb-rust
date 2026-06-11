@@ -165,6 +165,11 @@ impl<T: SignedPrimInt> Interval<T> {
         self.size() == 0
     }
 
+    /// Idiomatic alias of [`size`](Self::size).
+    pub fn len(&self) -> usize {
+        self.size()
+    }
+
     pub fn contains(&self, value: T) -> bool {
         let zero = T::from_i64_truncate(0);
         if self.step > zero {
@@ -272,6 +277,53 @@ impl<'a, T: SignedPrimInt> Iterator for IntervalIter<'a, T> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = self.size - self.index;
         (remaining, Some(remaining))
+    }
+}
+
+// ---- idiomatic std-style additions ----------------------------------------
+
+impl<'a, T: SignedPrimInt> IntoIterator for &'a Interval<T> {
+    type Item = T;
+    type IntoIter = IntervalIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.all()
+    }
+}
+
+/// Owning iterator over an `Interval`'s elements (by value; `Interval` is
+/// `Copy`, so this consumes nothing observable).
+pub struct IntervalIntoIter<T: SignedPrimInt> {
+    interval: Interval<T>,
+    index: usize,
+    size: usize,
+}
+
+impl<T: SignedPrimInt> Iterator for IntervalIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        if self.index >= self.size {
+            return None;
+        }
+        let v = self.interval.get(self.index);
+        self.index += 1;
+        v
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.size - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T: SignedPrimInt> IntoIterator for Interval<T> {
+    type Item = T;
+    type IntoIter = IntervalIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        let size = self.size();
+        IntervalIntoIter {
+            interval: self,
+            index: 0,
+            size,
+        }
     }
 }
 
@@ -463,5 +515,21 @@ mod tests {
         let iv: Interval<i32> = Interval::from_to(1, 10);
         let it = iv.all();
         assert_eq!(it.size_hint(), (10, Some(10)));
+    }
+
+    #[test]
+    fn len_alias_matches_size() {
+        let iv: Interval<i32> = Interval::from_to(1, 5);
+        assert_eq!(iv.len(), iv.size());
+        assert_eq!(iv.len(), 5);
+    }
+
+    #[test]
+    fn into_iter_borrowing_and_owned() {
+        let iv: Interval<i32> = Interval::from_to(1, 4);
+        let borrowed: Vec<i32> = (&iv).into_iter().collect();
+        assert_eq!(borrowed, vec![1, 2, 3, 4]);
+        let owned: Vec<i32> = iv.into_iter().collect();
+        assert_eq!(owned, vec![1, 2, 3, 4]);
     }
 }

@@ -204,6 +204,36 @@ impl<T> FromIterator<T> for ImmutableList<T> {
     }
 }
 
+// ---- IntoIterator (borrowing) ---------------------------------------------
+//
+// The frozen `Arc`-backed sets/maps are shared, so only borrowing iteration is
+// offered (`for x in &immutable`). Owned iteration would force an `Arc` unwrap
+// or full clone, which the frozen contract deliberately avoids.
+
+impl<'a, T: Hash + Eq> IntoIterator for &'a ImmutableHashSet<T> {
+    type Item = &'a T;
+    type IntoIter = crate::hash_table::OpenHashSetIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
+impl<'a, K: Hash + Eq, V> IntoIterator for &'a ImmutableHashMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = crate::hash_table::OpenHashMapIter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a ImmutableList<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +279,20 @@ mod tests {
         assert_eq!(l[0], 10);
         assert_eq!(l[2], 30);
         assert_eq!(l.len(), 3);
+    }
+
+    #[test]
+    fn into_iter_borrowing() {
+        let s = ImmutableHashSet::from_iter([1, 2, 3]);
+        let sum: i32 = (&s).into_iter().sum();
+        assert_eq!(sum, 6);
+
+        let m = ImmutableHashMap::from_iter([(1, 10), (2, 20)]);
+        let vsum: i32 = (&m).into_iter().map(|(_, v)| *v).sum();
+        assert_eq!(vsum, 30);
+
+        let l = ImmutableList::from_vec(vec![1, 2, 3]);
+        let collected: Vec<i32> = (&l).into_iter().copied().collect();
+        assert_eq!(collected, vec![1, 2, 3]);
     }
 }

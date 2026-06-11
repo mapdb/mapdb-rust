@@ -119,6 +119,67 @@ impl<T: Eq + Hash> Default for HashBag<T> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+
+/// Borrowed iterator yielding each element once per occurrence (matching
+/// [`Collection::iter`]).
+pub struct HashBagIter<'a, T> {
+    inner: std::collections::hash_map::Iter<'a, T, usize>,
+    current: Option<(&'a T, usize)>,
+}
+
+impl<'a, T> Iterator for HashBagIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        loop {
+            if let Some((v, remaining)) = self.current {
+                if remaining > 0 {
+                    self.current = Some((v, remaining - 1));
+                    return Some(v);
+                }
+            }
+            let (v, &c) = self.inner.next()?;
+            self.current = Some((v, c));
+        }
+    }
+}
+
+impl<'a, T: Eq + Hash> IntoIterator for &'a HashBag<T> {
+    type Item = &'a T;
+    type IntoIter = HashBagIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        HashBagIter {
+            inner: self.counts.iter(),
+            current: None,
+        }
+    }
+}
+
+impl<T: Eq + Hash> FromIterator<T> for HashBag<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut bag = HashBag::new();
+        bag.extend(iter);
+        bag
+    }
+}
+
+impl<T: Eq + Hash> Extend<T> for HashBag<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.add(v);
+        }
+    }
+}
+
+/// Multiset equality: equal element-to-occurrence-count maps.
+impl<T: Eq + Hash> PartialEq for HashBag<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.size == other.size && self.counts == other.counts
+    }
+}
+
+impl<T: Eq + Hash> Eq for HashBag<T> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,5 +236,32 @@ mod tests {
         assert!(bag.remove_one(&1));
         assert_eq!(bag.occurrences_of(&1), 0);
         assert!(!bag.remove_one(&1));
+    }
+
+    #[test]
+    fn test_into_iter_yields_each_occurrence() {
+        let bag = HashBag::of(vec!["a", "a", "b"]);
+        let mut items: Vec<&str> = (&bag).into_iter().copied().collect();
+        items.sort();
+        assert_eq!(items, vec!["a", "a", "b"]);
+        assert_eq!((&bag).into_iter().count(), 3);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut bag: HashBag<&str> = ["a", "a", "b"].into_iter().collect();
+        assert_eq!(bag.occurrences_of(&"a"), 2);
+        bag.extend(["b", "c"]);
+        assert_eq!(bag.occurrences_of(&"b"), 2);
+        assert_eq!(bag.len(), 5);
+    }
+
+    #[test]
+    fn test_partial_eq_by_occurrences() {
+        let a = HashBag::of(vec![1, 1, 2]);
+        let b = HashBag::of(vec![2, 1, 1]);
+        let c = HashBag::of(vec![1, 2, 2]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

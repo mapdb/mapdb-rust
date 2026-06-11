@@ -357,6 +357,18 @@ impl<'a, K, V> Iterator for TreeMapIter<'a, K, V> {
     }
 }
 
+/// Borrowing iteration in sorted order: `for (k, v) in &map`.
+///
+/// Owned iteration / `FromIterator` are intentionally not provided: a
+/// `TreeMap` needs a [`Comparator`] that an iterator alone cannot supply.
+impl<'a, K, V> IntoIterator for &'a TreeMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = TreeMapIter<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -539,5 +551,15 @@ mod tests {
             assert!(m.remove(&i).is_some());
         }
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_into_iter_borrowing_sorted() {
+        let mut m = TreeMap::new(natural_comparator::<i32>());
+        m.insert(3, 30);
+        m.insert(1, 10);
+        m.insert(2, 20);
+        let pairs: Vec<(i32, i32)> = (&m).into_iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
     }
 }

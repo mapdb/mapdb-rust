@@ -71,8 +71,19 @@ impl<T: Ord> PriorityQueue<T> {
         self.items.len()
     }
 
+    /// Idiomatic alias of [`size`](Self::size).
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
+    }
+
+    /// Borrowed iterator over elements in **heap-array order** (not sorted).
+    /// Use [`drain_sorted`](Self::drain_sorted) for ascending order.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.items.iter()
     }
 
     pub fn clear(&mut self) {
@@ -140,6 +151,45 @@ impl<T: Ord + Clone> PriorityQueue<T> {
 impl<T: Ord> Default for PriorityQueue<T> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ---- idiomatic std-style additions ----------------------------------------
+//
+// `PartialEq` is intentionally NOT implemented: two heaps with the same
+// elements can have different array layouts, so element-wise array equality
+// would be misleading and a set-equality impl would be O(n log n) and surprising.
+
+impl<'a, T: Ord> IntoIterator for &'a PriorityQueue<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter()
+    }
+}
+
+impl<T: Ord> IntoIterator for PriorityQueue<T> {
+    /// Yields elements in heap-array order (not sorted). Use
+    /// [`drain_sorted`](PriorityQueue::drain_sorted) for ascending order.
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter()
+    }
+}
+
+impl<T: Ord> FromIterator<T> for PriorityQueue<T> {
+    /// Collects into a queue and heapifies in O(n).
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        PriorityQueue::of(iter)
+    }
+}
+
+impl<T: Ord> Extend<T> for PriorityQueue<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.push(v);
+        }
     }
 }
 
@@ -242,5 +292,31 @@ mod tests {
         let sorted = q.drain_sorted();
         let raw: Vec<f64> = sorted.iter().map(|h| h.0).collect();
         assert_eq!(raw, vec![f64::NEG_INFINITY, -1.0, 2.0, 3.5, f64::INFINITY]);
+    }
+
+    #[test]
+    fn len_alias_matches_size() {
+        let q = PriorityQueue::of([1, 2, 3]);
+        assert_eq!(q.len(), q.size());
+        assert_eq!(q.len(), 3);
+    }
+
+    #[test]
+    fn into_iter_and_from_iter() {
+        let q: PriorityQueue<i32> = [5, 1, 3].into_iter().collect();
+        assert_eq!(q.peek(), Some(&1));
+        // Borrowed iteration visits all elements (heap order, unsorted).
+        let sum: i32 = (&q).into_iter().sum();
+        assert_eq!(sum, 9);
+        let owned_sum: i32 = q.into_iter().sum();
+        assert_eq!(owned_sum, 9);
+    }
+
+    #[test]
+    fn extend_pushes() {
+        let mut q = PriorityQueue::of([5, 9]);
+        q.extend([1, 7]);
+        assert_eq!(q.peek(), Some(&1));
+        assert_eq!(q.len(), 4);
     }
 }

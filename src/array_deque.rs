@@ -76,6 +76,10 @@ impl<T> ArrayDeque<T> {
     pub fn iter(&self) -> std::collections::vec_deque::Iter<'_, T> {
         self.data.iter()
     }
+
+    pub fn iter_mut(&mut self) -> std::collections::vec_deque::IterMut<'_, T> {
+        self.data.iter_mut()
+    }
 }
 
 impl<T: PartialEq> ArrayDeque<T> {
@@ -142,6 +146,28 @@ impl<T> IntoIterator for ArrayDeque<T> {
     type IntoIter = std::collections::vec_deque::IntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
         self.data.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut ArrayDeque<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::collections::vec_deque::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.data.iter_mut()
+    }
+}
+
+impl<T> FromIterator<T> for ArrayDeque<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        ArrayDeque {
+            data: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T> Extend<T> for ArrayDeque<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.data.extend(iter);
     }
 }
 
@@ -240,5 +266,17 @@ mod tests {
         assert_eq!(format!("{}", a), "[1, 2, 3]");
         let e: ArrayDeque<i32> = ArrayDeque::new();
         assert_eq!(format!("{}", e), "[]");
+    }
+
+    #[test]
+    fn into_iter_mut_and_from_iter_extend() {
+        let mut d: ArrayDeque<i32> = (1..=3).collect();
+        assert_eq!(d.to_vec(), vec![1, 2, 3]);
+        for v in &mut d {
+            *v *= 10;
+        }
+        assert_eq!(d.to_vec(), vec![10, 20, 30]);
+        d.extend([40, 50]);
+        assert_eq!(d.to_vec(), vec![10, 20, 30, 40, 50]);
     }
 }

@@ -83,6 +83,11 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
         self.size
     }
 
+    /// Idiomatic alias of [`size`](Self::size) — total number of unique values.
+    pub fn len(&self) -> usize {
+        self.size
+    }
+
     pub fn size_distinct(&self) -> usize {
         self.data.len()
     }
@@ -161,6 +166,15 @@ impl<K: Eq + Hash, V: Eq> crate::parallel::batch::BatchIterable<V> for SetMultim
 impl<K: Eq + Hash, V: Eq> Default for SetMultimap<K, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Borrowing iteration over flattened `(&K, &V)` pairs (one per unique value).
+impl<'a, K: Eq + Hash, V: Eq> IntoIterator for &'a SetMultimap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Box<dyn Iterator<Item = (&'a K, &'a V)> + 'a>;
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.iter())
     }
 }
 
@@ -286,5 +300,16 @@ mod tests {
         assert!(s.contains("1=[10]"));
         let empty: SetMultimap<i32, i32> = SetMultimap::new();
         assert_eq!(empty.to_string(), "{}");
+    }
+
+    #[test]
+    fn len_alias_and_into_iter() {
+        let mut m: SetMultimap<i32, i32> = SetMultimap::new();
+        m.put(1, 10);
+        m.put(1, 10); // dedupe
+        m.put(2, 20);
+        assert_eq!(m.len(), m.size());
+        assert_eq!(m.len(), 2);
+        assert_eq!((&m).into_iter().count(), 2);
     }
 }

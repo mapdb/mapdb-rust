@@ -72,6 +72,51 @@ impl<T: PartialEq> Default for ArrayStack<T> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+//
+// Iteration order is top-to-bottom (matching `Collection::iter` and `peek`):
+// the most recently pushed element comes first.
+
+impl<'a, T: PartialEq> IntoIterator for &'a ArrayStack<T> {
+    type Item = &'a T;
+    type IntoIter = std::iter::Rev<std::slice::Iter<'a, T>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.iter().rev()
+    }
+}
+
+impl<T: PartialEq> IntoIterator for ArrayStack<T> {
+    type Item = T;
+    type IntoIter = std::iter::Rev<std::vec::IntoIter<T>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.into_iter().rev()
+    }
+}
+
+impl<T: PartialEq> FromIterator<T> for ArrayStack<T> {
+    /// Pushes items in iteration order; the last item becomes the top.
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        ArrayStack {
+            items: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T: PartialEq> Extend<T> for ArrayStack<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        self.items.extend(iter);
+    }
+}
+
+/// Order-sensitive equality (same elements, same bottom-to-top order).
+impl<T: PartialEq> PartialEq for ArrayStack<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+    }
+}
+
+impl<T: PartialEq + Eq> Eq for ArrayStack<T> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +154,31 @@ mod tests {
         let s = ArrayStack::of(vec!["a", "b", "c"]);
         assert!(s.contains(&"b"));
         assert!(!s.contains(&"z"));
+    }
+
+    #[test]
+    fn test_into_iter_top_to_bottom() {
+        let s = ArrayStack::of(vec![1, 2, 3]);
+        let borrowed: Vec<i32> = (&s).into_iter().copied().collect();
+        assert_eq!(borrowed, vec![3, 2, 1]);
+        let owned: Vec<i32> = s.into_iter().collect();
+        assert_eq!(owned, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut s: ArrayStack<i32> = (1..=3).collect();
+        assert_eq!(s.peek(), Some(&3));
+        s.extend([4, 5]);
+        assert_eq!(s.peek(), Some(&5));
+    }
+
+    #[test]
+    fn test_partial_eq() {
+        let a = ArrayStack::of(vec![1, 2, 3]);
+        let b = ArrayStack::of(vec![1, 2, 3]);
+        let c = ArrayStack::of(vec![3, 2, 1]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 }

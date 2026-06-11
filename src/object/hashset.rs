@@ -6,6 +6,8 @@
 
 use super::traits::*;
 use crate::hash_table::OpenHashSet;
+use std::borrow::Borrow;
+use std::hash::Hash;
 
 /// Generic unordered set backed by [`crate::hash_table::OpenHashSet`] — the
 /// project's port of Eclipse Collections' open-addressing hash set. (Not
@@ -101,6 +103,74 @@ impl<T: Eq + std::hash::Hash> Default for HashSet<T> {
     }
 }
 
+// ---- idiomatic std-style additions ----------------------------------------
+
+impl<T: Eq + Hash> HashSet<T> {
+    /// Borrowed `&T` iterator, so `for x in &set` and `set.iter()` both work.
+    pub fn iter(&self) -> crate::hash_table::OpenHashSetIter<'_, T> {
+        self.inner.iter()
+    }
+
+    /// Membership test by any borrowed form of the element (`T: Borrow<Q>`),
+    /// e.g. `set.contains("str")` on a `HashSet<String>`.
+    pub fn contains<Q>(&self, value: &Q) -> bool
+    where
+        T: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.contains(value)
+    }
+
+    pub fn remove<Q>(&mut self, value: &Q) -> bool
+    where
+        T: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.remove(value)
+    }
+}
+
+impl<'a, T: Eq + Hash> IntoIterator for &'a HashSet<T> {
+    type Item = &'a T;
+    type IntoIter = crate::hash_table::OpenHashSetIter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter()
+    }
+}
+
+impl<T: Eq + Hash> IntoIterator for HashSet<T> {
+    type Item = T;
+    type IntoIter = crate::hash_table::OpenHashSetIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+impl<T: Eq + Hash> FromIterator<T> for HashSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        HashSet {
+            inner: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl<T: Eq + Hash> Extend<T> for HashSet<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.inner.add(v);
+        }
+    }
+}
+
+/// Order-insensitive set equality.
+impl<T: Eq + Hash> PartialEq for HashSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.len() == other.inner.len() && self.inner.iter().all(|v| other.inner.contains(v))
+    }
+}
+
+impl<T: Eq + Hash> Eq for HashSet<T> {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,5 +216,44 @@ mod tests {
         let s = HashSet::of(vec!["a".to_string(), "b".to_string()]);
         assert!(s.contains(&"a".to_string()));
         assert_eq!(s.len(), 2);
+    }
+
+    #[test]
+    fn test_into_iter_borrowing_and_owned() {
+        let s = HashSet::of(vec![1, 2, 3]);
+        let mut sum = 0;
+        for v in &s {
+            sum += *v;
+        }
+        assert_eq!(sum, 6);
+        let mut owned: Vec<i32> = s.into_iter().collect();
+        owned.sort();
+        assert_eq!(owned, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_from_iterator_and_extend() {
+        let mut s: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        assert_eq!(s.len(), 3);
+        s.extend([3, 4, 5]);
+        assert_eq!(s.len(), 5);
+    }
+
+    #[test]
+    fn test_partial_eq_order_insensitive() {
+        let a: HashSet<i32> = [1, 2, 3].into_iter().collect();
+        let b: HashSet<i32> = [3, 2, 1].into_iter().collect();
+        assert_eq!(a, b);
+        let c: HashSet<i32> = [1, 2, 4].into_iter().collect();
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_borrow_contains_str() {
+        let mut s: HashSet<String> = HashSet::new();
+        s.add("hello".to_string());
+        assert!(s.contains("hello"));
+        assert!(s.remove("hello"));
+        assert!(!s.contains("hello"));
     }
 }

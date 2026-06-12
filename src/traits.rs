@@ -41,7 +41,7 @@ pub trait MutableList<T>: PrimitiveList<T> + MutableCollection<T> {
 pub trait PrimitiveSet<T>: PrimitiveCollection<T> {}
 
 pub trait MutableSet<T>: PrimitiveSet<T> + MutableCollection<T> {
-    fn add(&mut self, value: T) -> bool;
+    fn insert(&mut self, value: T) -> bool;
     fn remove(&mut self, value: &T) -> bool;
 }
 
@@ -99,7 +99,9 @@ impl<T: PartialEq> MutableList<T> for Vec<T> {
     }
 }
 
-impl<T: std::hash::Hash + Eq> PrimitiveCollection<T> for crate::hash_table::OpenHashSet<T> {
+impl<T: std::hash::Hash + Eq, S: std::hash::BuildHasher> PrimitiveCollection<T>
+    for crate::hash_table::OpenHashSet<T, S>
+{
     fn len(&self) -> usize {
         crate::hash_table::OpenHashSet::len(self)
     }
@@ -111,24 +113,33 @@ impl<T: std::hash::Hash + Eq> PrimitiveCollection<T> for crate::hash_table::Open
     }
 }
 
-impl<T: std::hash::Hash + Eq> MutableCollection<T> for crate::hash_table::OpenHashSet<T> {
+impl<T: std::hash::Hash + Eq, S: std::hash::BuildHasher> MutableCollection<T>
+    for crate::hash_table::OpenHashSet<T, S>
+{
     fn clear(&mut self) {
         crate::hash_table::OpenHashSet::clear(self);
     }
 }
 
-impl<T: std::hash::Hash + Eq> PrimitiveSet<T> for crate::hash_table::OpenHashSet<T> {}
+impl<T: std::hash::Hash + Eq, S: std::hash::BuildHasher> PrimitiveSet<T>
+    for crate::hash_table::OpenHashSet<T, S>
+{
+}
 
-impl<T: std::hash::Hash + Eq> MutableSet<T> for crate::hash_table::OpenHashSet<T> {
-    fn add(&mut self, value: T) -> bool {
-        crate::hash_table::OpenHashSet::add(self, value)
+impl<T: std::hash::Hash + Eq, S: std::hash::BuildHasher> MutableSet<T>
+    for crate::hash_table::OpenHashSet<T, S>
+{
+    fn insert(&mut self, value: T) -> bool {
+        crate::hash_table::OpenHashSet::insert(self, value)
     }
     fn remove(&mut self, value: &T) -> bool {
         crate::hash_table::OpenHashSet::remove(self, value)
     }
 }
 
-impl<K: std::hash::Hash + Eq, V> PrimitiveMap<K, V> for crate::hash_table::OpenHashMap<K, V> {
+impl<K: std::hash::Hash + Eq, V, S: std::hash::BuildHasher> PrimitiveMap<K, V>
+    for crate::hash_table::OpenHashMap<K, V, S>
+{
     fn len(&self) -> usize {
         crate::hash_table::OpenHashMap::len(self)
     }
@@ -140,7 +151,9 @@ impl<K: std::hash::Hash + Eq, V> PrimitiveMap<K, V> for crate::hash_table::OpenH
     }
 }
 
-impl<K: std::hash::Hash + Eq, V> MutableMap<K, V> for crate::hash_table::OpenHashMap<K, V> {
+impl<K: std::hash::Hash + Eq, V, S: std::hash::BuildHasher> MutableMap<K, V>
+    for crate::hash_table::OpenHashMap<K, V, S>
+{
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         crate::hash_table::OpenHashMap::insert(self, key, value)
     }
@@ -170,8 +183,8 @@ mod tests {
     #[test]
     fn openhashset_is_a_set() {
         let mut s: OpenHashSet<i32> = OpenHashSet::new();
-        MutableSet::add(&mut s, 1);
-        MutableSet::add(&mut s, 2);
+        MutableSet::insert(&mut s, 1);
+        MutableSet::insert(&mut s, 2);
         assert_eq!(PrimitiveCollection::len(&s), 2);
         assert!(PrimitiveCollection::contains(&s, &1));
     }

@@ -23,14 +23,6 @@ impl<T: Eq + Hash + Clone> LinkedHashSet<T> {
             index: StdHashMap::new(),
         }
     }
-
-    pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        let mut s = Self::new();
-        for v in values {
-            s.add(v);
-        }
-        s
-    }
 }
 
 impl<T: Eq + Hash + Clone + PartialEq> Collection<T> for LinkedHashSet<T> {
@@ -57,7 +49,7 @@ impl<T: Eq + Hash + Clone + PartialEq> MutableCollection<T> for LinkedHashSet<T>
 impl<T: Eq + Hash + Clone + PartialEq> Set<T> for LinkedHashSet<T> {}
 
 impl<T: Eq + Hash + Clone + PartialEq> MutableSet<T> for LinkedHashSet<T> {
-    fn add(&mut self, value: T) -> bool {
+    fn insert(&mut self, value: T) -> bool {
         if self.index.contains_key(&value) {
             return false;
         }
@@ -85,9 +77,9 @@ impl<T: Eq + Hash + Clone + PartialEq> MutableSet<T> for LinkedHashSet<T> {
 
 impl<T: Eq + Hash + Clone> LinkedHashSet<T> {
     pub fn union(&self, other: &Self) -> Self {
-        let mut result = Self::of(self.entries.iter().cloned());
+        let mut result = Self::from_iter(self.entries.iter().cloned());
         for v in &other.entries {
-            result.add(v.clone());
+            result.insert(v.clone());
         }
         result
     }
@@ -96,7 +88,7 @@ impl<T: Eq + Hash + Clone> LinkedHashSet<T> {
         let mut result = Self::new();
         for v in &self.entries {
             if other.index.contains_key(v) {
-                result.add(v.clone());
+                result.insert(v.clone());
             }
         }
         result
@@ -106,7 +98,7 @@ impl<T: Eq + Hash + Clone> LinkedHashSet<T> {
         let mut result = Self::new();
         for v in &self.entries {
             if !other.index.contains_key(v) {
-                result.add(v.clone());
+                result.insert(v.clone());
             }
         }
         result
@@ -116,12 +108,12 @@ impl<T: Eq + Hash + Clone> LinkedHashSet<T> {
         let mut result = Self::new();
         for v in &self.entries {
             if !other.index.contains_key(v) {
-                result.add(v.clone());
+                result.insert(v.clone());
             }
         }
         for v in &other.entries {
             if !self.index.contains_key(v) {
-                result.add(v.clone());
+                result.insert(v.clone());
             }
         }
         result
@@ -154,14 +146,18 @@ impl<T: Eq + Hash + Clone> IntoIterator for LinkedHashSet<T> {
 
 impl<T: Eq + Hash + Clone> FromIterator<T> for LinkedHashSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        Self::of(iter)
+        let mut s = Self::new();
+        for v in iter {
+            s.insert(v);
+        }
+        s
     }
 }
 
 impl<T: Eq + Hash + Clone> Extend<T> for LinkedHashSet<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for v in iter {
-            self.add(v);
+            self.insert(v);
         }
     }
 }
@@ -183,9 +179,9 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut s = LinkedHashSet::new();
-        assert!(s.add(1));
-        assert!(s.add(2));
-        assert!(!s.add(1));
+        assert!(s.insert(1));
+        assert!(s.insert(2));
+        assert!(!s.insert(1));
         assert_eq!(s.len(), 2);
         assert!(s.contains(&1));
         assert!(s.remove(&1));
@@ -194,14 +190,14 @@ mod tests {
 
     #[test]
     fn test_insertion_order() {
-        let s = LinkedHashSet::of(vec![3, 1, 4, 1, 5, 9]);
+        let s = LinkedHashSet::from_iter([3, 1, 4, 1, 5, 9]);
         let v: Vec<&i32> = s.iter().collect();
         assert_eq!(v, vec![&3, &1, &4, &5, &9]);
     }
 
     #[test]
     fn test_remove_preserves_order() {
-        let mut s = LinkedHashSet::of(vec![1, 2, 3, 4]);
+        let mut s = LinkedHashSet::from_iter([1, 2, 3, 4]);
         s.remove(&2);
         let v: Vec<&i32> = s.iter().collect();
         assert_eq!(v, vec![&1, &3, &4]);
@@ -209,8 +205,8 @@ mod tests {
 
     #[test]
     fn test_set_operations() {
-        let a = LinkedHashSet::of(vec![1, 2, 3]);
-        let b = LinkedHashSet::of(vec![2, 3, 4]);
+        let a = LinkedHashSet::from_iter([1, 2, 3]);
+        let b = LinkedHashSet::from_iter([2, 3, 4]);
         let union = a.union(&b);
         assert_eq!(union.len(), 4);
         let v: Vec<&i32> = union.iter().collect();
@@ -226,7 +222,7 @@ mod tests {
 
     #[test]
     fn test_functional() {
-        let s = LinkedHashSet::of(vec![1, 2, 3, 4, 5]);
+        let s = LinkedHashSet::from_iter([1, 2, 3, 4, 5]);
         assert!(s.any_satisfy(|v| *v > 4));
         assert!(s.all_satisfy(|v| *v > 0));
         assert_eq!(s.count_where(|v| *v % 2 == 0), 2);
@@ -234,14 +230,14 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut s = LinkedHashSet::of(vec![1, 2]);
+        let mut s = LinkedHashSet::from_iter([1, 2]);
         s.clear();
         assert!(s.is_empty());
     }
 
     #[test]
     fn test_into_iter_insertion_order() {
-        let s = LinkedHashSet::of(vec![3, 1, 2]);
+        let s = LinkedHashSet::from_iter([3, 1, 2]);
         let borrowed: Vec<i32> = (&s).into_iter().copied().collect();
         assert_eq!(borrowed, vec![3, 1, 2]);
         let owned: Vec<i32> = s.into_iter().collect();
@@ -259,10 +255,10 @@ mod tests {
 
     #[test]
     fn test_partial_eq_order_insensitive() {
-        let a = LinkedHashSet::of(vec![1, 2, 3]);
-        let b = LinkedHashSet::of(vec![3, 2, 1]);
+        let a = LinkedHashSet::from_iter([1, 2, 3]);
+        let b = LinkedHashSet::from_iter([3, 2, 1]);
         assert_eq!(a, b);
-        let c = LinkedHashSet::of(vec![1, 2, 4]);
+        let c = LinkedHashSet::from_iter([1, 2, 4]);
         assert_ne!(a, c);
     }
 }

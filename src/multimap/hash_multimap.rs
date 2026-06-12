@@ -27,7 +27,7 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         }
     }
 
-    pub fn put(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: K, value: V) {
         if let Some(bucket) = self.data.get_mut(&key) {
             bucket.push(value);
         } else {
@@ -59,16 +59,13 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         }
     }
 
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    /// Idiomatic alias of [`size`](Self::size) — total number of values.
+    /// Total number of values across all keys.
     pub fn len(&self) -> usize {
         self.size
     }
 
-    pub fn size_distinct(&self) -> usize {
+    /// Number of distinct keys.
+    pub fn distinct_len(&self) -> usize {
         self.data.len()
     }
 
@@ -112,7 +109,7 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
 // Drive with `parallel::batch::for_each_in_batches` for parallel value
 // iteration with no copy. `get_batch_count` is therefore key-based.
 impl<K: Eq + Hash, V> crate::parallel::batch::BatchIterable<V> for Multimap<K, V> {
-    fn size(&self) -> usize {
+    fn len(&self) -> usize {
         self.size
     }
 
@@ -190,31 +187,31 @@ mod tests {
     #[test]
     fn test_put_get() {
         let mut m = Multimap::new();
-        m.put("a", 1);
-        m.put("a", 2);
-        m.put("b", 3);
+        m.insert("a", 1);
+        m.insert("a", 2);
+        m.insert("b", 3);
         assert_eq!(m.get(&"a"), &[1, 2]);
         assert_eq!(m.get(&"b"), &[3]);
         assert_eq!(m.get(&"c"), &[] as &[i32]);
-        assert_eq!(m.size(), 3);
-        assert_eq!(m.size_distinct(), 2);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.distinct_len(), 2);
     }
 
     #[test]
     fn test_remove_all() {
         let mut m = Multimap::new();
-        m.put(1, "a");
-        m.put(1, "b");
-        m.put(2, "c");
+        m.insert(1, "a");
+        m.insert(1, "b");
+        m.insert(2, "c");
         let removed = m.remove_all(&1);
         assert_eq!(removed, vec!["a", "b"]);
-        assert_eq!(m.size(), 1);
+        assert_eq!(m.len(), 1);
     }
 
     #[test]
     fn test_contains_key() {
         let mut m = Multimap::<i32, i32>::new();
-        m.put(1, 10);
+        m.insert(1, 10);
         assert!(m.contains_key(&1));
         assert!(!m.contains_key(&2));
     }
@@ -222,7 +219,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut m = Multimap::new();
-        m.put(1, "a");
+        m.insert(1, "a");
         m.clear();
         assert!(m.is_empty());
     }
@@ -230,34 +227,33 @@ mod tests {
     #[test]
     fn test_iter() {
         let mut m = Multimap::new();
-        m.put(1, "a");
-        m.put(1, "b");
-        m.put(2, "c");
+        m.insert(1, "a");
+        m.insert(1, "b");
+        m.insert(2, "c");
         assert_eq!(m.iter().count(), 3);
     }
 
     #[test]
     fn test_display() {
         let mut m = Multimap::new();
-        m.put(1, "a");
+        m.insert(1, "a");
         assert!(!m.to_string().is_empty());
     }
 
     #[test]
-    fn test_len_alias() {
+    fn test_len_counts_values() {
         let mut m = Multimap::new();
-        m.put(1, "a");
-        m.put(1, "b");
-        assert_eq!(m.len(), m.size());
+        m.insert(1, "a");
+        m.insert(1, "b");
         assert_eq!(m.len(), 2);
     }
 
     #[test]
     fn test_into_iter_borrowing() {
         let mut m = Multimap::new();
-        m.put(1, "a");
-        m.put(1, "b");
-        m.put(2, "c");
+        m.insert(1, "a");
+        m.insert(1, "b");
+        m.insert(2, "c");
         assert_eq!((&m).into_iter().count(), 3);
     }
 }

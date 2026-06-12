@@ -21,11 +21,6 @@ impl<T> ArrayList<T> {
             items: Vec::with_capacity(cap),
         }
     }
-    pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        ArrayList {
-            items: values.into_iter().collect(),
-        }
-    }
 
     /// Borrows the backing storage as a contiguous slice.
     ///
@@ -196,7 +191,7 @@ mod tests {
 
     #[test]
     fn test_functional_ops() {
-        let list = ArrayList::of(vec![1, 2, 3, 4, 5]);
+        let list = ArrayList::from_iter(vec![1, 2, 3, 4, 5]);
         assert!(list.any_satisfy(|v| *v > 3));
         assert!(list.all_satisfy(|v| *v > 0));
         assert!(list.none_satisfy(|v| *v > 10));
@@ -210,7 +205,7 @@ mod tests {
 
     #[test]
     fn test_sort_reverse_distinct() {
-        let mut list = ArrayList::of(vec![3, 1, 2, 1, 3]);
+        let mut list = ArrayList::from_iter(vec![3, 1, 2, 1, 3]);
         list.sort();
         assert_eq!(list.to_vec(), vec![1, 1, 2, 3, 3]);
         let rev = list.reversed();
@@ -221,14 +216,14 @@ mod tests {
 
     #[test]
     fn test_string_type() {
-        let list = ArrayList::of(vec!["hello".to_string(), "world".to_string()]);
+        let list = ArrayList::from_iter(vec!["hello".to_string(), "world".to_string()]);
         assert!(list.contains(&"hello".to_string()));
         assert_eq!(list.len(), 2);
     }
 
     #[test]
     fn test_set_and_remove() {
-        let mut list = ArrayList::of(vec![10, 20, 30]);
+        let mut list = ArrayList::from_iter(vec![10, 20, 30]);
         let old = list.set(1, 99);
         assert_eq!(old, 20);
         assert_eq!(list.get(1), Some(&99));
@@ -239,7 +234,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_ref_and_mut() {
-        let mut list = ArrayList::of(vec![1, 2, 3]);
+        let mut list = ArrayList::from_iter(vec![1, 2, 3]);
         let sum: i32 = (&list).into_iter().sum();
         assert_eq!(sum, 6);
         for v in &mut list {
@@ -258,9 +253,9 @@ mod tests {
 
     #[test]
     fn test_partial_eq_order_sensitive() {
-        let a = ArrayList::of(vec![1, 2, 3]);
-        let b = ArrayList::of(vec![1, 2, 3]);
-        let c = ArrayList::of(vec![3, 2, 1]);
+        let a = ArrayList::from_iter(vec![1, 2, 3]);
+        let b = ArrayList::from_iter(vec![1, 2, 3]);
+        let c = ArrayList::from_iter(vec![3, 2, 1]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

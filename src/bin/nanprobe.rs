@@ -92,17 +92,17 @@ fn probe_map_infinity() {
 
 fn probe_set_nan() {
     let mut s: OpenHashSet<HashableF32> = OpenHashSet::new();
-    s.add(HashableF32(f32::NAN));
-    s.add(HashableF32(f32::NAN));
-    s.add(HashableF32(f32::NAN));
+    s.insert(HashableF32(f32::NAN));
+    s.insert(HashableF32(f32::NAN));
+    s.insert(HashableF32(f32::NAN));
     println!("set_nan_size: {}", s.len());
     println!("set_nan_contains: {}", s.contains(&HashableF32(f32::NAN)));
 }
 
 fn probe_set_neg_zero() {
     let mut s: OpenHashSet<HashableF32> = OpenHashSet::new();
-    s.add(HashableF32(0.0f32));
-    s.add(HashableF32(-0.0f32));
+    s.insert(HashableF32(0.0f32));
+    s.insert(HashableF32(-0.0f32));
     println!("set_zero_size: {}", s.len());
     println!(
         "set_pos_zero_contains: {}",
@@ -116,10 +116,10 @@ fn probe_set_neg_zero() {
 
 fn probe_set_mixed() {
     let mut s: OpenHashSet<HashableF32> = OpenHashSet::new();
-    s.add(HashableF32(1.0f32));
-    s.add(HashableF32(f32::NAN));
-    s.add(HashableF32(f32::INFINITY));
-    s.add(HashableF32(f32::NEG_INFINITY));
-    s.add(HashableF32(0.0f32));
+    s.insert(HashableF32(1.0f32));
+    s.insert(HashableF32(f32::NAN));
+    s.insert(HashableF32(f32::INFINITY));
+    s.insert(HashableF32(f32::NEG_INFINITY));
+    s.insert(HashableF32(0.0f32));
     println!("set_mixed_size: {}", s.len());
 }

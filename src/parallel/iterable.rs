@@ -216,7 +216,7 @@ mod tests {
     #[test]
     fn as_parallel_over_collection_slice() {
         use crate::object::ArrayList;
-        let list = ArrayList::of(0..1000i64);
+        let list = ArrayList::from_iter(0..1000i64);
         // The bridge: a collection flows into the work-stealing view through
         // its `as_slice()` borrow — no `par_*` method on the collection.
         let p = as_parallel(list.as_slice());

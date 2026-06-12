@@ -13,11 +13,11 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
-use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -411,7 +411,7 @@ fn eval_i64_map_assertion(key: &str, map: &OpenHashMap<i64, i32>) -> String {
 // keys keep their identity (stay distinct and retrievable) — key identity, not
 // bucket-distribution quality.
 // Multimap (list) keeps duplicate values; SetMultimap dedups. Both expose the
-// same put / get(&k)->&[i32] / remove_all / contains_key / size_distinct / keys
+// same insert / get(&k)->&[i32] / remove_all / contains_key / distinct_len / keys
 // surface, so a macro generates the two near-identical runners.
 //
 // Assertions (identical to the other ports):
@@ -434,7 +434,7 @@ macro_rules! run_i64_multimap {
                     "put" => {
                         let k = parse_i64_operand(&op["key"]);
                         let v = op["value"].as_i64().unwrap() as i32;
-                        map.put(k, v);
+                        map.insert(k, v);
                     }
                     "removeAll" => {
                         let k = parse_i64_operand(&op["key"]);
@@ -448,7 +448,7 @@ macro_rules! run_i64_multimap {
                     continue;
                 }
                 let computed = if key == "distinct_key_count" {
-                    map.size_distinct().to_string()
+                    map.distinct_len().to_string()
                 } else if key == "sorted_keys" {
                     let mut ks: Vec<i64> = map.keys().copied().collect();
                     ks.sort();
@@ -518,7 +518,7 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
             // parity) and does NOT wrap at i32 — see algorithms.md "Integer
             // overflow contract" and scenarios/06-overflow/i32_sum_overflow.json.
             // Routed through the production ArrayList::inject_into fold.
-            let al = ArrayList::of(list.iter().copied());
+            let al = ArrayList::from_iter(list.iter().copied());
             al.inject_into(0i64, |a, &v| a + v as i64).to_string()
         }
         "inject_into_wrapping_product" | "product" => {
@@ -550,11 +550,11 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
         "inject_into_sum" => {
             // injectInto with a + reduction accumulates in the i32 seed type
             // and wraps two's-complement at i32 — via the production fold.
-            let al = ArrayList::of(list.iter().copied());
+            let al = ArrayList::from_iter(list.iter().copied());
             al.inject_into(0i32, |a, &v| a.wrapping_add(v)).to_string()
         }
         "inject_into_product" => {
-            let al = ArrayList::of(list.iter().copied());
+            let al = ArrayList::from_iter(list.iter().copied());
             al.inject_into(1i32, |a, &v| a.wrapping_mul(v)).to_string()
         }
         _ if key.starts_with("get_at_") => {
@@ -631,7 +631,7 @@ fn run_hashset(
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {
-                set.add(op["value"].as_i64().unwrap() as i32);
+                set.insert(op["value"].as_i64().unwrap() as i32);
             }
             "remove" => {
                 set.remove(&(op["value"].as_i64().unwrap() as i32));
@@ -645,7 +645,7 @@ fn run_hashset(
         if let Some(ops) = spec["operations"].as_array() {
             for op in ops {
                 if let "add" = op["op"].as_str().unwrap() {
-                    other.add(op["value"].as_i64().unwrap() as i32);
+                    other.insert(op["value"].as_i64().unwrap() as i32);
                 }
             }
         }
@@ -1007,7 +1007,7 @@ fn run_f32_hashset(
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {
-                set.add(HashableF32(parse_f32(&op["value"])));
+                set.insert(HashableF32(parse_f32(&op["value"])));
             }
             "remove" => {
                 set.remove(&HashableF32(parse_f32(&op["value"])));
@@ -1058,7 +1058,7 @@ fn run_f32_treeset(
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {
-                set.add(HashableF32(parse_f32(&op["value"])));
+                set.insert(HashableF32(parse_f32(&op["value"])));
             }
             "remove" => {
                 set.remove(&HashableF32(parse_f32(&op["value"])));
@@ -1138,7 +1138,7 @@ fn run_f32_arraylist(
             // min/max via the production total-order sort (HashableF32 Ord),
             // then take the ends — no runner-side comparator.
             "min" | "max" => {
-                let mut sorted = ArrayList::of(list.iter().copied());
+                let mut sorted = ArrayList::from_iter(list.iter().copied());
                 sorted.sort();
                 let pick = if key == "min" {
                     sorted.iter().next()
@@ -1151,7 +1151,7 @@ fn run_f32_arraylist(
             "sorted" | "to_sorted_array" => {
                 // Sort a COPY through the production total-order Sort() so the
                 // assertion proves conformance without mutating the live list.
-                let mut sorted = ArrayList::of(list.iter().copied());
+                let mut sorted = ArrayList::from_iter(list.iter().copied());
                 sorted.sort();
                 let parts: Vec<String> = sorted.iter().map(|v| format_f32(v.0)).collect();
                 format!("[{}]", parts.join(","))

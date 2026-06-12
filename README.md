@@ -8,6 +8,13 @@ The Java port has `IntIntHashMap`, `LongObjectHashMap`, … as hand-written per-
 
 Rust doesn't have this problem. **Monomorphisation** specialises `OpenHashMap<i32, i32>` and `OpenHashMap<f32, f32>` at compile time — no boxing, no indirection, identical performance to a hand-written `IntIntHashMap`. So we ship one algorithm body and let the compiler do the specialisation.
 
+> **v0.2.0 is a breaking release.** Java-isms were renamed to std vocabulary
+> (`size()`→`len()`, `add()`→`insert()`/`push()`, `put()`→`insert()`), the
+> `of()` constructors were removed in favour of `FromIterator`/`collect`, the
+> open-addressing map/set gained a `BuildHasher` type parameter
+> (`OpenHashMap<K, V, S = RandomState>`), and `Synchronized<C>` is now
+> guard-based. See [`CHANGELOG.md`](CHANGELOG.md) for the full migration table.
+
 | Java needs | Rust gets via |
 |---|---|
 | `IntArrayList` | `Vec<i32>` |
@@ -31,7 +38,7 @@ use mapdb_collections::{
 };
 ```
 
-The Java-side algorithm port (open-addressing, linear probing, Robin Hood backward-shift deletion, interleaved `{occupied, key, value}` entries for cache locality) lives in `src/hash_table.rs`.
+The Java-side algorithm port (open-addressing, linear probing, Robin Hood backward-shift deletion, niche-packed `Slot { Empty | Occupied { key, value } }` entries for cache locality) lives in `src/hash_table.rs`. The map/set are generic over the hasher (`S: BuildHasher`), defaulting to `RandomState` for HashDoS resistance; opt into a faster fixed hasher with `OpenHashMap::with_hasher` / `OpenHashSet::with_hasher`.
 
 ## Quick start
 
@@ -53,14 +60,14 @@ prices.insert(HashableF32(1.99), "soda");
 prices.insert(HashableF32(f32::NAN), "missing");
 assert!(prices.contains_key(&HashableF32(f32::NAN))); // NaN-keyed lookups work
 
-// Thread-safe view, Java-style factory:
+// Thread-safe view, Java-style factory — lock() returns a Deref guard:
 let sync_map = synchronized(OpenHashMap::<i32, i32>::new());
-sync_map.with_mut(|m| { m.insert(1, 10); });
-sync_map.with(|m| assert_eq!(m.get(&1), Some(&10)));
+sync_map.lock().insert(1, 10);
+assert_eq!(sync_map.lock().get(&1), Some(&10));
 
 // Set:
 let mut s: OpenHashSet<i32> = OpenHashSet::new();
-s.add(1); s.add(2); s.add(3);
+s.insert(1); s.insert(2); s.insert(3);
 assert!(s.contains(&2));
 ```
 
@@ -80,15 +87,15 @@ This crate uses our ported `OpenHashMap` (not `std::collections::HashMap`) for e
 - `Multimap<K, V>` (one-key-to-many-values) backing store
 - `ImmutableHashMap<K, V>` / `ImmutableHashSet<T>` frozen views
 
-This preserves the cache-locality interleaved-entry layout that Eclipse Collections uses on the Java side. `std::BTreeMap`/`BTreeSet`/`BinaryHeap` are used where the algorithm matches (sorted maps, priority queues).
+This preserves the cache-locality packed-slot layout that Eclipse Collections uses on the Java side. `std::BTreeMap`/`BTreeSet`/`BinaryHeap` are used where the algorithm matches (sorted maps, priority queues).
 
 ## Layout
 
 ```
 src/
-├── hash_table.rs        — OpenHashMap<K, V>, OpenHashSet<T> (the algorithm)
+├── hash_table.rs        — OpenHashMap<K, V, S>, OpenHashSet<T, S> (the algorithm)
 ├── hashable_float.rs    — HashableF32, HashableF64
-├── synchronized.rs      — Synchronized<C> + factory
+├── synchronized.rs      — Synchronized<C> + SyncGuard + factory
 ├── immutable.rs         — ImmutableHashMap / ImmutableHashSet / ImmutableList
 ├── pair.rs              — Pair<A, B>
 ├── traits.rs            — PrimitiveCollection<T>, PrimitiveList, PrimitiveMap, …

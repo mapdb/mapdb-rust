@@ -35,7 +35,7 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> HashBiMap<K, V> {
     /// Insert a key-value pair. If the value already exists under a different key,
     /// that old key is removed (bijection invariant). Returns the old value for the
     /// key if it existed.
-    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         // If value exists under a different key, remove that key
         if let Some(existing_key) = self.inverse.get(&value) {
             if *existing_key != key {
@@ -203,7 +203,7 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> FromIterator<(K, V)> for HashBi
 impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> Extend<(K, V)> for HashBiMap<K, V> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {
-            self.put(k, v);
+            self.insert(k, v);
         }
     }
 }
@@ -229,7 +229,7 @@ mod tests {
     #[test]
     fn borrow_lookup_str_on_string_key() {
         let mut bm: HashBiMap<String, i32> = HashBiMap::new();
-        bm.put("alpha".to_string(), 1);
+        bm.insert("alpha".to_string(), 1);
         // get/contains_key/remove accept a borrowed form of the key (&str)
         assert_eq!(bm.get("alpha"), Some(&1));
         assert!(bm.contains_key("alpha"));
@@ -241,8 +241,8 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut bm = HashBiMap::new();
-        assert_eq!(bm.put("a", 1), None);
-        assert_eq!(bm.put("b", 2), None);
+        assert_eq!(bm.insert("a", 1), None);
+        assert_eq!(bm.insert("b", 2), None);
         assert_eq!(bm.get(&"a"), Some(&1));
         assert_eq!(bm.get_inverse(&2), Some(&"b"));
         assert_eq!(bm.len(), 2);
@@ -251,10 +251,10 @@ mod tests {
     #[test]
     fn test_bijection_enforcement() {
         let mut bm = HashBiMap::new();
-        bm.put("a", 1);
-        bm.put("b", 2);
+        bm.insert("a", 1);
+        bm.insert("b", 2);
         // Insert value 1 under key "c" — should remove "a"
-        bm.put("c", 1);
+        bm.insert("c", 1);
         assert!(!bm.contains_key(&"a"));
         assert_eq!(bm.get(&"c"), Some(&1));
         assert_eq!(bm.get_inverse(&1), Some(&"c"));
@@ -264,8 +264,8 @@ mod tests {
     #[test]
     fn test_overwrite_same_key() {
         let mut bm = HashBiMap::new();
-        bm.put("a", 1);
-        let old = bm.put("a", 2);
+        bm.insert("a", 1);
+        let old = bm.insert("a", 2);
         assert_eq!(old, Some(1));
         assert_eq!(bm.get(&"a"), Some(&2));
         assert!(!bm.contains_value(&1));
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn test_remove_and_inverse() {
         let mut bm = HashBiMap::new();
-        bm.put("x", 10);
-        bm.put("y", 20);
+        bm.insert("x", 10);
+        bm.insert("y", 20);
         assert_eq!(bm.remove(&"x"), Some(10));
         assert!(!bm.contains_value(&10));
         assert_eq!(bm.remove_inverse(&20), Some("y"));
@@ -286,8 +286,8 @@ mod tests {
     #[test]
     fn test_inverse_snapshot() {
         let mut bm = HashBiMap::new();
-        bm.put("a", 1);
-        bm.put("b", 2);
+        bm.insert("a", 1);
+        bm.insert("b", 2);
         let inv = bm.inverse();
         assert_eq!(inv.get(&1), Some(&"a"));
         assert_eq!(inv.get(&2), Some(&"b"));

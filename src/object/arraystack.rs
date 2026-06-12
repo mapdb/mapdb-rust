@@ -16,11 +16,6 @@ impl<T> ArrayStack<T> {
     pub fn new() -> Self {
         ArrayStack { items: Vec::new() }
     }
-    pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        ArrayStack {
-            items: values.into_iter().collect(),
-        }
-    }
 }
 
 impl<T: PartialEq> Collection<T> for ArrayStack<T> {
@@ -144,21 +139,21 @@ mod tests {
 
     #[test]
     fn test_iter_top_to_bottom() {
-        let s = ArrayStack::of(vec![1, 2, 3]);
+        let s = ArrayStack::from_iter([1, 2, 3]);
         let v: Vec<_> = s.iter().copied().collect();
         assert_eq!(v, vec![3, 2, 1]);
     }
 
     #[test]
     fn test_contains() {
-        let s = ArrayStack::of(vec!["a", "b", "c"]);
+        let s = ArrayStack::from_iter(["a", "b", "c"]);
         assert!(s.contains(&"b"));
         assert!(!s.contains(&"z"));
     }
 
     #[test]
     fn test_into_iter_top_to_bottom() {
-        let s = ArrayStack::of(vec![1, 2, 3]);
+        let s = ArrayStack::from_iter([1, 2, 3]);
         let borrowed: Vec<i32> = (&s).into_iter().copied().collect();
         assert_eq!(borrowed, vec![3, 2, 1]);
         let owned: Vec<i32> = s.into_iter().collect();
@@ -175,9 +170,9 @@ mod tests {
 
     #[test]
     fn test_partial_eq() {
-        let a = ArrayStack::of(vec![1, 2, 3]);
-        let b = ArrayStack::of(vec![1, 2, 3]);
-        let c = ArrayStack::of(vec![3, 2, 1]);
+        let a = ArrayStack::from_iter([1, 2, 3]);
+        let b = ArrayStack::from_iter([1, 2, 3]);
+        let c = ArrayStack::from_iter([3, 2, 1]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

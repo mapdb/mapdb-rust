@@ -23,13 +23,6 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
             inner: OpenHashSet::new(),
         }
     }
-    pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        let mut s = HashSet::new();
-        for v in values {
-            s.inner.add(v);
-        }
-        s
-    }
 }
 
 impl<T: Eq + std::hash::Hash> Collection<T> for HashSet<T> {
@@ -53,8 +46,8 @@ impl<T: Eq + std::hash::Hash> MutableCollection<T> for HashSet<T> {
 impl<T: Eq + std::hash::Hash> Set<T> for HashSet<T> {}
 
 impl<T: Eq + std::hash::Hash> MutableSet<T> for HashSet<T> {
-    fn add(&mut self, value: T) -> bool {
-        self.inner.add(value)
+    fn insert(&mut self, value: T) -> bool {
+        self.inner.insert(value)
     }
     fn remove(&mut self, value: &T) -> bool {
         self.inner.remove(value)
@@ -65,7 +58,7 @@ impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
     pub fn union(&self, other: &Self) -> Self {
         let mut out = self.clone();
         for v in other.inner.iter() {
-            out.inner.add(v.clone());
+            out.inner.insert(v.clone());
         }
         out
     }
@@ -73,7 +66,7 @@ impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
         let mut out = HashSet::new();
         for v in self.inner.iter() {
             if other.inner.contains(v) {
-                out.inner.add(v.clone());
+                out.inner.insert(v.clone());
             }
         }
         out
@@ -82,7 +75,7 @@ impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
         let mut out = HashSet::new();
         for v in self.inner.iter() {
             if !other.inner.contains(v) {
-                out.inner.add(v.clone());
+                out.inner.insert(v.clone());
             }
         }
         out
@@ -91,7 +84,7 @@ impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
         let mut out = self.difference(other);
         let rev = other.difference(self);
         for v in rev.inner.iter() {
-            out.inner.add(v.clone());
+            out.inner.insert(v.clone());
         }
         out
     }
@@ -157,7 +150,7 @@ impl<T: Eq + Hash> FromIterator<T> for HashSet<T> {
 impl<T: Eq + Hash> Extend<T> for HashSet<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for v in iter {
-            self.inner.add(v);
+            self.inner.insert(v);
         }
     }
 }
@@ -178,9 +171,9 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut s = HashSet::new();
-        assert!(s.add(1));
-        assert!(s.add(2));
-        assert!(!s.add(1));
+        assert!(s.insert(1));
+        assert!(s.insert(2));
+        assert!(!s.insert(1));
         assert_eq!(s.len(), 2);
         assert!(s.contains(&1));
         assert!(s.remove(&1));
@@ -189,8 +182,8 @@ mod tests {
 
     #[test]
     fn test_set_operations() {
-        let a = HashSet::of(vec![1, 2, 3]);
-        let b = HashSet::of(vec![2, 3, 4]);
+        let a = HashSet::from_iter([1, 2, 3]);
+        let b = HashSet::from_iter([2, 3, 4]);
         let union = a.union(&b);
         assert_eq!(union.len(), 4);
         let inter = a.intersect(&b);
@@ -205,7 +198,7 @@ mod tests {
 
     #[test]
     fn test_functional() {
-        let s = HashSet::of(vec![1, 2, 3, 4, 5]);
+        let s = HashSet::from_iter([1, 2, 3, 4, 5]);
         assert!(s.any_satisfy(|v| *v > 4));
         assert!(s.all_satisfy(|v| *v > 0));
         assert_eq!(s.count_where(|v| *v % 2 == 0), 2);
@@ -213,14 +206,14 @@ mod tests {
 
     #[test]
     fn test_string_type() {
-        let s = HashSet::of(vec!["a".to_string(), "b".to_string()]);
+        let s = HashSet::from_iter(["a".to_string(), "b".to_string()]);
         assert!(s.contains(&"a".to_string()));
         assert_eq!(s.len(), 2);
     }
 
     #[test]
     fn test_into_iter_borrowing_and_owned() {
-        let s = HashSet::of(vec![1, 2, 3]);
+        let s = HashSet::from_iter([1, 2, 3]);
         let mut sum = 0;
         for v in &s {
             sum += *v;
@@ -251,7 +244,7 @@ mod tests {
     #[test]
     fn test_borrow_contains_str() {
         let mut s: HashSet<String> = HashSet::new();
-        s.add("hello".to_string());
+        s.insert("hello".to_string());
         assert!(s.contains("hello"));
         assert!(s.remove("hello"));
         assert!(!s.contains("hello"));

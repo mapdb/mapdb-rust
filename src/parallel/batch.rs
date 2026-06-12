@@ -24,19 +24,24 @@
 /// sections. Mirrors `org.eclipse.collections.impl.parallel.BatchIterable`.
 pub trait BatchIterable<T> {
     /// The total number of elements.
-    fn size(&self) -> usize;
+    fn len(&self) -> usize;
+
+    /// Whether the collection has no elements.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Applies `action` to every element of the `section_index`-th section out
     /// of `section_count` equal-sized contiguous sections, in order. A section
     /// index past the populated sections (possible when `section_count` exceeds
-    /// `size`) yields nothing.
+    /// `len`) yields nothing.
     fn batch_for_each(&self, action: impl FnMut(&T), section_index: usize, section_count: usize);
 
     /// The number of batches of at most `batch_size` elements needed to cover
-    /// the collection, i.e. `ceil(size / batch_size)`, but never less than 1.
+    /// the collection, i.e. `ceil(len / batch_size)`, but never less than 1.
     /// Matches Eclipse Collections' `getBatchCount`.
     fn get_batch_count(&self, batch_size: usize) -> usize {
-        let n = self.size();
+        let n = self.len();
         if batch_size == 0 || n == 0 {
             1
         } else {
@@ -46,8 +51,8 @@ pub trait BatchIterable<T> {
 }
 
 impl<T> BatchIterable<T> for [T] {
-    fn size(&self) -> usize {
-        self.len()
+    fn len(&self) -> usize {
+        <[T]>::len(self)
     }
 
     fn batch_for_each(
@@ -56,7 +61,7 @@ impl<T> BatchIterable<T> for [T] {
         section_index: usize,
         section_count: usize,
     ) {
-        let (lo, hi) = section_bounds(self.len(), section_index, section_count);
+        let (lo, hi) = section_bounds(<[T]>::len(self), section_index, section_count);
         for v in &self[lo..hi] {
             action(v);
         }
@@ -64,8 +69,8 @@ impl<T> BatchIterable<T> for [T] {
 }
 
 impl<T> BatchIterable<T> for Vec<T> {
-    fn size(&self) -> usize {
-        self.len()
+    fn len(&self) -> usize {
+        Vec::len(self)
     }
 
     fn batch_for_each(&self, action: impl FnMut(&T), section_index: usize, section_count: usize) {
@@ -447,7 +452,7 @@ mod exec {
         B: BatchIterable<T> + Sync + ?Sized,
         F: Fn(&T) + Sync,
     {
-        let n = source.size();
+        let n = source.len();
         if n == 0 {
             return;
         }
@@ -489,7 +494,7 @@ mod exec {
         B: BatchIterable<T> + Sync + ?Sized,
         F: Fn(&T) -> bool + Sync,
     {
-        let n = source.size();
+        let n = source.len();
         if n == 0 {
             return 0;
         }
@@ -641,7 +646,7 @@ mod tests {
         use crate::object::ArrayList;
         use crate::ImmutableList;
 
-        let list = ArrayList::of(0..100);
+        let list = ArrayList::from_iter(0..100);
         let slice = list.as_slice();
         // BatchIterable applies to the borrowed slice with no per-type impl.
         assert_eq!(slice.get_batch_count(30), 4);
@@ -705,7 +710,7 @@ mod tests {
     fn generic_driver_over_array_deque() {
         use crate::ArrayDeque;
         use std::sync::atomic::{AtomicU64, Ordering};
-        let dq = ArrayDeque::of(0..20_000u64);
+        let dq = ArrayDeque::from_iter(0..20_000u64);
         let sum = AtomicU64::new(0);
         // Zero-copy parallel iteration over a non-contiguous VecDeque-backed
         // collection, via its BatchIterable impl.
@@ -732,7 +737,7 @@ mod tests {
         for k in 0..500 {
             for j in 0..10 {
                 let v = (k * 10 + j) as i64;
-                mm.put(k, v);
+                mm.insert(k, v);
                 expected += v;
             }
         }
@@ -747,17 +752,17 @@ mod tests {
         );
         // Every value is visited exactly once across key-sections.
         assert_eq!(sum.load(Ordering::Relaxed), expected);
-        assert_eq!(count_in_batches_with(&mm, |_| true, 1, 8), mm.size());
+        assert_eq!(count_in_batches_with(&mm, |_| true, 1, 8), mm.len());
 
         // SetMultimap dedupes; each distinct value visited once.
         let mut sm: SetMultimap<i32, i64> = SetMultimap::new();
         for k in 0..200 {
-            sm.put(k, 1);
-            sm.put(k, 1); // dropped
-            sm.put(k, 2);
+            sm.insert(k, 1);
+            sm.insert(k, 1); // dropped
+            sm.insert(k, 2);
         }
-        assert_eq!(count_in_batches_with(&sm, |_| true, 1, 8), sm.size());
-        assert_eq!(sm.size(), 400); // 200 keys × 2 distinct values
+        assert_eq!(count_in_batches_with(&sm, |_| true, 1, 8), sm.len());
+        assert_eq!(sm.len(), 400); // 200 keys × 2 distinct values
     }
 
     #[cfg(feature = "parallel")]
@@ -769,7 +774,7 @@ mod tests {
         // once (no element clone), then running the slice executor on `&[&T]`.
         let mut set: OpenHashSet<i64> = OpenHashSet::new();
         for v in 0..30_000 {
-            set.add(v);
+            set.insert(v);
         }
         let refs: Vec<&i64> = set.iter().collect();
         assert_eq!(count_with(&refs, |r| **r % 2 == 0, 1, 8), 15_000);

@@ -30,13 +30,6 @@ impl<T> ArrayDeque<T> {
         }
     }
 
-    /// Builds a deque from `values` in front-to-back order.
-    pub fn of<I: IntoIterator<Item = T>>(values: I) -> Self {
-        ArrayDeque {
-            data: values.into_iter().collect(),
-        }
-    }
-
     pub fn push_front(&mut self, value: T) {
         self.data.push_front(value);
     }
@@ -101,7 +94,7 @@ impl<T: Clone> ArrayDeque<T> {
 // `parallel::batch::for_each_in_batches` then gives parallel iteration with no
 // copy. This is a trait impl, not a `par_*` method — see `parallel` module.
 impl<T> crate::parallel::batch::BatchIterable<T> for ArrayDeque<T> {
-    fn size(&self) -> usize {
+    fn len(&self) -> usize {
         self.data.len()
     }
 
@@ -239,7 +232,7 @@ mod tests {
 
     #[test]
     fn contains_and_clear() {
-        let mut d = ArrayDeque::of([1, 2, 3]);
+        let mut d = ArrayDeque::from_iter([1, 2, 3]);
         assert!(d.contains(&2));
         assert!(!d.contains(&99));
         d.clear();
@@ -248,8 +241,8 @@ mod tests {
     }
 
     #[test]
-    fn of_and_iter() {
-        let d = ArrayDeque::of([10, 20, 30]);
+    fn from_iter_and_iter() {
+        let d = ArrayDeque::from_iter([10, 20, 30]);
         let collected: Vec<_> = d.iter().copied().collect();
         assert_eq!(collected, vec![10, 20, 30]);
         let owned: Vec<_> = (&d).into_iter().copied().collect();
@@ -258,9 +251,9 @@ mod tests {
 
     #[test]
     fn equality_and_display() {
-        let a = ArrayDeque::of([1, 2, 3]);
-        let b = ArrayDeque::of([1, 2, 3]);
-        let c = ArrayDeque::of([1, 2]);
+        let a = ArrayDeque::from_iter([1, 2, 3]);
+        let b = ArrayDeque::from_iter([1, 2, 3]);
+        let c = ArrayDeque::from_iter([1, 2]);
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(format!("{}", a), "[1, 2, 3]");

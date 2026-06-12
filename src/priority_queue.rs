@@ -7,7 +7,8 @@
 use std::fmt;
 
 /// Min-heap priority queue. `push` / `pop` are O(log n), `peek` is O(1).
-/// `of` does an O(n) sift-down heapify rather than repeated `push`.
+/// Building from an iterator (`from_iter`/`collect`) does an O(n) sift-down
+/// heapify rather than repeated `push`.
 ///
 /// Min-heap semantics: callers wanting a max-heap should either negate
 /// the value or `drain_sorted` and reverse. Float values must use the
@@ -28,20 +29,6 @@ impl<T: Ord> PriorityQueue<T> {
         PriorityQueue {
             items: Vec::with_capacity(capacity),
         }
-    }
-
-    /// Builds a queue from `values` and heapifies in O(n) (Floyd's
-    /// bottom-up sift-down), not repeated `push`.
-    pub fn of<I: IntoIterator<Item = T>>(values: I) -> Self {
-        let mut q = PriorityQueue {
-            items: values.into_iter().collect(),
-        };
-        if q.items.len() > 1 {
-            for i in (0..q.items.len() / 2).rev() {
-                q.sift_down(i);
-            }
-        }
-        q
     }
 
     pub fn push(&mut self, value: T) {
@@ -67,11 +54,6 @@ impl<T: Ord> PriorityQueue<T> {
         self.items.first()
     }
 
-    pub fn size(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Idiomatic alias of [`size`](Self::size).
     pub fn len(&self) -> usize {
         self.items.len()
     }
@@ -179,9 +161,18 @@ impl<T: Ord> IntoIterator for PriorityQueue<T> {
 }
 
 impl<T: Ord> FromIterator<T> for PriorityQueue<T> {
-    /// Collects into a queue and heapifies in O(n).
+    /// Collects into a queue and heapifies in O(n) (Floyd's bottom-up
+    /// sift-down), not repeated `push`.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        PriorityQueue::of(iter)
+        let mut q = PriorityQueue {
+            items: iter.into_iter().collect(),
+        };
+        if q.items.len() > 1 {
+            for i in (0..q.items.len() / 2).rev() {
+                q.sift_down(i);
+            }
+        }
+        q
     }
 }
 
@@ -215,7 +206,7 @@ mod tests {
     fn empty_basics() {
         let mut q: PriorityQueue<i32> = PriorityQueue::new();
         assert!(q.is_empty());
-        assert_eq!(q.size(), 0);
+        assert_eq!(q.len(), 0);
         assert_eq!(q.peek(), None);
         assert_eq!(q.pop(), None);
     }
@@ -238,25 +229,25 @@ mod tests {
     }
 
     #[test]
-    fn of_heapifies() {
-        let q = PriorityQueue::of([5, 1, 3, 2, 4]);
+    fn from_iter_heapifies() {
+        let q = PriorityQueue::from_iter([5, 1, 3, 2, 4]);
         assert_eq!(q.peek(), Some(&1));
-        assert_eq!(q.size(), 5);
+        assert_eq!(q.len(), 5);
         let sorted = q.drain_sorted();
         assert_eq!(sorted, vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
-    fn of_empty_and_single() {
-        let q: PriorityQueue<i32> = PriorityQueue::of(std::iter::empty());
+    fn from_iter_empty_and_single() {
+        let q: PriorityQueue<i32> = PriorityQueue::from_iter(std::iter::empty());
         assert!(q.is_empty());
-        let q2 = PriorityQueue::of([42]);
+        let q2 = PriorityQueue::from_iter([42]);
         assert_eq!(q2.peek(), Some(&42));
     }
 
     #[test]
     fn contains_clear() {
-        let mut q = PriorityQueue::of([1, 2, 3]);
+        let mut q = PriorityQueue::from_iter([1, 2, 3]);
         assert!(q.contains(&2));
         assert!(!q.contains(&99));
         q.clear();
@@ -266,7 +257,7 @@ mod tests {
 
     #[test]
     fn to_vec_is_heap_order_not_sorted() {
-        let q = PriorityQueue::of([5, 4, 3, 2, 1]);
+        let q = PriorityQueue::from_iter([5, 4, 3, 2, 1]);
         let v = q.to_vec();
         // Min must be at index 0; sortedness is not guaranteed otherwise.
         assert_eq!(v[0], 1);
@@ -274,7 +265,7 @@ mod tests {
 
     #[test]
     fn drain_sorted_handles_duplicates() {
-        let q = PriorityQueue::of([3, 1, 2, 1, 3, 2]);
+        let q = PriorityQueue::from_iter([3, 1, 2, 1, 3, 2]);
         assert_eq!(q.drain_sorted(), vec![1, 1, 2, 2, 3, 3]);
     }
 
@@ -282,7 +273,7 @@ mod tests {
     fn float_via_hashable_wrapper() {
         // Total order via HashableF64: NaN sorts after every finite value
         // (total_cmp puts +NaN at the top, -NaN below -Inf).
-        let q = PriorityQueue::of([
+        let q = PriorityQueue::from_iter([
             HashableF64::from(3.5),
             HashableF64::from(-1.0),
             HashableF64::from(2.0),
@@ -295,9 +286,8 @@ mod tests {
     }
 
     #[test]
-    fn len_alias_matches_size() {
-        let q = PriorityQueue::of([1, 2, 3]);
-        assert_eq!(q.len(), q.size());
+    fn len_reports_count() {
+        let q = PriorityQueue::from_iter([1, 2, 3]);
         assert_eq!(q.len(), 3);
     }
 
@@ -314,7 +304,7 @@ mod tests {
 
     #[test]
     fn extend_pushes() {
-        let mut q = PriorityQueue::of([5, 9]);
+        let mut q = PriorityQueue::from_iter([5, 9]);
         q.extend([1, 7]);
         assert_eq!(q.peek(), Some(&1));
         assert_eq!(q.len(), 4);

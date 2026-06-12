@@ -108,19 +108,20 @@ pub trait Set<T: PartialEq>: Collection<T> {}
 
 /// Mutable set.
 pub trait MutableSet<T: PartialEq>: Set<T> + MutableCollection<T> {
-    fn add(&mut self, value: T) -> bool;
+    fn insert(&mut self, value: T) -> bool;
     fn remove(&mut self, value: &T) -> bool;
 }
 
 /// Bag (multiset with occurrence counts).
 pub trait Bag<T: PartialEq>: Collection<T> {
     fn occurrences_of(&self, value: &T) -> usize;
-    fn size_distinct(&self) -> usize;
+    /// Number of *distinct* elements (each counted once, ignoring occurrences).
+    fn distinct_len(&self) -> usize;
 }
 
 /// Mutable bag.
 pub trait MutableBag<T: PartialEq>: Bag<T> + MutableCollection<T> {
-    fn add(&mut self, value: T);
+    fn insert(&mut self, value: T);
 }
 
 /// LIFO stack.

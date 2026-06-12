@@ -9,24 +9,31 @@
 //! factory pattern. Single generic type replaces what would be 16+ separate
 //! per-primitive synchronized wrapper types.
 //!
+//! The primary API is the **guard**: [`Synchronized::lock`] returns a
+//! [`SyncGuard`] that derefs to the inner collection, so you operate on it
+//! directly and the lock releases when the guard drops. This is the standard
+//! Rust `Mutex` ergonomic; the old `with` / `with_mut` closure methods were
+//! dropped in v2.
+//!
 //! Usage:
 //! ```ignore
 //! use mapdb_collections::{synchronized, Synchronized, OpenHashMap};
 //!
 //! let m: Synchronized<OpenHashMap<i32, String>> = synchronized(OpenHashMap::new());
-//! m.with_mut(|inner| { inner.insert(1, "one".into()); });
-//! let value = m.with(|inner| inner.get(&1).cloned());
+//! m.lock().insert(1, "one".into());
+//! let value = m.lock().get(&1).cloned();
 //! ```
 //!
 //! ## Caveats
 //!
-//! - The inner `Mutex` is **not reentrant**: if the closure passed to `with`
-//!   or `with_mut` calls back into the same `Synchronized` instance (directly
-//!   or transitively), it deadlocks.
-//! - `lock()` / `with` / `with_mut` panic on a poisoned mutex (Java's
-//!   synchronized wrappers have no poisoning concept). Use the inner `Arc`
-//!   yourself if you need `try_lock` / `PoisonError` recovery.
+//! - The inner `Mutex` is **not reentrant**: locking the same `Synchronized`
+//!   instance again while a guard is still held (directly or transitively)
+//!   deadlocks. Drop the guard before re-locking.
+//! - `lock()` panics on a poisoned mutex (Java's synchronized wrappers have no
+//!   poisoning concept). Use [`Synchronized::inner`] to reach the underlying
+//!   `Arc<Mutex<C>>` yourself if you need `try_lock` / `PoisonError` recovery.
 
+use std::ops::{Deref, DerefMut};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Java-style synchronized wrapper for any collection `C`. Cheaply cloneable
@@ -51,23 +58,38 @@ impl<C> Synchronized<C> {
         }
     }
 
-    /// Locks the inner collection for the duration of `f` and returns its result.
-    /// Panics if the lock has been poisoned by a previous panic.
-    pub fn with<R>(&self, f: impl FnOnce(&C) -> R) -> R {
-        let guard = self.lock();
-        f(&*guard)
+    /// Locks the inner collection and returns a guard that derefs to `&C` /
+    /// `&mut C`. The lock is released when the guard is dropped. Panics if the
+    /// lock has been poisoned by a previous panic.
+    pub fn lock(&self) -> SyncGuard<'_, C> {
+        SyncGuard {
+            guard: self.inner.lock().expect("Synchronized lock poisoned"),
+        }
     }
 
-    /// Locks for mutable access.
-    pub fn with_mut<R>(&self, f: impl FnOnce(&mut C) -> R) -> R {
-        let mut guard = self.lock();
-        f(&mut *guard)
+    /// Borrows the shared `Arc<Mutex<C>>` for callers that need `try_lock`,
+    /// `PoisonError` recovery, or to hand the handle to another API.
+    pub fn inner(&self) -> &Arc<Mutex<C>> {
+        &self.inner
     }
+}
 
-    /// Returns the lock guard directly. Prefer `with` / `with_mut` unless you
-    /// genuinely need to hold the lock across multiple operations.
-    pub fn lock(&self) -> MutexGuard<'_, C> {
-        self.inner.lock().expect("Synchronized lock poisoned")
+/// RAII guard returned by [`Synchronized::lock`]. Derefs to the guarded
+/// collection; releases the lock on drop.
+pub struct SyncGuard<'a, C> {
+    guard: MutexGuard<'a, C>,
+}
+
+impl<C> Deref for SyncGuard<'_, C> {
+    type Target = C;
+    fn deref(&self) -> &C {
+        &self.guard
+    }
+}
+
+impl<C> DerefMut for SyncGuard<'_, C> {
+    fn deref_mut(&mut self) -> &mut C {
+        &mut self.guard
     }
 }
 
@@ -91,9 +113,7 @@ mod tests {
                 let mc = m.clone();
                 thread::spawn(move || {
                     for i in (t * 100)..((t + 1) * 100) {
-                        mc.with_mut(|inner| {
-                            inner.insert(i, i * 10);
-                        });
+                        mc.lock().insert(i, i * 10);
                     }
                 })
             })
@@ -101,20 +121,26 @@ mod tests {
         for h in handles {
             h.join().unwrap();
         }
-        m.with(|inner| {
-            assert_eq!(inner.len(), 800);
-            for i in 0..800 {
-                assert_eq!(inner.get(&i), Some(&(i * 10)));
-            }
-        });
+        let guard = m.lock();
+        assert_eq!(guard.len(), 800);
+        for i in 0..800 {
+            assert_eq!(guard.get(&i), Some(&(i * 10)));
+        }
     }
 
     #[test]
     fn synchronized_clone_shares_state() {
         let a: Synchronized<Vec<i32>> = synchronized(vec![]);
         let b = a.clone();
-        a.with_mut(|v| v.push(1));
-        b.with_mut(|v| v.push(2));
-        a.with(|v| assert_eq!(v, &vec![1, 2]));
+        a.lock().push(1);
+        b.lock().push(2);
+        assert_eq!(&*a.lock(), &vec![1, 2]);
+    }
+
+    #[test]
+    fn inner_exposes_arc_mutex_for_try_lock() {
+        let m: Synchronized<Vec<i32>> = synchronized(vec![1, 2, 3]);
+        let guard = m.inner().try_lock().expect("uncontended");
+        assert_eq!(guard.len(), 3);
     }
 }

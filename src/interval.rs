@@ -55,7 +55,7 @@ impl_signed_prim_int!(i8, i16, i32, i64);
 /// The arithmetic exactly matches the cross-language canon from
 /// `algorithms.md` §"Interval over signed integers":
 ///
-/// - `size()` computes `distance() / abs_step() + 1` in `u64`, capping
+/// - `len()` computes `distance() / abs_step() + 1` in `u64`, capping
 ///   at `usize::MAX` if the count would otherwise wrap.
 /// - `contains` casts through `i64` first so the unsigned subtraction
 ///   preserves sign before wrapping.
@@ -140,7 +140,8 @@ impl<T: SignedPrimInt> Interval<T> {
         }
     }
 
-    pub fn size(&self) -> usize {
+    /// Number of elements the interval yields.
+    pub fn len(&self) -> usize {
         let zero = T::from_i64_truncate(0);
         if (self.step > zero && self.from > self.to) || (self.step < zero && self.from < self.to) {
             return 0;
@@ -162,12 +163,7 @@ impl<T: SignedPrimInt> Interval<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.size() == 0
-    }
-
-    /// Idiomatic alias of [`size`](Self::size).
-    pub fn len(&self) -> usize {
-        self.size()
+        self.len() == 0
     }
 
     pub fn contains(&self, value: T) -> bool {
@@ -197,7 +193,7 @@ impl<T: SignedPrimInt> Interval<T> {
     /// panic in debug builds). `from + step * index` is computed modulo
     /// `2^64` and re-narrowed to `T`.
     pub fn get(&self, index: usize) -> Option<T> {
-        if index >= self.size() {
+        if index >= self.len() {
             return None;
         }
         // Compute `from + step * index (mod 2^64)`. `index as u64` is
@@ -215,7 +211,7 @@ impl<T: SignedPrimInt> Interval<T> {
         IntervalIter {
             interval: self,
             index: 0,
-            size: self.size(),
+            size: self.len(),
         }
     }
 
@@ -318,7 +314,7 @@ impl<T: SignedPrimInt> IntoIterator for Interval<T> {
     type Item = T;
     type IntoIter = IntervalIntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
-        let size = self.size();
+        let size = self.len();
         IntervalIntoIter {
             interval: self,
             index: 0,
@@ -329,7 +325,7 @@ impl<T: SignedPrimInt> IntoIterator for Interval<T> {
 
 impl<T: SignedPrimInt> fmt::Display for Interval<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.size() == 0 {
+        if self.is_empty() {
             return write!(f, "[]");
         }
         write!(f, "[")?;
@@ -352,28 +348,28 @@ mod tests {
     #[test]
     fn from_to_ascending() {
         let iv: Interval<i32> = Interval::from_to(1, 5);
-        assert_eq!(iv.size(), 5);
+        assert_eq!(iv.len(), 5);
         assert_eq!(iv.to_vec(), vec![1, 2, 3, 4, 5]);
     }
 
     #[test]
     fn from_to_descending() {
         let iv: Interval<i32> = Interval::from_to(5, 1);
-        assert_eq!(iv.size(), 5);
+        assert_eq!(iv.len(), 5);
         assert_eq!(iv.to_vec(), vec![5, 4, 3, 2, 1]);
     }
 
     #[test]
     fn from_to_by_positive_step() {
         let iv: Interval<i32> = Interval::from_to_by(0, 10, 2);
-        assert_eq!(iv.size(), 6);
+        assert_eq!(iv.len(), 6);
         assert_eq!(iv.to_vec(), vec![0, 2, 4, 6, 8, 10]);
     }
 
     #[test]
     fn from_to_by_negative_step() {
         let iv: Interval<i32> = Interval::from_to_by(10, 0, -2);
-        assert_eq!(iv.size(), 6);
+        assert_eq!(iv.len(), 6);
         assert_eq!(iv.to_vec(), vec![10, 8, 6, 4, 2, 0]);
     }
 
@@ -409,7 +405,7 @@ mod tests {
         // overflow size/contains/get. 127 - 126 = 1 fits in i8, but the
         // uint64 arithmetic guards against the more delicate cases.
         let iv: Interval<i8> = Interval::from_to(126, 127);
-        assert_eq!(iv.size(), 2);
+        assert_eq!(iv.len(), 2);
         assert_eq!(iv.to_vec(), vec![126_i8, 127_i8]);
         assert!(iv.contains(126));
         assert!(iv.contains(127));
@@ -417,7 +413,7 @@ mod tests {
 
         // Full-range i8 ascending: from_to(MIN, MAX) is 256 elements.
         let full: Interval<i8> = Interval::from_to(i8::MIN, i8::MAX);
-        assert_eq!(full.size(), 256);
+        assert_eq!(full.len(), 256);
         assert_eq!(full.get(0), Some(i8::MIN));
         assert_eq!(full.get(255), Some(i8::MAX));
         assert!(full.contains(0));
@@ -430,7 +426,7 @@ mod tests {
         let iv: Interval<i64> = Interval::from_to(i64::MIN, i64::MAX);
         // Cap rule: size would be 2^64, can't fit in usize on any
         // architecture, so clamps to usize::MAX.
-        assert_eq!(iv.size(), usize::MAX);
+        assert_eq!(iv.len(), usize::MAX);
         assert_eq!(iv.get(0), Some(i64::MIN));
         // Index 1 widens to i64 and adds step=1, giving i64::MIN+1.
         assert_eq!(iv.get(1), Some(i64::MIN + 1));
@@ -492,7 +488,7 @@ mod tests {
     #[test]
     fn empty_singleton_display() {
         let single: Interval<i32> = Interval::from_to(7, 7);
-        assert_eq!(single.size(), 1);
+        assert_eq!(single.len(), 1);
         assert_eq!(single.to_vec(), vec![7]);
         assert_eq!(format!("{}", single), "[7]");
 
@@ -518,9 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn len_alias_matches_size() {
+    fn len_reports_count() {
         let iv: Interval<i32> = Interval::from_to(1, 5);
-        assert_eq!(iv.len(), iv.size());
         assert_eq!(iv.len(), 5);
     }
 

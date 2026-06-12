@@ -11,7 +11,7 @@ use std::hash::Hash;
 
 /// Generic unordered map backed by [`crate::hash_table::OpenHashMap`] — the
 /// project's port of Eclipse Collections' open-addressing hash map with
-/// interleaved key/value entries for cache locality. (Not `std::HashMap`.)
+/// niche-packed key/value slots for cache locality. (Not `std::HashMap`.)
 #[derive(Debug, Clone)]
 pub struct HashMap<K: Eq + Hash, V> {
     inner: OpenHashMap<K, V>,

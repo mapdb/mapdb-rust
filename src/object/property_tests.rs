@@ -57,7 +57,7 @@ mod tests {
             let mut added = std::collections::HashSet::new();
             for _ in 0..n {
                 let v = rng.next_i32(500);
-                set.add(v);
+                set.insert(v);
                 added.insert(v);
             }
             for &v in &added {
@@ -81,7 +81,7 @@ mod tests {
             let mut counts = std::collections::HashMap::new();
             for _ in 0..n {
                 let v = rng.next_i32(50);
-                bag.add(v);
+                bag.insert(v);
                 *counts.entry(v).or_insert(0usize) += 1;
             }
             for (&v, &expected) in &counts {
@@ -157,7 +157,7 @@ mod tests {
             for _ in 0..n {
                 let k = rng.next_i32(200);
                 let v = rng.next_i32(200);
-                bm.put(k, v);
+                bm.insert(k, v);
             }
             let mut seen_values = std::collections::HashSet::new();
             for (_, v) in bm.iter() {

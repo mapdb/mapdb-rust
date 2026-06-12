@@ -6,7 +6,7 @@
 
 // Multimap that maps each key to a *set* of values: duplicate values
 // for the same key are silently dropped. Backing is `OpenHashMap<K,
-// Vec<V>>` plus linear-scan dedupe on `put()` — same shape as the
+// Vec<V>>` plus linear-scan dedupe on `insert()` — same shape as the
 // other three ports per `collections.md` §"Multimaps". The
 // vec-not-set choice is deliberate: non-Hashable value types
 // (`f32`/`f64`) work uniformly under this layout while a
@@ -32,10 +32,10 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
         }
     }
 
-    /// Adds `value` to the set for `key`. Idempotent — a duplicate
+    /// Inserts `value` into the set for `key`. Idempotent — a duplicate
     /// `value` for the same `key` is silently dropped. Dedupe is a
     /// linear scan of the existing bucket.
-    pub fn put(&mut self, key: K, value: V) {
+    pub fn insert(&mut self, key: K, value: V) {
         if let Some(bucket) = self.data.get_mut(&key) {
             if bucket.iter().any(|v| v == &value) {
                 return;
@@ -79,16 +79,13 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
         }
     }
 
-    pub fn size(&self) -> usize {
-        self.size
-    }
-
-    /// Idiomatic alias of [`size`](Self::size) — total number of unique values.
+    /// Total number of unique values across all keys.
     pub fn len(&self) -> usize {
         self.size
     }
 
-    pub fn size_distinct(&self) -> usize {
+    /// Number of distinct keys.
+    pub fn distinct_len(&self) -> usize {
         self.data.len()
     }
 
@@ -129,7 +126,7 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
 // Bridge to the parallel module — see `Multimap`'s impl for the key-sectioning
 // rationale. Drive with `parallel::batch::for_each_in_batches`.
 impl<K: Eq + Hash, V: Eq> crate::parallel::batch::BatchIterable<V> for SetMultimap<K, V> {
-    fn size(&self) -> usize {
+    fn len(&self) -> usize {
         self.size
     }
 
@@ -206,14 +203,14 @@ mod tests {
     use crate::HashableF64;
 
     #[test]
-    fn put_dedupes() {
+    fn insert_dedupes() {
         let mut m: SetMultimap<i32, i32> = SetMultimap::new();
-        m.put(1, 10);
-        m.put(1, 20);
-        m.put(1, 10); // duplicate, silently dropped
-        m.put(2, 30);
-        assert_eq!(m.size(), 3);
-        assert_eq!(m.size_distinct(), 2);
+        m.insert(1, 10);
+        m.insert(1, 20);
+        m.insert(1, 10); // duplicate, silently dropped
+        m.insert(2, 30);
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.distinct_len(), 2);
         assert_eq!(m.get(&1), &[10, 20]);
         assert_eq!(m.get(&2), &[30]);
         assert_eq!(m.get(&99), &[] as &[i32]);
@@ -222,21 +219,21 @@ mod tests {
     #[test]
     fn remove_all_updates_size() {
         let mut m: SetMultimap<i32, &str> = SetMultimap::new();
-        m.put(1, "a");
-        m.put(1, "b");
-        m.put(2, "c");
+        m.insert(1, "a");
+        m.insert(1, "b");
+        m.insert(2, "c");
         let removed = m.remove_all(&1);
         assert_eq!(removed, vec!["a", "b"]);
-        assert_eq!(m.size(), 1);
-        assert_eq!(m.size_distinct(), 1);
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.distinct_len(), 1);
         assert_eq!(m.remove_all(&99), Vec::<&str>::new());
     }
 
     #[test]
     fn contains_key_value() {
         let mut m: SetMultimap<&str, i32> = SetMultimap::new();
-        m.put("a", 1);
-        m.put("a", 2);
+        m.insert("a", 1);
+        m.insert("a", 2);
         assert!(m.contains_key(&"a"));
         assert!(!m.contains_key(&"b"));
         assert!(m.contains_key_value(&"a", &1));
@@ -248,20 +245,20 @@ mod tests {
     fn clear_and_is_empty() {
         let mut m: SetMultimap<i32, i32> = SetMultimap::new();
         assert!(m.is_empty());
-        m.put(1, 10);
-        m.put(1, 10);
+        m.insert(1, 10);
+        m.insert(1, 10);
         assert!(!m.is_empty());
         m.clear();
         assert!(m.is_empty());
-        assert_eq!(m.size_distinct(), 0);
+        assert_eq!(m.distinct_len(), 0);
     }
 
     #[test]
     fn iter_and_for_each() {
         let mut m: SetMultimap<i32, &str> = SetMultimap::new();
-        m.put(1, "a");
-        m.put(1, "a"); // dedupe
-        m.put(2, "b");
+        m.insert(1, "a");
+        m.insert(1, "a"); // dedupe
+        m.insert(2, "b");
         assert_eq!(m.iter().count(), 2);
         let mut acc = 0;
         m.for_each(|_k, _v| acc += 1);
@@ -279,23 +276,23 @@ mod tests {
         // Dedupe on the value uses Eq, which f64 implements (with the
         // usual NaN != NaN caveat).
         let mut m: SetMultimap<i32, HashableF64> = SetMultimap::new();
-        m.put(1, HashableF64::from(1.5));
-        m.put(1, HashableF64::from(1.5)); // dedupe
-        m.put(1, HashableF64::from(-0.0));
-        m.put(1, HashableF64::from(0.0)); // distinct from -0.0 under HashableF64
-        assert_eq!(m.size(), 3);
+        m.insert(1, HashableF64::from(1.5));
+        m.insert(1, HashableF64::from(1.5)); // dedupe
+        m.insert(1, HashableF64::from(-0.0));
+        m.insert(1, HashableF64::from(0.0)); // distinct from -0.0 under HashableF64
+        assert_eq!(m.len(), 3);
 
         // NaN value: HashableF64 uses bit-pattern Eq, so distinct
         // bit-pattern NaNs would be distinct values.
-        m.put(1, HashableF64::from(f64::NAN));
-        m.put(1, HashableF64::from(f64::NAN)); // same bits -> dedupe
-        assert_eq!(m.size(), 4);
+        m.insert(1, HashableF64::from(f64::NAN));
+        m.insert(1, HashableF64::from(f64::NAN)); // same bits -> dedupe
+        assert_eq!(m.len(), 4);
     }
 
     #[test]
     fn display_non_empty() {
         let mut m: SetMultimap<i32, i32> = SetMultimap::new();
-        m.put(1, 10);
+        m.insert(1, 10);
         let s = m.to_string();
         assert!(s.contains("1=[10]"));
         let empty: SetMultimap<i32, i32> = SetMultimap::new();
@@ -303,12 +300,11 @@ mod tests {
     }
 
     #[test]
-    fn len_alias_and_into_iter() {
+    fn len_and_into_iter() {
         let mut m: SetMultimap<i32, i32> = SetMultimap::new();
-        m.put(1, 10);
-        m.put(1, 10); // dedupe
-        m.put(2, 20);
-        assert_eq!(m.len(), m.size());
+        m.insert(1, 10);
+        m.insert(1, 10); // dedupe
+        m.insert(2, 20);
         assert_eq!(m.len(), 2);
         assert_eq!((&m).into_iter().count(), 2);
     }

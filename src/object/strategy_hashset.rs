@@ -63,9 +63,9 @@ impl<T> HashSetWithStrategy<T> {
         }
     }
 
-    /// Adds a value to the set. Returns `true` if the value was newly added,
-    /// `false` if it was already present (per the strategy's equality).
-    pub fn add(&mut self, value: T) -> bool {
+    /// Inserts a value into the set. Returns `true` if the value was newly
+    /// inserted, `false` if it was already present (per the strategy's equality).
+    pub fn insert(&mut self, value: T) -> bool {
         if self.needs_resize() {
             self.resize();
         }
@@ -198,7 +198,7 @@ impl<T> HashSetWithStrategy<T> {
         self.size = 0;
         for entry in old {
             if let Some(value) = entry.value {
-                self.add(value);
+                self.insert(value);
             }
         }
     }
@@ -242,9 +242,9 @@ mod tests {
     #[test]
     fn test_case_insensitive_set() {
         let mut s = HashSetWithStrategy::new(case_insensitive_hashing_strategy());
-        assert!(s.add("Hello".to_string()));
-        assert!(!s.add("hello".to_string())); // duplicate
-        assert!(!s.add("HELLO".to_string())); // duplicate
+        assert!(s.insert("Hello".to_string()));
+        assert!(!s.insert("hello".to_string())); // duplicate
+        assert!(!s.insert("HELLO".to_string())); // duplicate
         assert_eq!(s.len(), 1);
         assert!(s.contains(&"hElLo".to_string()));
         assert!(s.remove(&"HELLO".to_string()));
@@ -254,9 +254,9 @@ mod tests {
     #[test]
     fn test_string_set() {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
-        s.add("a".to_string());
-        s.add("b".to_string());
-        s.add("c".to_string());
+        s.insert("a".to_string());
+        s.insert("b".to_string());
+        s.insert("c".to_string());
 
         let sel = s.select(|v| v.as_str() != "b");
         assert_eq!(sel.len(), 2);
@@ -275,15 +275,15 @@ mod tests {
     fn test_by_field_set() {
         let strategy = by_field(|p: &Person| p.name.clone());
         let mut s = HashSetWithStrategy::new(strategy);
-        s.add(Person {
+        s.insert(Person {
             name: "Alice".into(),
             _age: 30,
         });
-        s.add(Person {
+        s.insert(Person {
             name: "Alice".into(),
             _age: 25,
         }); // same name -> duplicate
-        s.add(Person {
+        s.insert(Person {
             name: "Bob".into(),
             _age: 30,
         });
@@ -299,7 +299,7 @@ mod tests {
     fn test_resize_stress() {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
         for i in 0..1000 {
-            s.add(format!("item_{}", i));
+            s.insert(format!("item_{}", i));
         }
         assert_eq!(s.len(), 1000);
         for i in 0..1000 {
@@ -315,7 +315,7 @@ mod tests {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
         assert_eq!(s.entries.len(), 16);
         for i in 0..200 {
-            s.add(format!("k{}", i));
+            s.insert(format!("k{}", i));
         }
         assert!(s.entries.len() > 16);
         assert!(s.entries.len().is_power_of_two());
@@ -330,10 +330,10 @@ mod tests {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
         assert_eq!(s.entries.len(), 16);
         for i in 0..11 {
-            s.add(format!("k{}", i));
+            s.insert(format!("k{}", i));
         }
         assert_eq!(s.entries.len(), 16);
-        s.add("k11".to_string());
+        s.insert("k11".to_string());
         assert_eq!(s.entries.len(), 32);
         assert_eq!(s.len(), 12);
     }
@@ -341,8 +341,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
-        s.add("a".to_string());
-        s.add("b".to_string());
+        s.insert("a".to_string());
+        s.insert("b".to_string());
         s.clear();
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
@@ -351,8 +351,8 @@ mod tests {
     #[test]
     fn test_iter() {
         let mut s = HashSetWithStrategy::new(string_hashing_strategy());
-        s.add("x".to_string());
-        s.add("y".to_string());
+        s.insert("x".to_string());
+        s.insert("y".to_string());
         let mut items: Vec<&String> = s.iter().collect();
         items.sort();
         assert_eq!(items, vec![&"x".to_string(), &"y".to_string()]);

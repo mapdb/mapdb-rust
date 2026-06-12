@@ -48,7 +48,7 @@ mod tests {
             Person {
                 first_name: first.to_string(),
                 last_name: last.to_string(),
-                pets: ArrayList::of(pets),
+                pets: ArrayList::from_iter(pets),
             }
         }
         fn has_pet_type(&self, pt: &PetType) -> bool {
@@ -67,7 +67,7 @@ mod tests {
     }
 
     fn setup_people() -> ArrayList<Person> {
-        ArrayList::of(vec![
+        ArrayList::from_iter(vec![
             Person::new("Mary", "Smith", vec![pet("Tabby", PetType::Cat)]),
             Person::new(
                 "Bob",
@@ -188,7 +188,7 @@ mod tests {
     fn count_pet_types() {
         let people = setup_people();
         let mut bag = HashBag::<PetType>::new();
-        let _ = &people; // TODO: iterate all pets, bag.add(pet_type)
+        let _ = &people; // TODO: iterate all pets, bag.insert(pet_type)
 
         assert_eq!(bag.occurrences_of(&PetType::Cat), 3);
         assert_eq!(bag.occurrences_of(&PetType::Dog), 3);
@@ -203,7 +203,7 @@ mod tests {
     fn unique_pet_types() {
         let people = setup_people();
         let mut types = HashSet::<PetType>::new();
-        let _ = &people; // TODO: iterate all pets, types.add(pet_type)
+        let _ = &people; // TODO: iterate all pets, types.insert(pet_type)
 
         assert_eq!(types.len(), 6);
         assert!(types.contains(&PetType::Cat));

@@ -82,25 +82,25 @@ mod tests {
         let mut unique = HashSetWithStrategy::new(email_strategy);
 
         // Duplicate-ish records from multiple sources.
-        unique.add(User {
+        unique.insert(User {
             email: String::from("alice@example.com"),
             name: String::from("Alice"),
             source: String::from("source-a"),
             login_count: 5,
         });
-        unique.add(User {
+        unique.insert(User {
             email: String::from("ALICE@example.com"),
             name: String::from("Alice A."),
             source: String::from("source-b"),
             login_count: 10,
         });
-        unique.add(User {
+        unique.insert(User {
             email: String::from("bob@example.com"),
             name: String::from("Bob"),
             source: String::from("source-a"),
             login_count: 3,
         });
-        unique.add(User {
+        unique.insert(User {
             email: String::from("Alice@Example.Com"),
             name: String::from("Alice"),
             source: String::from("source-c"),
@@ -130,22 +130,22 @@ mod tests {
         let cmp = then_comparing(by_timestamp, by_severity_desc);
 
         let mut logs: TreeSet<LogLine> = TreeSet::new(cmp);
-        logs.add(LogLine {
+        logs.insert(LogLine {
             timestamp: 100,
             severity: 1,
             message: String::from("info first"),
         });
-        logs.add(LogLine {
+        logs.insert(LogLine {
             timestamp: 100,
             severity: 3,
             message: String::from("error same time"),
         });
-        logs.add(LogLine {
+        logs.insert(LogLine {
             timestamp: 50,
             severity: 0,
             message: String::from("debug earliest"),
         });
-        logs.add(LogLine {
+        logs.insert(LogLine {
             timestamp: 200,
             severity: 2,
             message: String::from("warn latest"),

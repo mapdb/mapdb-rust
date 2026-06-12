@@ -30,9 +30,9 @@ impl<T> TreeSet<T> {
         }
     }
 
-    /// Adds a value to the set. Returns `true` if the value was newly added,
-    /// `false` if it was already present.
-    pub fn add(&mut self, value: T) -> bool {
+    /// Inserts a value into the set. Returns `true` if the value was newly
+    /// inserted, `false` if it was already present.
+    pub fn insert(&mut self, value: T) -> bool {
         self.tree.insert(value, ()).is_none()
     }
 
@@ -132,10 +132,10 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
-        assert!(s.add(3));
-        assert!(s.add(1));
-        assert!(s.add(2));
-        assert!(!s.add(1)); // duplicate
+        assert!(s.insert(3));
+        assert!(s.insert(1));
+        assert!(s.insert(2));
+        assert!(!s.insert(1)); // duplicate
 
         assert_eq!(s.len(), 3);
         let items: Vec<&i32> = s.to_vec();
@@ -145,9 +145,9 @@ mod tests {
     #[test]
     fn test_min_max() {
         let mut s = TreeSet::new(natural_comparator::<String>());
-        s.add("banana".to_string());
-        s.add("apple".to_string());
-        s.add("cherry".to_string());
+        s.insert("banana".to_string());
+        s.insert("apple".to_string());
+        s.insert("cherry".to_string());
 
         assert_eq!(s.min(), Some(&"apple".to_string()));
         assert_eq!(s.max(), Some(&"cherry".to_string()));
@@ -157,7 +157,7 @@ mod tests {
     fn test_remove() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
         for i in 0..50 {
-            s.add(i);
+            s.insert(i);
         }
         for i in (0..50).step_by(2) {
             assert!(s.remove(&i));
@@ -173,7 +173,7 @@ mod tests {
     fn test_select_reject() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
         for i in 1..=5 {
-            s.add(i);
+            s.insert(i);
         }
         let evens = s.select(|v| *v % 2 == 0);
         assert_eq!(evens, vec![&2, &4]);
@@ -185,8 +185,8 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
-        s.add(1);
-        s.add(2);
+        s.insert(1);
+        s.insert(2);
         s.clear();
         assert!(s.is_empty());
         assert_eq!(s.len(), 0);
@@ -196,7 +196,7 @@ mod tests {
     fn test_stress() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
         for i in (0..1000).rev() {
-            s.add(i);
+            s.insert(i);
         }
         assert_eq!(s.len(), 1000);
 
@@ -227,15 +227,15 @@ mod tests {
         let cmp = then_comparing(by_age, by_name);
 
         let mut s = TreeSet::new(cmp);
-        s.add(Person {
+        s.insert(Person {
             name: "Charlie".into(),
             age: 30,
         });
-        s.add(Person {
+        s.insert(Person {
             name: "Alice".into(),
             age: 30,
         });
-        s.add(Person {
+        s.insert(Person {
             name: "Bob".into(),
             age: 25,
         });
@@ -248,9 +248,9 @@ mod tests {
     #[test]
     fn test_reverse_order() {
         let mut s = TreeSet::new(reverse_comparator::<i32>());
-        s.add(1);
-        s.add(3);
-        s.add(2);
+        s.insert(1);
+        s.insert(3);
+        s.insert(2);
         let items: Vec<&i32> = s.to_vec();
         assert_eq!(items, vec![&3, &2, &1]);
     }
@@ -265,9 +265,9 @@ mod tests {
     #[test]
     fn test_into_iter_borrowing_sorted() {
         let mut s = TreeSet::new(natural_comparator::<i32>());
-        s.add(3);
-        s.add(1);
-        s.add(2);
+        s.insert(3);
+        s.insert(1);
+        s.insert(2);
         let v: Vec<i32> = (&s).into_iter().copied().collect();
         assert_eq!(v, vec![1, 2, 3]);
     }

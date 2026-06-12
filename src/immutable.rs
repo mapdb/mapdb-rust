@@ -62,7 +62,7 @@ impl<T: Hash + Eq> ImmutableHashSet<T> {
 
 /// Frozen hash map: O(1) lookup, cheaply cloneable via `Arc`. Uses our ported
 /// `OpenHashMap` (not `std::collections::HashMap`) so the cache-locality
-/// interleaved-entry layout carries through to the immutable variant.
+/// packed-slot layout carries through to the immutable variant.
 #[derive(Debug)]
 pub struct ImmutableHashMap<K, V> {
     inner: Arc<OpenHashMap<K, V>>,
@@ -182,7 +182,7 @@ impl<T: Hash + Eq> FromIterator<T> for ImmutableHashSet<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut s = OpenHashSet::new();
         for v in iter {
-            s.add(v);
+            s.insert(v);
         }
         ImmutableHashSet::from_mutable(s)
     }

@@ -22,13 +22,6 @@ impl<T: Eq + Hash> HashBag<T> {
             size: 0,
         }
     }
-    pub fn of(values: impl IntoIterator<Item = T>) -> Self {
-        let mut bag = Self::new();
-        for v in values {
-            bag.add(v);
-        }
-        bag
-    }
 }
 
 impl<T: Eq + Hash> Collection<T> for HashBag<T> {
@@ -58,13 +51,13 @@ impl<T: Eq + Hash> Bag<T> for HashBag<T> {
     fn occurrences_of(&self, value: &T) -> usize {
         self.counts.get(value).copied().unwrap_or(0)
     }
-    fn size_distinct(&self) -> usize {
+    fn distinct_len(&self) -> usize {
         self.counts.len()
     }
 }
 
 impl<T: Eq + Hash> MutableBag<T> for HashBag<T> {
-    fn add(&mut self, value: T) {
+    fn insert(&mut self, value: T) {
         *self.counts.entry(value).or_insert(0) += 1;
         self.size += 1;
     }
@@ -166,7 +159,7 @@ impl<T: Eq + Hash> FromIterator<T> for HashBag<T> {
 impl<T: Eq + Hash> Extend<T> for HashBag<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         for v in iter {
-            self.add(v);
+            self.insert(v);
         }
     }
 }
@@ -187,11 +180,11 @@ mod tests {
     #[test]
     fn test_basic() {
         let mut bag = HashBag::new();
-        bag.add("a");
-        bag.add("a");
-        bag.add("b");
+        bag.insert("a");
+        bag.insert("a");
+        bag.insert("b");
         assert_eq!(bag.len(), 3);
-        assert_eq!(bag.size_distinct(), 2);
+        assert_eq!(bag.distinct_len(), 2);
         assert_eq!(bag.occurrences_of(&"a"), 2);
         assert_eq!(bag.occurrences_of(&"b"), 1);
         assert_eq!(bag.occurrences_of(&"c"), 0);
@@ -199,7 +192,7 @@ mod tests {
 
     #[test]
     fn test_top_bottom() {
-        let bag = HashBag::of(vec!["a", "a", "a", "b", "b", "c"]);
+        let bag = HashBag::from_iter(["a", "a", "a", "b", "b", "c"]);
         let top = bag.top_occurrences(2);
         assert_eq!(top[0].1, 3);
         assert_eq!(top[1].1, 2);
@@ -213,7 +206,7 @@ mod tests {
     // count, bottom_occurrences strictly ascending by count.
     #[test]
     fn test_occurrence_sort_order_unchanged() {
-        let bag = HashBag::of(vec!["a", "a", "a", "a", "b", "b", "b", "c", "c", "d"]);
+        let bag = HashBag::from_iter(["a", "a", "a", "a", "b", "b", "b", "c", "c", "d"]);
         // counts: a=4, b=3, c=2, d=1
         let top = bag.top_occurrences(4);
         let top_counts: Vec<usize> = top.iter().map(|(_, c)| *c).collect();
@@ -230,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut bag = HashBag::of(vec![1, 1, 2]);
+        let mut bag = HashBag::from_iter([1, 1, 2]);
         assert!(bag.remove_one(&1));
         assert_eq!(bag.occurrences_of(&1), 1);
         assert!(bag.remove_one(&1));
@@ -240,7 +233,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_yields_each_occurrence() {
-        let bag = HashBag::of(vec!["a", "a", "b"]);
+        let bag = HashBag::from_iter(["a", "a", "b"]);
         let mut items: Vec<&str> = (&bag).into_iter().copied().collect();
         items.sort();
         assert_eq!(items, vec!["a", "a", "b"]);
@@ -258,9 +251,9 @@ mod tests {
 
     #[test]
     fn test_partial_eq_by_occurrences() {
-        let a = HashBag::of(vec![1, 1, 2]);
-        let b = HashBag::of(vec![2, 1, 1]);
-        let c = HashBag::of(vec![1, 2, 2]);
+        let a = HashBag::from_iter([1, 1, 2]);
+        let b = HashBag::from_iter([2, 1, 1]);
+        let c = HashBag::from_iter([1, 2, 2]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

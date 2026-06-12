@@ -39,4 +39,4 @@ pub use parallel::BatchIterable;
 #[cfg(feature = "parallel")]
 pub use parallel::{as_parallel, ParallelSlice};
 pub use priority_queue::PriorityQueue;
-pub use synchronized::{synchronized, Synchronized};
+pub use synchronized::{synchronized, SyncGuard, Synchronized};

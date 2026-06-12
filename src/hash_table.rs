@@ -6,103 +6,108 @@
 
 //! Open-addressing hash table with linear probing and Robin Hood backward-shift deletion.
 //!
-//! Ported from Eclipse Collections' primitive hash tables. Uses interleaved
-//! `MapEntry { occupied, key, value }` structs for cache locality — one cache
-//! line covers the occupancy flag, key, and value together, minimizing memory
-//! loads per probe.
+//! Ported from Eclipse Collections' primitive hash tables. The probe array is a
+//! `Vec<Slot<…>>` where `Slot` is a two-variant enum (`Empty` / `Occupied`).
+//! The occupancy flag is the enum discriminant (no separate `bool`), and the
+//! key/value are stored inline rather than behind `Option`, so probing reads a
+//! single packed slot and never unwraps an invariant `Option`. Backward-shift
+//! deletion keeps the table tombstone-free, so two variants are sufficient.
+//!
+//! The maps and sets are generic over the hasher (`S: BuildHasher`), defaulting
+//! to [`std::collections::hash_map::RandomState`] for HashDoS resistance — the
+//! same default `std::collections::HashMap` uses. Opt into a faster, fixed
+//! hasher (FxHash, AHash, …) with [`OpenHashMap::with_hasher`] /
+//! [`OpenHashSet::with_hasher`].
 //!
 //! Generic over any `K: Hash + Eq` and any `V`. For `f32`/`f64` keys, wrap in
 //! [`crate::hashable_float::HashableF32`] / [`crate::hashable_float::HashableF64`]
 //! to get bit-pattern hashing (NaN-aware, ±0 distinct).
 
 use std::borrow::Borrow;
-use std::hash::{Hash, Hasher};
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash};
 
 const DEFAULT_CAPACITY: usize = 16;
 const LOAD_FACTOR_NUM: usize = 3;
 const LOAD_FACTOR_DEN: usize = 4; // 0.75
 
 // ---------------------------------------------------------------------------
-// MapEntry / SetEntry — interleaved for cache locality
+// Slot — niche-packed, tombstone-free entry storage
 // ---------------------------------------------------------------------------
 
+/// A single probe slot. The discriminant *is* the occupancy flag, and the
+/// key/value live inline with no `Option` wrapper, so a probe loads one packed
+/// slot and never unwraps an invariant `Option`. Backward-shift deletion keeps
+/// the table tombstone-free, so two variants suffice.
 #[derive(Debug, Clone)]
-struct MapEntry<K, V> {
-    occupied: bool,
-    key: Option<K>,
-    value: Option<V>,
-}
-
-impl<K, V> Default for MapEntry<K, V> {
-    fn default() -> Self {
-        MapEntry {
-            occupied: false,
-            key: None,
-            value: None,
-        }
-    }
+enum MapSlot<K, V> {
+    Empty,
+    Occupied { key: K, value: V },
 }
 
 #[derive(Debug, Clone)]
-struct SetEntry<K> {
-    occupied: bool,
-    key: Option<K>,
-}
-
-impl<K> Default for SetEntry<K> {
-    fn default() -> Self {
-        SetEntry {
-            occupied: false,
-            key: None,
-        }
-    }
-}
-
-// Run the key through std's `DefaultHasher` (SipHash13) — already produces
-// well-mixed 64-bit output, so no Fibonacci/spread multiplier is added on
-// top. A future optimization would be a faster, primitive-specialised hasher
-// (e.g. FxHash) behind a feature flag, but DefaultHasher is the safe default
-// and matches what `std::HashMap` uses out of the box.
-#[inline]
-fn spread<K: Hash + ?Sized>(key: &K) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut h);
-    h.finish()
+enum SetSlot<K> {
+    Empty,
+    Occupied { key: K },
 }
 
 // ---------------------------------------------------------------------------
-// OpenHashMap<K, V>
+// OpenHashMap<K, V, S>
 // ---------------------------------------------------------------------------
 
-/// Open-addressing hash map with interleaved entries for cache locality.
+/// Open-addressing hash map with niche-packed slots and a pluggable hasher.
 ///
 /// Accepts any `K: Hash + Eq` (including object types like `String`, not just
 /// primitives) and any `V` (including non-`Copy` types like `String`, `Vec`,
-/// or user structs). For `f32`/`f64` keys, wrap them in
-/// [`crate::hashable_float::HashableF32`] or
+/// or user structs). The hasher `S` defaults to [`RandomState`]; use
+/// [`OpenHashMap::with_hasher`] for a fixed/faster hasher. For `f32`/`f64`
+/// keys, wrap them in [`crate::hashable_float::HashableF32`] or
 /// [`crate::hashable_float::HashableF64`].
 #[derive(Debug, Clone)]
-pub struct OpenHashMap<K, V> {
-    entries: Vec<MapEntry<K, V>>,
+pub struct OpenHashMap<K, V, S = RandomState> {
+    entries: Vec<MapSlot<K, V>>,
     size: usize,
+    hasher: S,
 }
 
-impl<K, V> Default for OpenHashMap<K, V> {
+impl<K, V, S: BuildHasher + Default> Default for OpenHashMap<K, V, S> {
     fn default() -> Self {
-        Self::new()
+        Self::with_hasher(S::default())
     }
 }
 
-impl<K, V> OpenHashMap<K, V> {
+impl<K, V> OpenHashMap<K, V, RandomState> {
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
+        Self::with_hasher(RandomState::new())
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, RandomState::new())
+    }
+}
+
+impl<K, V, S> OpenHashMap<K, V, S> {
+    /// Creates an empty map that will hash keys with `hasher`.
+    pub fn with_hasher(hasher: S) -> Self {
+        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+    }
+
+    /// Creates an empty map with pre-allocated capacity that will hash keys
+    /// with `hasher`.
+    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         let cap = capacity.max(DEFAULT_CAPACITY).next_power_of_two();
         let mut entries = Vec::with_capacity(cap);
-        entries.resize_with(cap, MapEntry::default);
-        OpenHashMap { entries, size: 0 }
+        entries.resize_with(cap, || MapSlot::Empty);
+        OpenHashMap {
+            entries,
+            size: 0,
+            hasher,
+        }
+    }
+
+    /// Returns a reference to the map's [`BuildHasher`].
+    pub fn hasher(&self) -> &S {
+        &self.hasher
     }
 
     #[inline]
@@ -127,7 +132,7 @@ impl<K, V> OpenHashMap<K, V> {
 
     pub fn clear(&mut self) {
         for e in &mut self.entries {
-            *e = MapEntry::default();
+            *e = MapSlot::Empty;
         }
         self.size = 0;
     }
@@ -140,9 +145,32 @@ impl<K, V> OpenHashMap<K, V> {
         // `needed*4/3 + 1` form used by `try_reserve`.
         (self.size + 1) * LOAD_FACTOR_DEN >= self.cap() * LOAD_FACTOR_NUM
     }
+
+    pub fn iter(&self) -> OpenHashMapIter<'_, K, V> {
+        OpenHashMapIter {
+            entries: &self.entries,
+            pos: 0,
+        }
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &K> + '_ {
+        self.iter().map(|(k, _)| k)
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.iter().map(|(_, v)| v)
+    }
 }
 
-impl<K: Hash + Eq, V> OpenHashMap<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
+    /// Hashes `key` through the table's `BuildHasher`. `RandomState` (the
+    /// default) already produces well-mixed 64-bit output, so no
+    /// Fibonacci/spread multiplier is layered on top.
+    #[inline]
+    fn hash(&self, key: &(impl Hash + ?Sized)) -> u64 {
+        self.hasher.hash_one(key)
+    }
+
     /// Inserts a key-value pair. Returns the old value if the key was already
     /// present.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -150,20 +178,21 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             self.resize();
         }
         let mask = self.mask();
-        let mut idx = (spread(&key) as usize) & mask;
+        let mut idx = (self.hash(&key) as usize) & mask;
         loop {
-            let e = &mut self.entries[idx];
-            if !e.occupied {
-                e.occupied = true;
-                e.key = Some(key);
-                e.value = Some(value);
-                self.size += 1;
-                return None;
+            match &mut self.entries[idx] {
+                MapSlot::Empty => {
+                    self.entries[idx] = MapSlot::Occupied { key, value };
+                    self.size += 1;
+                    return None;
+                }
+                MapSlot::Occupied { key: k, value: v } if *k == key => {
+                    return Some(std::mem::replace(v, value));
+                }
+                MapSlot::Occupied { .. } => {
+                    idx = (idx + 1) & mask;
+                }
             }
-            if e.key.as_ref().unwrap() == &key {
-                return e.value.replace(value);
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -181,16 +210,15 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (spread(key) as usize) & mask;
+        let mut idx = (self.hash(key) as usize) & mask;
         loop {
-            let e = &self.entries[idx];
-            if !e.occupied {
-                return None;
+            match &self.entries[idx] {
+                MapSlot::Empty => return None,
+                MapSlot::Occupied { key: k, value } if k.borrow() == key => {
+                    return Some(value);
+                }
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if e.key.as_ref().unwrap().borrow() == key {
-                return e.value.as_ref();
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -203,15 +231,18 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (spread(key) as usize) & mask;
+        let mut idx = (self.hash(key) as usize) & mask;
         loop {
-            if !self.entries[idx].occupied {
-                return None;
+            match &self.entries[idx] {
+                MapSlot::Empty => return None,
+                MapSlot::Occupied { key: k, .. } if k.borrow() == key => {
+                    match &mut self.entries[idx] {
+                        MapSlot::Occupied { value, .. } => return Some(value),
+                        MapSlot::Empty => unreachable!(),
+                    }
+                }
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if self.entries[idx].key.as_ref().unwrap().borrow() == key {
-                return self.entries[idx].value.as_mut();
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -233,18 +264,21 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (spread(key) as usize) & mask;
+        let mut idx = (self.hash(key) as usize) & mask;
         loop {
-            if !self.entries[idx].occupied {
-                return None;
+            match &self.entries[idx] {
+                MapSlot::Empty => return None,
+                MapSlot::Occupied { key: k, .. } if k.borrow() == key => {
+                    let taken = std::mem::replace(&mut self.entries[idx], MapSlot::Empty);
+                    self.size -= 1;
+                    self.rehash_from(idx);
+                    match taken {
+                        MapSlot::Occupied { value, .. } => return Some(value),
+                        MapSlot::Empty => unreachable!(),
+                    }
+                }
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if self.entries[idx].key.as_ref().unwrap().borrow() == key {
-                let mut taken = std::mem::take(&mut self.entries[idx]);
-                self.size -= 1;
-                self.rehash_from(idx);
-                return taken.value.take();
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -252,9 +286,8 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
         let mask = self.mask();
         let mut gap = deleted;
         let mut idx = (deleted + 1) & mask;
-        while self.entries[idx].occupied {
-            let key_ref = self.entries[idx].key.as_ref().unwrap();
-            let ideal = (spread(key_ref) as usize) & mask;
+        while let MapSlot::Occupied { key, .. } = &self.entries[idx] {
+            let ideal = (self.hash(key) as usize) & mask;
             let dist_current = idx.wrapping_sub(ideal) & mask;
             let dist_gap = gap.wrapping_sub(ideal) & mask;
             if dist_current > dist_gap {
@@ -277,15 +310,13 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
         if new_cap <= self.entries.len() {
             return;
         }
-        let mut new_entries: Vec<MapEntry<K, V>> = Vec::with_capacity(new_cap);
-        new_entries.resize_with(new_cap, MapEntry::default);
+        let mut new_entries: Vec<MapSlot<K, V>> = Vec::with_capacity(new_cap);
+        new_entries.resize_with(new_cap, || MapSlot::Empty);
         let old = std::mem::replace(&mut self.entries, new_entries);
         self.size = 0;
-        for mut e in old.into_iter() {
-            if e.occupied {
-                let k = e.key.take().unwrap();
-                let v = e.value.take().unwrap();
-                self.insert_no_resize(k, v);
+        for e in old.into_iter() {
+            if let MapSlot::Occupied { key, value } = e {
+                self.insert_no_resize(key, value);
             }
         }
     }
@@ -294,16 +325,14 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
         if new_cap <= self.entries.len() {
             return Ok(());
         }
-        let mut new_entries: Vec<MapEntry<K, V>> = Vec::new();
+        let mut new_entries: Vec<MapSlot<K, V>> = Vec::new();
         new_entries.try_reserve_exact(new_cap)?;
-        new_entries.resize_with(new_cap, MapEntry::default);
+        new_entries.resize_with(new_cap, || MapSlot::Empty);
         let old = std::mem::replace(&mut self.entries, new_entries);
         self.size = 0;
-        for mut e in old.into_iter() {
-            if e.occupied {
-                let k = e.key.take().unwrap();
-                let v = e.value.take().unwrap();
-                self.insert_no_resize(k, v);
+        for e in old.into_iter() {
+            if let MapSlot::Occupied { key, value } = e {
+                self.insert_no_resize(key, value);
             }
         }
         Ok(())
@@ -311,13 +340,10 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
 
     fn insert_no_resize(&mut self, key: K, value: V) {
         let mask = self.mask();
-        let mut idx = (spread(&key) as usize) & mask;
+        let mut idx = (self.hash(&key) as usize) & mask;
         loop {
-            let e = &mut self.entries[idx];
-            if !e.occupied {
-                e.occupied = true;
-                e.key = Some(key);
-                e.value = Some(value);
+            if let MapSlot::Empty = &self.entries[idx] {
+                self.entries[idx] = MapSlot::Occupied { key, value };
                 self.size += 1;
                 return;
             }
@@ -340,25 +366,10 @@ impl<K: Hash + Eq, V> OpenHashMap<K, V> {
         let new_cap = floor.checked_next_power_of_two().unwrap_or(usize::MAX);
         self.grow_to(new_cap)
     }
-
-    pub fn iter(&self) -> OpenHashMapIter<'_, K, V> {
-        OpenHashMapIter {
-            entries: &self.entries,
-            pos: 0,
-        }
-    }
-
-    pub fn keys(&self) -> impl Iterator<Item = &K> + '_ {
-        self.iter().map(|(k, _)| k)
-    }
-
-    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
-        self.iter().map(|(_, v)| v)
-    }
 }
 
 pub struct OpenHashMapIter<'a, K, V> {
-    entries: &'a [MapEntry<K, V>],
+    entries: &'a [MapSlot<K, V>],
     pos: usize,
 }
 
@@ -368,9 +379,8 @@ impl<'a, K, V> Iterator for OpenHashMapIter<'a, K, V> {
         while self.pos < self.entries.len() {
             let i = self.pos;
             self.pos += 1;
-            let e = &self.entries[i];
-            if e.occupied {
-                return Some((e.key.as_ref().unwrap(), e.value.as_ref().unwrap()));
+            if let MapSlot::Occupied { key, value } = &self.entries[i] {
+                return Some((key, value));
             }
         }
         None
@@ -378,32 +388,58 @@ impl<'a, K, V> Iterator for OpenHashMapIter<'a, K, V> {
 }
 
 // ---------------------------------------------------------------------------
-// OpenHashSet<K>
+// OpenHashSet<K, S>
 // ---------------------------------------------------------------------------
 
-/// Open-addressing hash set with interleaved entries.
+/// Open-addressing hash set with niche-packed slots and a pluggable hasher.
+///
+/// The hasher `S` defaults to [`RandomState`]; use [`OpenHashSet::with_hasher`]
+/// for a fixed/faster hasher.
 #[derive(Debug, Clone)]
-pub struct OpenHashSet<K> {
-    entries: Vec<SetEntry<K>>,
+pub struct OpenHashSet<K, S = RandomState> {
+    entries: Vec<SetSlot<K>>,
     size: usize,
+    hasher: S,
 }
 
-impl<K> Default for OpenHashSet<K> {
+impl<K, S: BuildHasher + Default> Default for OpenHashSet<K, S> {
     fn default() -> Self {
-        Self::new()
+        Self::with_hasher(S::default())
     }
 }
 
-impl<K> OpenHashSet<K> {
+impl<K> OpenHashSet<K, RandomState> {
     pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
+        Self::with_hasher(RandomState::new())
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
+        Self::with_capacity_and_hasher(capacity, RandomState::new())
+    }
+}
+
+impl<K, S> OpenHashSet<K, S> {
+    /// Creates an empty set that will hash values with `hasher`.
+    pub fn with_hasher(hasher: S) -> Self {
+        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+    }
+
+    /// Creates an empty set with pre-allocated capacity that will hash values
+    /// with `hasher`.
+    pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
         let cap = capacity.max(DEFAULT_CAPACITY).next_power_of_two();
         let mut entries = Vec::with_capacity(cap);
-        entries.resize_with(cap, SetEntry::default);
-        OpenHashSet { entries, size: 0 }
+        entries.resize_with(cap, || SetSlot::Empty);
+        OpenHashSet {
+            entries,
+            size: 0,
+            hasher,
+        }
+    }
+
+    /// Returns a reference to the set's [`BuildHasher`].
+    pub fn hasher(&self) -> &S {
+        &self.hasher
     }
 
     #[inline]
@@ -423,7 +459,7 @@ impl<K> OpenHashSet<K> {
 
     pub fn clear(&mut self) {
         for e in &mut self.entries {
-            *e = SetEntry::default();
+            *e = SetSlot::Empty;
         }
         self.size = 0;
     }
@@ -436,28 +472,40 @@ impl<K> OpenHashSet<K> {
         // `needed*4/3 + 1` form used by `try_reserve`.
         (self.size + 1) * LOAD_FACTOR_DEN >= self.entries.len() * LOAD_FACTOR_NUM
     }
+
+    pub fn iter(&self) -> OpenHashSetIter<'_, K> {
+        OpenHashSetIter {
+            entries: &self.entries,
+            pos: 0,
+        }
+    }
 }
 
-impl<K: Hash + Eq> OpenHashSet<K> {
-    /// Adds a value. Returns `true` if it was newly inserted (not already present).
-    pub fn add(&mut self, value: K) -> bool {
+impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
+    /// Hashes `key` through the set's `BuildHasher` (see [`OpenHashMap`] for the
+    /// no-extra-spread rationale).
+    #[inline]
+    fn hash(&self, key: &(impl Hash + ?Sized)) -> u64 {
+        self.hasher.hash_one(key)
+    }
+
+    /// Inserts a value. Returns `true` if it was newly inserted (not already present).
+    pub fn insert(&mut self, value: K) -> bool {
         if self.needs_resize() {
             self.resize();
         }
         let mask = self.mask();
-        let mut idx = (spread(&value) as usize) & mask;
+        let mut idx = (self.hash(&value) as usize) & mask;
         loop {
-            let e = &mut self.entries[idx];
-            if !e.occupied {
-                e.occupied = true;
-                e.key = Some(value);
-                self.size += 1;
-                return true;
+            match &self.entries[idx] {
+                SetSlot::Empty => {
+                    self.entries[idx] = SetSlot::Occupied { key: value };
+                    self.size += 1;
+                    return true;
+                }
+                SetSlot::Occupied { key } if *key == value => return false,
+                SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if e.key.as_ref().unwrap() == &value {
-                return false;
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -470,16 +518,13 @@ impl<K: Hash + Eq> OpenHashSet<K> {
             return false;
         }
         let mask = self.mask();
-        let mut idx = (spread(value) as usize) & mask;
+        let mut idx = (self.hash(value) as usize) & mask;
         loop {
-            let e = &self.entries[idx];
-            if !e.occupied {
-                return false;
+            match &self.entries[idx] {
+                SetSlot::Empty => return false,
+                SetSlot::Occupied { key } if key.borrow() == value => return true,
+                SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if e.key.as_ref().unwrap().borrow() == value {
-                return true;
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -492,18 +537,18 @@ impl<K: Hash + Eq> OpenHashSet<K> {
             return false;
         }
         let mask = self.mask();
-        let mut idx = (spread(value) as usize) & mask;
+        let mut idx = (self.hash(value) as usize) & mask;
         loop {
-            if !self.entries[idx].occupied {
-                return false;
+            match &self.entries[idx] {
+                SetSlot::Empty => return false,
+                SetSlot::Occupied { key } if key.borrow() == value => {
+                    self.entries[idx] = SetSlot::Empty;
+                    self.size -= 1;
+                    self.rehash_from(idx);
+                    return true;
+                }
+                SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
-            if self.entries[idx].key.as_ref().unwrap().borrow() == value {
-                self.entries[idx] = SetEntry::default();
-                self.size -= 1;
-                self.rehash_from(idx);
-                return true;
-            }
-            idx = (idx + 1) & mask;
         }
     }
 
@@ -511,9 +556,8 @@ impl<K: Hash + Eq> OpenHashSet<K> {
         let mask = self.mask();
         let mut gap = deleted;
         let mut idx = (deleted + 1) & mask;
-        while self.entries[idx].occupied {
-            let key_ref = self.entries[idx].key.as_ref().unwrap();
-            let ideal = (spread(key_ref) as usize) & mask;
+        while let SetSlot::Occupied { key } = &self.entries[idx] {
+            let ideal = (self.hash(key) as usize) & mask;
             let dist_current = idx.wrapping_sub(ideal) & mask;
             let dist_gap = gap.wrapping_sub(ideal) & mask;
             if dist_current > dist_gap {
@@ -536,14 +580,13 @@ impl<K: Hash + Eq> OpenHashSet<K> {
         if new_cap <= self.entries.len() {
             return;
         }
-        let mut new_entries: Vec<SetEntry<K>> = Vec::with_capacity(new_cap);
-        new_entries.resize_with(new_cap, SetEntry::default);
+        let mut new_entries: Vec<SetSlot<K>> = Vec::with_capacity(new_cap);
+        new_entries.resize_with(new_cap, || SetSlot::Empty);
         let old = std::mem::replace(&mut self.entries, new_entries);
         self.size = 0;
-        for mut e in old.into_iter() {
-            if e.occupied {
-                let k = e.key.take().unwrap();
-                self.insert_no_resize(k);
+        for e in old.into_iter() {
+            if let SetSlot::Occupied { key } = e {
+                self.insert_no_resize(key);
             }
         }
     }
@@ -552,15 +595,14 @@ impl<K: Hash + Eq> OpenHashSet<K> {
         if new_cap <= self.entries.len() {
             return Ok(());
         }
-        let mut new_entries: Vec<SetEntry<K>> = Vec::new();
+        let mut new_entries: Vec<SetSlot<K>> = Vec::new();
         new_entries.try_reserve_exact(new_cap)?;
-        new_entries.resize_with(new_cap, SetEntry::default);
+        new_entries.resize_with(new_cap, || SetSlot::Empty);
         let old = std::mem::replace(&mut self.entries, new_entries);
         self.size = 0;
-        for mut e in old.into_iter() {
-            if e.occupied {
-                let k = e.key.take().unwrap();
-                self.insert_no_resize(k);
+        for e in old.into_iter() {
+            if let SetSlot::Occupied { key } = e {
+                self.insert_no_resize(key);
             }
         }
         Ok(())
@@ -568,12 +610,10 @@ impl<K: Hash + Eq> OpenHashSet<K> {
 
     fn insert_no_resize(&mut self, value: K) {
         let mask = self.mask();
-        let mut idx = (spread(&value) as usize) & mask;
+        let mut idx = (self.hash(&value) as usize) & mask;
         loop {
-            let e = &mut self.entries[idx];
-            if !e.occupied {
-                e.occupied = true;
-                e.key = Some(value);
+            if let SetSlot::Empty = &self.entries[idx] {
+                self.entries[idx] = SetSlot::Occupied { key: value };
                 self.size += 1;
                 return;
             }
@@ -594,17 +634,10 @@ impl<K: Hash + Eq> OpenHashSet<K> {
         let new_cap = floor.checked_next_power_of_two().unwrap_or(usize::MAX);
         self.grow_to(new_cap)
     }
-
-    pub fn iter(&self) -> OpenHashSetIter<'_, K> {
-        OpenHashSetIter {
-            entries: &self.entries,
-            pos: 0,
-        }
-    }
 }
 
 pub struct OpenHashSetIter<'a, K> {
-    entries: &'a [SetEntry<K>],
+    entries: &'a [SetSlot<K>],
     pos: usize,
 }
 
@@ -614,8 +647,8 @@ impl<'a, K> Iterator for OpenHashSetIter<'a, K> {
         while self.pos < self.entries.len() {
             let i = self.pos;
             self.pos += 1;
-            if self.entries[i].occupied {
-                return Some(self.entries[i].key.as_ref().unwrap());
+            if let SetSlot::Occupied { key } = &self.entries[i] {
+                return Some(key);
             }
         }
         None
@@ -626,7 +659,7 @@ impl<'a, K> Iterator for OpenHashSetIter<'a, K> {
 // Standard-library trait impls (additive idiom layer)
 // ---------------------------------------------------------------------------
 
-impl<'a, K: Hash + Eq, V> IntoIterator for &'a OpenHashMap<K, V> {
+impl<'a, K, V, S> IntoIterator for &'a OpenHashMap<K, V, S> {
     type Item = (&'a K, &'a V);
     type IntoIter = OpenHashMapIter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter {
@@ -636,22 +669,22 @@ impl<'a, K: Hash + Eq, V> IntoIterator for &'a OpenHashMap<K, V> {
 
 /// Owning iterator over an `OpenHashMap`'s `(K, V)` pairs (unspecified order).
 pub struct OpenHashMapIntoIter<K, V> {
-    inner: std::vec::IntoIter<MapEntry<K, V>>,
+    inner: std::vec::IntoIter<MapSlot<K, V>>,
 }
 
 impl<K, V> Iterator for OpenHashMapIntoIter<K, V> {
     type Item = (K, V);
     fn next(&mut self) -> Option<Self::Item> {
-        for mut e in self.inner.by_ref() {
-            if e.occupied {
-                return Some((e.key.take().unwrap(), e.value.take().unwrap()));
+        for e in self.inner.by_ref() {
+            if let MapSlot::Occupied { key, value } = e {
+                return Some((key, value));
             }
         }
         None
     }
 }
 
-impl<K, V> IntoIterator for OpenHashMap<K, V> {
+impl<K, V, S> IntoIterator for OpenHashMap<K, V, S> {
     type Item = (K, V);
     type IntoIter = OpenHashMapIntoIter<K, V>;
     fn into_iter(self) -> Self::IntoIter {
@@ -661,9 +694,9 @@ impl<K, V> IntoIterator for OpenHashMap<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> FromIterator<(K, V)> for OpenHashMap<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher + Default> FromIterator<(K, V)> for OpenHashMap<K, V, S> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut m = OpenHashMap::new();
+        let mut m = OpenHashMap::with_hasher(S::default());
         for (k, v) in iter {
             m.insert(k, v);
         }
@@ -671,7 +704,7 @@ impl<K: Hash + Eq, V> FromIterator<(K, V)> for OpenHashMap<K, V> {
     }
 }
 
-impl<K: Hash + Eq, V> Extend<(K, V)> for OpenHashMap<K, V> {
+impl<K: Hash + Eq, V, S: BuildHasher> Extend<(K, V)> for OpenHashMap<K, V, S> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {
             self.insert(k, v);
@@ -680,15 +713,15 @@ impl<K: Hash + Eq, V> Extend<(K, V)> for OpenHashMap<K, V> {
 }
 
 /// Order-insensitive equality: same length and every key maps to an equal value.
-impl<K: Hash + Eq, V: PartialEq> PartialEq for OpenHashMap<K, V> {
+impl<K: Hash + Eq, V: PartialEq, S: BuildHasher> PartialEq for OpenHashMap<K, V, S> {
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && self.iter().all(|(k, v)| other.get(k) == Some(v))
     }
 }
 
-impl<K: Hash + Eq, V: Eq> Eq for OpenHashMap<K, V> {}
+impl<K: Hash + Eq, V: Eq, S: BuildHasher> Eq for OpenHashMap<K, V, S> {}
 
-impl<'a, K: Hash + Eq> IntoIterator for &'a OpenHashSet<K> {
+impl<'a, K, S> IntoIterator for &'a OpenHashSet<K, S> {
     type Item = &'a K;
     type IntoIter = OpenHashSetIter<'a, K>;
     fn into_iter(self) -> Self::IntoIter {
@@ -698,22 +731,22 @@ impl<'a, K: Hash + Eq> IntoIterator for &'a OpenHashSet<K> {
 
 /// Owning iterator over an `OpenHashSet`'s elements (unspecified order).
 pub struct OpenHashSetIntoIter<K> {
-    inner: std::vec::IntoIter<SetEntry<K>>,
+    inner: std::vec::IntoIter<SetSlot<K>>,
 }
 
 impl<K> Iterator for OpenHashSetIntoIter<K> {
     type Item = K;
     fn next(&mut self) -> Option<Self::Item> {
-        for mut e in self.inner.by_ref() {
-            if e.occupied {
-                return Some(e.key.take().unwrap());
+        for e in self.inner.by_ref() {
+            if let SetSlot::Occupied { key } = e {
+                return Some(key);
             }
         }
         None
     }
 }
 
-impl<K> IntoIterator for OpenHashSet<K> {
+impl<K, S> IntoIterator for OpenHashSet<K, S> {
     type Item = K;
     type IntoIter = OpenHashSetIntoIter<K>;
     fn into_iter(self) -> Self::IntoIter {
@@ -723,32 +756,32 @@ impl<K> IntoIterator for OpenHashSet<K> {
     }
 }
 
-impl<K: Hash + Eq> FromIterator<K> for OpenHashSet<K> {
+impl<K: Hash + Eq, S: BuildHasher + Default> FromIterator<K> for OpenHashSet<K, S> {
     fn from_iter<I: IntoIterator<Item = K>>(iter: I) -> Self {
-        let mut s = OpenHashSet::new();
+        let mut s = OpenHashSet::with_hasher(S::default());
         for k in iter {
-            s.add(k);
+            s.insert(k);
         }
         s
     }
 }
 
-impl<K: Hash + Eq> Extend<K> for OpenHashSet<K> {
+impl<K: Hash + Eq, S: BuildHasher> Extend<K> for OpenHashSet<K, S> {
     fn extend<I: IntoIterator<Item = K>>(&mut self, iter: I) {
         for k in iter {
-            self.add(k);
+            self.insert(k);
         }
     }
 }
 
 /// Order-insensitive equality: same length and every element is present in both.
-impl<K: Hash + Eq> PartialEq for OpenHashSet<K> {
+impl<K: Hash + Eq, S: BuildHasher> PartialEq for OpenHashSet<K, S> {
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && self.iter().all(|k| other.contains(k))
     }
 }
 
-impl<K: Hash + Eq> Eq for OpenHashSet<K> {}
+impl<K: Hash + Eq, S: BuildHasher> Eq for OpenHashSet<K, S> {}
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -775,13 +808,13 @@ mod tests {
     #[test]
     fn open_hash_set_partial_eq_order_insensitive() {
         let mut a = OpenHashSet::<i32>::new();
-        a.add(1);
-        a.add(2);
+        a.insert(1);
+        a.insert(2);
         let mut b = OpenHashSet::<i32>::new();
-        b.add(2);
-        b.add(1);
+        b.insert(2);
+        b.insert(1);
         assert_eq!(a, b);
-        b.add(3);
+        b.insert(3);
         assert_ne!(a, b);
     }
 
@@ -832,10 +865,10 @@ mod tests {
         let mut s = OpenHashSet::<i32>::new();
         assert_eq!(s.entries.len(), 16);
         for i in 0..11 {
-            s.add(i);
+            s.insert(i);
         }
         assert_eq!(s.entries.len(), 16);
-        s.add(11); // 12th insert
+        s.insert(11); // 12th insert
         assert_eq!(s.entries.len(), 32);
         assert_eq!(s.len(), 12);
     }
@@ -933,11 +966,11 @@ mod tests {
     }
 
     #[test]
-    fn set_add_remove_contains() {
+    fn set_insert_remove_contains() {
         let mut s = OpenHashSet::<i32>::new();
-        assert!(s.add(1));
-        assert!(s.add(2));
-        assert!(!s.add(1));
+        assert!(s.insert(1));
+        assert!(s.insert(2));
+        assert!(!s.insert(1));
         assert_eq!(s.len(), 2);
         assert!(s.contains(&1));
         assert!(s.remove(&1));
@@ -949,7 +982,7 @@ mod tests {
     fn set_resize() {
         let mut s = OpenHashSet::<i32>::new();
         for i in 0..200 {
-            s.add(i);
+            s.insert(i);
         }
         assert_eq!(s.len(), 200);
         for i in 0..200 {
@@ -961,7 +994,7 @@ mod tests {
     fn set_robin_hood_deletion() {
         let mut s = OpenHashSet::<i32>::new();
         for i in 0..50 {
-            s.add(i);
+            s.insert(i);
         }
         for i in (0..50).step_by(2) {
             s.remove(&i);
@@ -975,9 +1008,9 @@ mod tests {
     #[test]
     fn set_float_via_hashable_newtype() {
         let mut s = OpenHashSet::<HashableF64>::new();
-        s.add(HashableF64(1.5));
-        s.add(HashableF64(2.5));
-        s.add(HashableF64(f64::NAN));
+        s.insert(HashableF64(1.5));
+        s.insert(HashableF64(2.5));
+        s.insert(HashableF64(f64::NAN));
         assert!(s.contains(&HashableF64(1.5)));
         assert!(s.contains(&HashableF64(f64::NAN)));
         assert_eq!(s.len(), 3);
@@ -986,9 +1019,9 @@ mod tests {
     #[test]
     fn set_iter() {
         let mut s = OpenHashSet::<i32>::new();
-        s.add(3);
-        s.add(1);
-        s.add(2);
+        s.insert(3);
+        s.insert(1);
+        s.insert(2);
         let mut vals: Vec<_> = s.iter().copied().collect();
         vals.sort();
         assert_eq!(vals, vec![1, 2, 3]);
@@ -1042,7 +1075,7 @@ mod tests {
         let reserved = s.entries.len();
         assert!(reserved >= 500);
         for i in 0..500 {
-            s.add(i);
+            s.insert(i);
         }
         assert_eq!(reserved, s.entries.len());
         assert_eq!(s.len(), 500);
@@ -1069,16 +1102,16 @@ mod tests {
     #[test]
     fn set_nan_membership_f32() {
         let mut s = OpenHashSet::<HashableF32>::new();
-        assert!(s.add(HashableF32(f32::NAN)));
-        assert!(!s.add(HashableF32(f32::NAN))); // already present
+        assert!(s.insert(HashableF32(f32::NAN)));
+        assert!(!s.insert(HashableF32(f32::NAN))); // already present
         assert!(s.contains(&HashableF32(f32::NAN)));
     }
 
     #[test]
     fn set_nan_membership_f64() {
         let mut s = OpenHashSet::<HashableF64>::new();
-        assert!(s.add(HashableF64(f64::NAN)));
-        assert!(!s.add(HashableF64(f64::NAN)));
+        assert!(s.insert(HashableF64(f64::NAN)));
+        assert!(!s.insert(HashableF64(f64::NAN)));
         assert!(s.contains(&HashableF64(f64::NAN)));
     }
 
@@ -1139,7 +1172,7 @@ mod tests {
         assert_eq!(m.remove("hello"), Some(1));
 
         let mut s = OpenHashSet::<String>::new();
-        s.add("world".to_string());
+        s.insert("world".to_string());
         assert!(s.contains("world"));
         assert!(s.remove("world"));
     }
@@ -1161,5 +1194,25 @@ mod tests {
         let mut set_owned: Vec<i32> = s.into_iter().collect();
         set_owned.sort();
         assert_eq!(set_owned, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn map_with_fixed_hasher() {
+        // Opt into a deterministic hasher via with_hasher.
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::BuildHasherDefault;
+        type Fixed = BuildHasherDefault<DefaultHasher>;
+        let mut m: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        m.insert(1, 10);
+        m.insert(2, 20);
+        assert_eq!(m.get(&1), Some(&10));
+        assert_eq!(m.get(&2), Some(&20));
+        // hasher() exposes the chosen BuildHasher.
+        let _: &Fixed = m.hasher();
+
+        // FromIterator/collect also honours a Default hasher type param.
+        let s: OpenHashSet<i32, Fixed> = [1, 2, 3].into_iter().collect();
+        assert_eq!(s.len(), 3);
+        let _: &Fixed = s.hasher();
     }
 }

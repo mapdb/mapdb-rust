@@ -235,8 +235,8 @@ fn main() {
         "ArrayList<i32>" => run_arraylist(name, operations, assertions),
         "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
         "HashBag<i32>" => run_hashbag(name, operations, assertions),
-        "TreeSet<i32>" => run_treeset(name, operations, assertions),
-        "TreeMap<i32, i32>" => run_treemap(name, operations, assertions),
+        "TreeSet<i32>" => run_treeset(name, operations, assertions, &scenario),
+        "TreeMap<i32, i32>" => run_treemap(name, operations, assertions, &scenario),
         "HashMap<f32, i32>" => run_f32_hashmap(name, operations, assertions),
         "HashSet<f32>" => run_f32_hashset(name, operations, assertions),
         "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
@@ -247,7 +247,10 @@ fn main() {
             // that does not understand a collection kind must SKIP, not fail, so
             // newer scenarios never break an older runner. Mirrors the
             // unknown-assertion-key skip in `emit`.
-            eprintln!("skip: unsupported collection kind (forward-compat): {}", other);
+            eprintln!(
+                "skip: unsupported collection kind (forward-compat): {}",
+                other
+            );
             return;
         }
     }
@@ -825,8 +828,33 @@ fn eval_bag_assertion(key: &str, bag: &OpenHashMap<i32, usize>, total: usize) ->
 
 // ---- TreeSet<i32> ---------------------------------------------------------
 
-fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+// NavigableSet result-log: poll/remove_range return values recorded in
+// execution order while applying operations (see README §NavigableMap).
+#[derive(Default)]
+struct NavLog {
+    poll_first_keys: Vec<Option<i32>>,
+    poll_last_keys: Vec<Option<i32>>,
+    poll_first_values: Vec<Option<i32>>,
+    poll_last_values: Vec<Option<i32>>,
+    remove_range_counts: Vec<i32>,
+}
+
+fn opt_array(v: &[Option<i32>]) -> String {
+    let parts: Vec<String> = v
+        .iter()
+        .map(|x| x.map(|n| n.to_string()).unwrap_or_else(|| "null".into()))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn run_treeset(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
     let mut set: BTreeSet<i32> = BTreeSet::new();
+    let mut log = NavLog::default();
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {
@@ -836,9 +864,36 @@ fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
                 set.remove(&(op["value"].as_i64().unwrap() as i32));
             }
             "clear" => set.clear(),
-            other => panic!("unknown treeset op: {}", other),
+            "poll_first" => {
+                let e = set.iter().next().copied();
+                if let Some(x) = e {
+                    set.remove(&x);
+                }
+                log.poll_first_keys.push(e);
+            }
+            "poll_last" => {
+                let e = set.iter().next_back().copied();
+                if let Some(x) = e {
+                    set.remove(&x);
+                }
+                log.poll_last_keys.push(e);
+            }
+            "remove_range" => {
+                let range = build_range_obj(&op["range"]);
+                let victims: Vec<i32> =
+                    set.iter().copied().filter(|x| range.contains(*x)).collect();
+                let count = victims.len() as i32;
+                for x in &victims {
+                    set.remove(x);
+                }
+                log.remove_range_counts.push(count);
+            }
+            // Forward-compat: an unknown op must not crash an older/newer
+            // runner mix; skip it (mirrors unknown-collection/assertion skip).
+            _ => {}
         }
     }
+    let query = scenario_obj.get("query").map(build_range_obj);
     for (key, expected) in assertions {
         if key == "comment" {
             continue;
@@ -846,12 +901,12 @@ fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
         let v = match key.as_str() {
             "size" => set.len().to_string(),
             "is_empty" => set.is_empty().to_string(),
-            "min" => set
+            "min" | "first" => set
                 .iter()
                 .next()
                 .map(|v| v.to_string())
                 .unwrap_or_else(|| "null".into()),
-            "max" => set
+            "max" | "last" => set
                 .iter()
                 .next_back()
                 .map(|v| v.to_string())
@@ -859,6 +914,40 @@ fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
             "to_sorted_array" => {
                 let v: Vec<i32> = set.iter().copied().collect();
                 format_array(&v)
+            }
+            "descending_elements" => {
+                let v: Vec<i32> = set.iter().rev().copied().collect();
+                format_array(&v)
+            }
+            "range_elements" => match &query {
+                Some(r) => format_array(
+                    &set.iter()
+                        .copied()
+                        .filter(|x| r.contains(*x))
+                        .collect::<Vec<i32>>(),
+                ),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_elements_desc" => match &query {
+                Some(r) => format_array(
+                    &set.iter()
+                        .rev()
+                        .copied()
+                        .filter(|x| r.contains(*x))
+                        .collect::<Vec<i32>>(),
+                ),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_size" => match &query {
+                Some(r) => set.iter().filter(|x| r.contains(**x)).count().to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "poll_first_keys" => opt_array(&log.poll_first_keys),
+            "poll_last_keys" => opt_array(&log.poll_last_keys),
+            "remove_range_counts" => format_array(&log.remove_range_counts),
+            _ if nav_key_prefix(key).is_some() => {
+                let (kind, n) = nav_key_prefix(key).unwrap();
+                opt_i32_str(set_nav(&set, kind, n))
             }
             _ if key.starts_with("contains_") => {
                 let k: i32 = key[9..].parse().unwrap();
@@ -870,10 +959,50 @@ fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
     }
 }
 
+/// Recognise a `floor_<k>`/`ceiling_<k>`/`lower_<k>`/`higher_<k>` assertion
+/// key. `<k>` is parsed as a SIGNED base-10 i32 (leading `-` and the full
+/// i32 range allowed). Returns `(prefix, key)` on a match.
+fn nav_key_prefix(key: &str) -> Option<(&'static str, i32)> {
+    for prefix in ["floor_", "ceiling_", "lower_", "higher_"] {
+        if let Some(rest) = key.strip_prefix(prefix) {
+            // Must parse as signed i32 — otherwise it is not a nav key.
+            if let Ok(n) = rest.parse::<i32>() {
+                let p = match prefix {
+                    "floor_" => "floor",
+                    "ceiling_" => "ceiling",
+                    "lower_" => "lower",
+                    _ => "higher",
+                };
+                return Some((p, n));
+            }
+        }
+    }
+    None
+}
+
+fn set_nav(set: &BTreeSet<i32>, kind: &str, k: i32) -> Option<i32> {
+    match kind {
+        "floor" => set.range(..=k).next_back().copied(),
+        "ceiling" => set.range(k..).next().copied(),
+        "lower" => set.range(..k).next_back().copied(),
+        "higher" => set
+            .range((std::ops::Bound::Excluded(k), std::ops::Bound::Unbounded))
+            .next()
+            .copied(),
+        _ => None,
+    }
+}
+
 // ---- TreeMap<i32, i32> ----------------------------------------------------
 
-fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_treemap(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
     let mut map: BTreeMap<i32, i32> = BTreeMap::new();
+    let mut log = NavLog::default();
     for op in operations {
         match op["op"].as_str().unwrap() {
             "put" => {
@@ -886,9 +1015,37 @@ fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
                 map.remove(&k);
             }
             "clear" => map.clear(),
-            other => panic!("unknown treemap op: {}", other),
+            "poll_first" => {
+                let e = map.iter().next().map(|(k, v)| (*k, *v));
+                if let Some((k, _)) = e {
+                    map.remove(&k);
+                }
+                log.poll_first_keys.push(e.map(|(k, _)| k));
+                log.poll_first_values.push(e.map(|(_, v)| v));
+            }
+            "poll_last" => {
+                let e = map.iter().next_back().map(|(k, v)| (*k, *v));
+                if let Some((k, _)) = e {
+                    map.remove(&k);
+                }
+                log.poll_last_keys.push(e.map(|(k, _)| k));
+                log.poll_last_values.push(e.map(|(_, v)| v));
+            }
+            "remove_range" => {
+                let range = build_range_obj(&op["range"]);
+                let victims: Vec<i32> =
+                    map.keys().copied().filter(|k| range.contains(*k)).collect();
+                let count = victims.len() as i32;
+                for k in &victims {
+                    map.remove(k);
+                }
+                log.remove_range_counts.push(count);
+            }
+            // Forward-compat: skip unknown ops.
+            _ => {}
         }
     }
+    let query = scenario_obj.get("query").map(build_range_obj);
     for (key, expected) in assertions {
         if key == "comment" {
             continue;
@@ -896,12 +1053,12 @@ fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
         let v = match key.as_str() {
             "size" => map.len().to_string(),
             "is_empty" => map.is_empty().to_string(),
-            "min" => map
+            "min" | "first_key" => map
                 .iter()
                 .next()
                 .map(|(k, _)| k.to_string())
                 .unwrap_or_else(|| "null".into()),
-            "max" => map
+            "max" | "last_key" => map
                 .iter()
                 .next_back()
                 .map(|(k, _)| k.to_string())
@@ -913,6 +1070,42 @@ fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
             "sorted_values" => {
                 let v: Vec<i32> = map.values().copied().collect();
                 format_array(&v)
+            }
+            "descending_keys" => {
+                let v: Vec<i32> = map.keys().rev().copied().collect();
+                format_array(&v)
+            }
+            "range_keys" => match &query {
+                Some(r) => format_array(
+                    &map.keys()
+                        .copied()
+                        .filter(|k| r.contains(*k))
+                        .collect::<Vec<i32>>(),
+                ),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_keys_desc" => match &query {
+                Some(r) => format_array(
+                    &map.keys()
+                        .rev()
+                        .copied()
+                        .filter(|k| r.contains(*k))
+                        .collect::<Vec<i32>>(),
+                ),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_size" => match &query {
+                Some(r) => map.keys().filter(|k| r.contains(**k)).count().to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "poll_first_keys" => opt_array(&log.poll_first_keys),
+            "poll_last_keys" => opt_array(&log.poll_last_keys),
+            "poll_first_values" => opt_array(&log.poll_first_values),
+            "poll_last_values" => opt_array(&log.poll_last_values),
+            "remove_range_counts" => format_array(&log.remove_range_counts),
+            _ if nav_key_prefix(key).is_some() => {
+                let (kind, n) = nav_key_prefix(key).unwrap();
+                opt_i32_str(map_nav(&map, kind, n))
             }
             _ if key.starts_with("get_") => {
                 let k: i32 = key[4..].parse().unwrap();
@@ -927,6 +1120,19 @@ fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
         emit(scenario, key, &v, expected, FloatMode::None);
+    }
+}
+
+fn map_nav(map: &BTreeMap<i32, i32>, kind: &str, k: i32) -> Option<i32> {
+    match kind {
+        "floor" => map.range(..=k).next_back().map(|(k, _)| *k),
+        "ceiling" => map.range(k..).next().map(|(k, _)| *k),
+        "lower" => map.range(..k).next_back().map(|(k, _)| *k),
+        "higher" => map
+            .range((std::ops::Bound::Excluded(k), std::ops::Bound::Unbounded))
+            .next()
+            .map(|(k, _)| *k),
+        _ => None,
     }
 }
 
@@ -1185,7 +1391,13 @@ fn build_range(ops: &[Value]) -> Range<i32> {
     if constructors.len() != 1 {
         panic!("Range<i32> scenario must have exactly one constructor op");
     }
-    let op = constructors[0];
+    build_range_obj(constructors[0])
+}
+
+/// Build a `Range<i32>` from a single range-builder object (the `10-range`
+/// op shape). Shared by the `Range<i32>` runner and the NavigableMap/Set
+/// `range`/`query` fields.
+fn build_range_obj(op: &Value) -> Range<i32> {
     let lower = || op["lower"].as_i64().expect("missing lower") as i32;
     let upper = || op["upper"].as_i64().expect("missing upper") as i32;
     match op["op"].as_str().unwrap() {

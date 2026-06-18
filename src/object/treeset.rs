@@ -8,6 +8,7 @@
 
 use super::strategy::Comparator;
 use super::treemap::TreeMap;
+use crate::range::Range;
 use std::fmt;
 
 /// A sorted set backed by a red-black tree with a pluggable [`Comparator`].
@@ -57,6 +58,38 @@ impl<T> TreeSet<T> {
         self.tree.max().map(|(k, _)| k)
     }
 
+    // ── Point navigation (NavigableSet surface) ─────────────────────
+
+    /// Greatest element `<= x`, or `None`.
+    pub fn floor(&self, x: &T) -> Option<&T> {
+        self.tree.floor_key(x)
+    }
+
+    /// Least element `>= x`, or `None`.
+    pub fn ceiling(&self, x: &T) -> Option<&T> {
+        self.tree.ceiling_key(x)
+    }
+
+    /// Greatest element `< x` (strict), or `None`.
+    pub fn lower(&self, x: &T) -> Option<&T> {
+        self.tree.lower_key(x)
+    }
+
+    /// Least element `> x` (strict), or `None`.
+    pub fn higher(&self, x: &T) -> Option<&T> {
+        self.tree.higher_key(x)
+    }
+
+    /// Minimum element, or `None`. Alias for [`min`](Self::min).
+    pub fn first(&self) -> Option<&T> {
+        self.min()
+    }
+
+    /// Maximum element, or `None`. Alias for [`max`](Self::max).
+    pub fn last(&self) -> Option<&T> {
+        self.max()
+    }
+
     /// Returns the number of elements.
     pub fn len(&self) -> usize {
         self.tree.len()
@@ -95,6 +128,61 @@ impl<T> TreeSet<T> {
     /// Returns elements not matching the predicate as a `Vec` of references.
     pub fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<&T> {
         self.iter().filter(|v| !predicate(v)).collect()
+    }
+}
+
+impl<T: Clone> TreeSet<T> {
+    // ── Poll (positional removal) ───────────────────────────────────
+
+    /// Removes and returns the minimum element, or `None` if empty. Does
+    /// not trap on an empty set.
+    pub fn poll_first(&mut self) -> Option<T> {
+        self.tree.poll_first_entry().map(|(k, _)| k)
+    }
+
+    /// Removes and returns the maximum element, or `None` if empty.
+    pub fn poll_last(&mut self) -> Option<T> {
+        self.tree.poll_last_entry().map(|(k, _)| k)
+    }
+}
+
+impl<T: Ord + Copy> TreeSet<T> {
+    // ── Range slice & descending iteration (consume `Range<T>`) ──────
+    //
+    // Range membership is EXACTLY `range.contains(element)`.
+
+    /// Elements in `range`, ascending. Snapshot at call time; read-only.
+    pub fn range_elements(&self, range: Range<T>) -> Vec<T> {
+        self.tree.range_keys(range)
+    }
+
+    /// Elements in `range`, descending.
+    pub fn descending_range_elements(&self, range: Range<T>) -> Vec<T> {
+        self.tree.descending_range_keys(range)
+    }
+
+    /// All elements, descending.
+    pub fn descending(&self) -> Vec<T> {
+        self.tree.descending_keys()
+    }
+
+    /// A **new independent** set of the elements ∈ `range` (materialized
+    /// snapshot; mutating it never affects the original and vice versa).
+    pub fn sub_set(&self, range: Range<T>) -> TreeSet<T>
+    where
+        T: 'static,
+    {
+        let mut out = TreeSet::new(crate::object::natural_comparator::<T>());
+        for x in self.range_elements(range) {
+            out.insert(x);
+        }
+        out
+    }
+
+    /// Removes every element ∈ `range`; returns the count removed. A range
+    /// that matches nothing is a no-op returning `0`.
+    pub fn remove_range(&mut self, range: Range<T>) -> usize {
+        self.tree.remove_range(range)
     }
 }
 
@@ -270,5 +358,109 @@ mod tests {
         s.insert(2);
         let v: Vec<i32> = (&s).into_iter().copied().collect();
         assert_eq!(v, vec![1, 2, 3]);
+    }
+
+    // ── NavigableSet surface ────────────────────────────────────────
+
+    use crate::range::Range;
+
+    fn set_of(elems: &[i32]) -> TreeSet<i32> {
+        let mut s = TreeSet::new(natural_comparator::<i32>());
+        for &e in elems {
+            s.insert(e);
+        }
+        s
+    }
+
+    #[test]
+    fn test_floor_ceiling_lower_higher() {
+        let s = set_of(&[10, 20, 30]);
+        assert_eq!(s.floor(&25), Some(&20));
+        assert_eq!(s.ceiling(&25), Some(&30));
+        assert_eq!(s.floor(&10), Some(&10));
+        assert_eq!(s.lower(&10), None);
+        assert_eq!(s.higher(&30), None);
+        assert_eq!(s.ceiling(&5), Some(&10));
+        assert_eq!(s.first(), Some(&10));
+        assert_eq!(s.last(), Some(&30));
+    }
+
+    #[test]
+    fn test_nav_empty() {
+        let s: TreeSet<i32> = set_of(&[]);
+        assert_eq!(s.floor(&5), None);
+        assert_eq!(s.ceiling(&5), None);
+        assert_eq!(s.lower(&5), None);
+        assert_eq!(s.higher(&5), None);
+        assert_eq!(s.first(), None);
+        assert_eq!(s.last(), None);
+    }
+
+    #[test]
+    fn test_nav_signed_extremes() {
+        let s = set_of(&[i32::MIN, -1, 0, 1, i32::MAX]);
+        assert_eq!(s.floor(&i32::MIN), Some(&i32::MIN));
+        assert_eq!(s.lower(&i32::MIN), None);
+        assert_eq!(s.higher(&-1), Some(&0));
+        assert_eq!(s.ceiling(&i32::MAX), Some(&i32::MAX));
+        assert_eq!(s.higher(&i32::MAX), None);
+        assert_eq!(s.descending(), vec![i32::MAX, 1, 0, -1, i32::MIN]);
+    }
+
+    #[test]
+    fn test_poll_first_last_then_empty() {
+        let mut s = set_of(&[10, 20, 30]);
+        assert_eq!(s.poll_first(), Some(10));
+        assert_eq!(s.poll_last(), Some(30));
+        assert_eq!(s.poll_first(), Some(20));
+        assert_eq!(s.poll_first(), None);
+        assert_eq!(s.poll_last(), None);
+    }
+
+    #[test]
+    fn test_range_and_descending() {
+        let s = set_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        assert_eq!(
+            s.range_elements(Range::closed_open(30, 70)),
+            vec![30, 40, 50, 60]
+        );
+        assert_eq!(
+            s.descending_range_elements(Range::closed_open(30, 70)),
+            vec![60, 50, 40, 30]
+        );
+        assert_eq!(
+            s.range_elements(Range::open_closed(30, 70)),
+            vec![40, 50, 60, 70]
+        );
+        assert_eq!(s.range_elements(Range::at_least(80)), vec![80, 90, 100]);
+    }
+
+    #[test]
+    fn test_range_open_no_integer_is_empty() {
+        let s = set_of(&[1, 2]);
+        assert_eq!(s.range_elements(Range::open(1, 2)), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_remove_range_count_and_noop() {
+        let mut s = set_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        assert_eq!(s.remove_range(Range::closed_open(30, 70)), 4);
+        assert_eq!(s.remove_range(Range::closed_open(30, 70)), 0);
+        let v: Vec<i32> = s.iter().copied().collect();
+        assert_eq!(v, vec![10, 20, 70, 80, 90, 100]);
+    }
+
+    #[test]
+    fn test_sub_set_independence() {
+        let mut s = set_of(&[10, 20, 30, 40, 50]);
+        let mut snap = s.sub_set(Range::closed(20, 40));
+        let snap_v: Vec<i32> = snap.iter().copied().collect();
+        assert_eq!(snap_v, vec![20, 30, 40]);
+        snap.insert(99);
+        snap.remove(&20);
+        assert!(s.contains(&20));
+        assert!(!s.contains(&99));
+        s.remove(&30);
+        assert!(snap.contains(&30));
     }
 }

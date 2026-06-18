@@ -7,6 +7,7 @@
 //! Sorted map backed by a red-black tree with pluggable [`Comparator`].
 
 use super::strategy::Comparator;
+use crate::range::Range;
 use std::cmp::Ordering;
 use std::fmt;
 
@@ -28,6 +29,21 @@ impl<K, V> Node<K, V> {
             red,
         }
     }
+}
+
+/// Which side of `k` a point-navigation query selects, and whether the
+/// match at `k` itself is admissible. Drives the shared [`TreeMap::bound_entry`]
+/// walk for `floor`/`ceiling`/`lower`/`higher`.
+#[derive(Clone, Copy)]
+enum Bound {
+    /// Greatest key `<= k`.
+    Floor,
+    /// Least key `>= k`.
+    Ceiling,
+    /// Greatest key `< k` (strict).
+    Lower,
+    /// Least key `> k` (strict).
+    Higher,
 }
 
 /// A sorted map backed by a left-leaning red-black tree with a pluggable
@@ -134,6 +150,109 @@ impl<K, V> TreeMap<K, V> {
         max_ref(&self.root).map(|n| (&n.key, &n.value))
     }
 
+    // ── Point navigation (NavigableMap surface) ─────────────────────
+    //
+    // floor `<= k`, ceiling `>= k`, lower `< k` (strict), higher `> k`
+    // (strict). All comparisons go through the tree comparator, so the
+    // float total order carries through for `HashableF32`/`HashableF64`
+    // keys exactly as in-order iteration does.
+
+    /// Greatest key `<= k` and its value, or `None`.
+    pub fn floor_entry(&self, k: &K) -> Option<(&K, &V)> {
+        self.bound_entry(k, Bound::Floor)
+    }
+
+    /// Greatest key `<= k`, or `None`.
+    pub fn floor_key(&self, k: &K) -> Option<&K> {
+        self.floor_entry(k).map(|(key, _)| key)
+    }
+
+    /// Least key `>= k` and its value, or `None`.
+    pub fn ceiling_entry(&self, k: &K) -> Option<(&K, &V)> {
+        self.bound_entry(k, Bound::Ceiling)
+    }
+
+    /// Least key `>= k`, or `None`.
+    pub fn ceiling_key(&self, k: &K) -> Option<&K> {
+        self.ceiling_entry(k).map(|(key, _)| key)
+    }
+
+    /// Greatest key `< k` (strict) and its value, or `None`.
+    pub fn lower_entry(&self, k: &K) -> Option<(&K, &V)> {
+        self.bound_entry(k, Bound::Lower)
+    }
+
+    /// Greatest key `< k` (strict), or `None`.
+    pub fn lower_key(&self, k: &K) -> Option<&K> {
+        self.lower_entry(k).map(|(key, _)| key)
+    }
+
+    /// Least key `> k` (strict) and its value, or `None`.
+    pub fn higher_entry(&self, k: &K) -> Option<(&K, &V)> {
+        self.bound_entry(k, Bound::Higher)
+    }
+
+    /// Least key `> k` (strict), or `None`.
+    pub fn higher_key(&self, k: &K) -> Option<&K> {
+        self.higher_entry(k).map(|(key, _)| key)
+    }
+
+    /// Minimum key and its value, or `None`. Alias for [`min`](Self::min)
+    /// completing the navigable surface.
+    pub fn first_entry(&self) -> Option<(&K, &V)> {
+        self.min()
+    }
+
+    /// Minimum key, or `None`.
+    pub fn first_key(&self) -> Option<&K> {
+        self.min().map(|(k, _)| k)
+    }
+
+    /// Maximum key and its value, or `None`. Alias for [`max`](Self::max).
+    pub fn last_entry(&self) -> Option<(&K, &V)> {
+        self.max()
+    }
+
+    /// Maximum key, or `None`.
+    pub fn last_key(&self) -> Option<&K> {
+        self.max().map(|(k, _)| k)
+    }
+
+    /// Shared walk for the four point-navigation queries: descend the
+    /// tree tracking the best candidate seen on the relevant side.
+    fn bound_entry(&self, k: &K, bound: Bound) -> Option<(&K, &V)> {
+        let mut current = &self.root;
+        let mut best: Option<&Node<K, V>> = None;
+        while let Some(ref n) = current {
+            let ord = self.cmp.compare(k, &n.key);
+            let take = match bound {
+                // floor/lower track the greatest key on the `<` side;
+                // floor also accepts equality.
+                Bound::Floor => ord != Ordering::Less, // n.key <= k
+                Bound::Lower => ord == Ordering::Greater, // n.key < k
+                // ceiling/higher track the least key on the `>` side;
+                // ceiling also accepts equality.
+                Bound::Ceiling => ord != Ordering::Greater, // n.key >= k
+                Bound::Higher => ord == Ordering::Less,     // n.key > k
+            };
+            if take {
+                best = Some(n);
+                // candidate qualifies; move toward k for a tighter one.
+                current = match bound {
+                    Bound::Floor | Bound::Lower => &n.right,
+                    Bound::Ceiling | Bound::Higher => &n.left,
+                };
+            } else {
+                // n.key on the wrong side; move toward the accepted side.
+                current = match bound {
+                    Bound::Floor | Bound::Lower => &n.left,
+                    Bound::Ceiling | Bound::Higher => &n.right,
+                };
+            }
+        }
+        best.map(|n| (&n.key, &n.value))
+    }
+
     /// Returns an iterator over `(&K, &V)` pairs in sorted order.
     pub fn iter(&self) -> TreeMapIter<'_, K, V> {
         let mut stack = Vec::new();
@@ -223,6 +342,122 @@ impl<K, V> TreeMap<K, V> {
             }
         }
         Some(fix_up(node))
+    }
+}
+
+impl<K: Clone, V> TreeMap<K, V> {
+    // ── Poll (positional removal) ───────────────────────────────────
+
+    /// Removes and returns the minimum entry, or `None` if empty. Does not
+    /// trap on an empty map.
+    pub fn poll_first_entry(&mut self) -> Option<(K, V)> {
+        let key = self.first_key()?.clone();
+        let value = self.remove(&key)?;
+        Some((key, value))
+    }
+
+    /// Removes and returns the maximum entry, or `None` if empty. Does not
+    /// trap on an empty map.
+    pub fn poll_last_entry(&mut self) -> Option<(K, V)> {
+        let key = self.last_key()?.clone();
+        let value = self.remove(&key)?;
+        Some((key, value))
+    }
+}
+
+impl<K: Ord + Copy, V> TreeMap<K, V> {
+    // ── Range slice & descending iteration (consume `Range<K>`) ──────
+    //
+    // Range membership is EXACTLY `range.contains(key)`: e.g. `open(1, 2)`
+    // over `i32` matches no key yet is a valid, non-cut-empty range. We
+    // never infer discrete-domain emptiness from the cuts.
+
+    /// Keys in `range`, ascending. Snapshot taken at call time; read-only.
+    pub fn range_keys(&self, range: Range<K>) -> Vec<K> {
+        self.keys()
+            .copied()
+            .filter(|k| range.contains(*k))
+            .collect()
+    }
+
+    /// `(key, value)` pairs whose key ∈ `range`, ascending. Values are
+    /// copied so the result is an independent snapshot.
+    pub fn range_entries(&self, range: Range<K>) -> Vec<(K, V)>
+    where
+        V: Copy,
+    {
+        self.iter()
+            .filter(|(k, _)| range.contains(**k))
+            .map(|(k, v)| (*k, *v))
+            .collect()
+    }
+
+    /// Keys in `range`, descending.
+    pub fn descending_range_keys(&self, range: Range<K>) -> Vec<K> {
+        let mut v = self.range_keys(range);
+        v.reverse();
+        v
+    }
+
+    /// `(key, value)` pairs whose key ∈ `range`, descending.
+    pub fn descending_range_entries(&self, range: Range<K>) -> Vec<(K, V)>
+    where
+        V: Copy,
+    {
+        let mut v = self.range_entries(range);
+        v.reverse();
+        v
+    }
+
+    /// All keys, descending.
+    pub fn descending_keys(&self) -> Vec<K> {
+        let mut v: Vec<K> = self.keys().copied().collect();
+        v.reverse();
+        v
+    }
+
+    /// All `(key, value)` pairs, descending.
+    pub fn descending_entries(&self) -> Vec<(K, V)>
+    where
+        V: Copy,
+    {
+        let mut v: Vec<(K, V)> = self.iter().map(|(k, v)| (*k, *v)).collect();
+        v.reverse();
+        v
+    }
+
+    /// A **new independent** map of the entries whose key ∈ `range`.
+    /// Mutating the snapshot never affects the original and vice versa
+    /// (it is a materialized copy, not a live view). The snapshot is keyed
+    /// by the natural comparator over `K: Ord`.
+    pub fn sub_map(&self, range: Range<K>) -> TreeMap<K, V>
+    where
+        K: 'static,
+        V: Copy,
+    {
+        let mut out = TreeMap::new(crate::object::natural_comparator::<K>());
+        for (k, v) in self.iter() {
+            if range.contains(*k) {
+                out.insert(*k, *v);
+            }
+        }
+        out
+    }
+
+    /// Removes every entry whose key ∈ `range`; returns the count removed.
+    /// `remove_range` over a range that matches nothing is a no-op
+    /// returning `0`.
+    pub fn remove_range(&mut self, range: Range<K>) -> usize {
+        let victims: Vec<K> = self
+            .keys()
+            .copied()
+            .filter(|k| range.contains(*k))
+            .collect();
+        let count = victims.len();
+        for k in victims {
+            self.remove(&k);
+        }
+        count
     }
 }
 
@@ -561,5 +796,130 @@ mod tests {
         m.insert(2, 20);
         let pairs: Vec<(i32, i32)> = (&m).into_iter().map(|(k, v)| (*k, *v)).collect();
         assert_eq!(pairs, vec![(1, 10), (2, 20), (3, 30)]);
+    }
+
+    // ── NavigableMap surface ────────────────────────────────────────
+
+    use crate::range::Range;
+
+    fn map_of(keys: &[i32]) -> TreeMap<i32, i32> {
+        let mut m = TreeMap::new(natural_comparator::<i32>());
+        for &k in keys {
+            m.insert(k, k.wrapping_mul(10));
+        }
+        m
+    }
+
+    #[test]
+    fn test_floor_ceiling_lower_higher() {
+        let m = map_of(&[10, 20, 30]);
+        assert_eq!(m.floor_key(&25), Some(&20));
+        assert_eq!(m.ceiling_key(&25), Some(&30));
+        assert_eq!(m.floor_key(&10), Some(&10)); // inclusive
+        assert_eq!(m.lower_key(&10), None); // strict, nothing below
+        assert_eq!(m.higher_key(&30), None); // strict, nothing above
+        assert_eq!(m.ceiling_key(&5), Some(&10));
+        assert_eq!(m.lower_key(&25), Some(&20));
+        assert_eq!(m.higher_key(&25), Some(&30));
+        // entry forms carry value = key*10.
+        assert_eq!(m.floor_entry(&25), Some((&20, &200)));
+        assert_eq!(m.ceiling_entry(&25), Some((&30, &300)));
+        assert_eq!(m.first_key(), Some(&10));
+        assert_eq!(m.last_key(), Some(&30));
+    }
+
+    #[test]
+    fn test_nav_empty() {
+        let m: TreeMap<i32, i32> = map_of(&[]);
+        assert_eq!(m.floor_key(&5), None);
+        assert_eq!(m.ceiling_key(&5), None);
+        assert_eq!(m.lower_key(&5), None);
+        assert_eq!(m.higher_key(&5), None);
+        assert_eq!(m.first_key(), None);
+        assert_eq!(m.last_key(), None);
+    }
+
+    #[test]
+    fn test_nav_signed_extremes() {
+        let m = map_of(&[i32::MIN, -1, 0, 1, i32::MAX]);
+        assert_eq!(m.floor_key(&i32::MIN), Some(&i32::MIN));
+        assert_eq!(m.lower_key(&i32::MIN), None);
+        assert_eq!(m.higher_key(&-1), Some(&0));
+        assert_eq!(m.ceiling_key(&i32::MAX), Some(&i32::MAX));
+        assert_eq!(m.higher_key(&i32::MAX), None);
+        assert_eq!(m.descending_keys(), vec![i32::MAX, 1, 0, -1, i32::MIN]);
+    }
+
+    #[test]
+    fn test_poll_first_last() {
+        let mut m = map_of(&[10, 20, 30]);
+        assert_eq!(m.poll_first_entry(), Some((10, 100)));
+        assert_eq!(m.poll_last_entry(), Some((30, 300)));
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.poll_first_entry(), Some((20, 200)));
+        // now empty: returns None, does not trap.
+        assert_eq!(m.poll_first_entry(), None);
+        assert_eq!(m.poll_last_entry(), None);
+    }
+
+    #[test]
+    fn test_poll_single_then_empty() {
+        let mut m = map_of(&[]);
+        m.insert(7, 700);
+        assert_eq!(m.poll_first_entry(), Some((7, 700)));
+        assert_eq!(m.poll_first_entry(), None);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn test_range_closed_open() {
+        let m = map_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        assert_eq!(
+            m.range_keys(Range::closed_open(30, 70)),
+            vec![30, 40, 50, 60]
+        );
+        assert_eq!(
+            m.descending_range_keys(Range::closed_open(30, 70)),
+            vec![60, 50, 40, 30]
+        );
+        assert_eq!(
+            m.range_entries(Range::closed_open(30, 50)),
+            vec![(30, 300), (40, 400)]
+        );
+    }
+
+    #[test]
+    fn test_range_open_no_integer_is_empty() {
+        // open(1, 2) over i32 matches NOTHING (membership = contains), but
+        // is not cut-empty.
+        let mut m = map_of(&[1, 2]);
+        assert_eq!(m.range_keys(Range::open(1, 2)), Vec::<i32>::new());
+        assert_eq!(m.remove_range(Range::open(1, 2)), 0);
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_range_count_and_noop() {
+        let mut m = map_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
+        assert_eq!(m.remove_range(Range::closed_open(30, 70)), 4);
+        assert_eq!(m.remove_range(Range::closed_open(30, 70)), 0); // no-op
+        let keys: Vec<i32> = m.keys().copied().collect();
+        assert_eq!(keys, vec![10, 20, 70, 80, 90, 100]);
+    }
+
+    #[test]
+    fn test_sub_map_independence() {
+        let mut m = map_of(&[10, 20, 30, 40, 50]);
+        let mut snap = m.sub_map(Range::closed(20, 40));
+        let snap_keys: Vec<i32> = snap.keys().copied().collect();
+        assert_eq!(snap_keys, vec![20, 30, 40]);
+        // Mutate snapshot — original unchanged.
+        snap.insert(99, 990);
+        snap.remove(&20);
+        assert!(m.contains_key(&20));
+        assert!(!m.contains_key(&99));
+        // Mutate original — snapshot unchanged.
+        m.remove(&30);
+        assert!(snap.contains_key(&30));
     }
 }

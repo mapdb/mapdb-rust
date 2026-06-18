@@ -13,6 +13,7 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::bounded_lru::{BoundedLruMap, EvictionCause};
 use mapdb_collections::hash;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
@@ -24,8 +25,10 @@ use mapdb_collections::{
     HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet,
 };
 use serde_json::Value;
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 // Set whenever any assertion mismatches. The process exits non-zero at the
@@ -252,6 +255,7 @@ fn main() {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
+        "BoundedLruMap<i32, i32>" => run_bounded_lru(name, operations, assertions, &scenario),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -1933,5 +1937,250 @@ fn run_immutable_sorted_set(
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
         emit(scenario, key, &v, expected, FloatMode::None);
+    }
+}
+
+// ---- BoundedLruMap<i32, i32> ---------------------------------------------
+//
+// The bounded LRU map (spec/features/bounded-lru.md). Routed through the
+// PRODUCTION BoundedLruMap<i32> + arena/slot-index intrusive LRU list. The
+// recording eviction callback (always installed by the runner) appends each
+// (key, value, cause) triple to an ordered eviction LOG — the load-bearing
+// cross-language oracle.
+//
+// Config (on the scenario object): `max_size` (required, non-negative) and
+// `ttl` (a logical-tick TTL, or null/absent for a pure max-size map). `now`
+// and `ttl` are decimal STRINGS if they exceed 2^53 (the i64-suite discipline),
+// plain JSON numbers otherwise.
+//
+// Operations: put / put_at (put with `now`) / get / get_or_default /
+// contains_key / remove / clear / expire_entries / snapshot_keys /
+// snapshot_values / snapshot_entries, applied in listed order. The runner
+// records each op's result (put_results, get_results, get_or_default_results,
+// contains_results, remove_results, expired_counts) and each snapshot
+// (snapshot_keys_log, snapshot_values_log) for the result-log assertions.
+//
+// Explicit-order assertion keys (emitted in LRU / invocation order, NEVER
+// re-sorted): `lru_order_keys`, `lru_order_values`, `eviction_log`, and the
+// inner arrays of `snapshot_keys_log` / `snapshot_values_log`. The
+// `eviction_log` element shape is `[key, value, "cause"]` with `cause` the
+// lower-case string "size"/"expired". Unknown ops / assertion keys SKIP
+// (forward-compat).
+
+/// Parse a `now`/`ttl` operand: a u64 logical tick encoded as a decimal STRING
+/// (parsed straight to u64, never via f64) or a plain JSON number for small
+/// values. Reuses the i64-suite's decimal-string discipline.
+fn parse_u64_tick(v: &Value) -> u64 {
+    if let Some(s) = v.as_str() {
+        s.parse::<u64>()
+            .unwrap_or_else(|_| panic!("invalid u64 decimal-string tick: {:?}", s))
+    } else if let Some(n) = v.as_u64() {
+        n
+    } else {
+        panic!("expected u64 tick (decimal string or number), got {:?}", v);
+    }
+}
+
+/// Result logs accumulated while applying bounded-LRU operations, in execution
+/// order — exactly as the NavigableMap runner records poll/remove_range.
+#[derive(Default)]
+struct LruLog {
+    put_results: Vec<Option<i32>>,
+    get_results: Vec<Option<i32>>,
+    get_or_default_results: Vec<i32>,
+    contains_results: Vec<bool>,
+    remove_results: Vec<Option<i32>>,
+    expired_counts: Vec<i32>,
+    snapshot_keys_log: Vec<Vec<i32>>,
+    snapshot_values_log: Vec<Vec<i32>>,
+    /// Each recorded `snapshot_entries` op: an LRU-order array of `[key, value]`
+    /// pairs — exercises the `entries()` snapshot path (key/value pairing), not
+    /// just the key array.
+    snapshot_entries_log: Vec<Vec<(i32, i32)>>,
+}
+
+fn run_bounded_lru(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let max_size = scenario_obj["max_size"]
+        .as_u64()
+        .expect("BoundedLruMap scenario needs a non-negative max_size") as usize;
+    // ttl: null/absent => pure max-size map; otherwise a u64 logical tick.
+    let ttl: Option<u64> = match scenario_obj.get("ttl") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(parse_u64_tick(v)),
+    };
+
+    // The recording eviction callback appends each (key, value, cause) triple
+    // to the shared eviction LOG — the load-bearing oracle.
+    let evict_log: Rc<RefCell<Vec<(i32, i32, EvictionCause)>>> = Rc::new(RefCell::new(Vec::new()));
+    let cb_log = evict_log.clone();
+    let mut builder = BoundedLruMap::<i32>::builder().max_size(max_size);
+    if let Some(t) = ttl {
+        builder = builder.ttl(t);
+    }
+    let mut map = builder
+        .on_evict(move |k, v, c| cb_log.borrow_mut().push((*k, v, c)))
+        .build();
+
+    let mut log = LruLog::default();
+
+    for op in operations {
+        match op["op"].as_str().unwrap_or("") {
+            "put" => {
+                let k = op["key"].as_i64().expect("put needs key") as i32;
+                let v = op["value"].as_i64().expect("put needs value") as i32;
+                // An optional `now` makes this a put_at; absent => plain put
+                // (which is put_at(k, v, 0) — no hidden clock).
+                let prev = match op.get("now") {
+                    Some(n) if !n.is_null() => map.put_at(k, v, parse_u64_tick(n)),
+                    _ => map.put(k, v),
+                };
+                log.put_results.push(prev);
+            }
+            "put_at" => {
+                let k = op["key"].as_i64().expect("put_at needs key") as i32;
+                let v = op["value"].as_i64().expect("put_at needs value") as i32;
+                let now = parse_u64_tick(&op["now"]);
+                log.put_results.push(map.put_at(k, v, now));
+            }
+            "get" => {
+                let k = op["key"].as_i64().expect("get needs key") as i32;
+                log.get_results.push(map.get(&k));
+            }
+            "get_or_default" => {
+                let k = op["key"].as_i64().expect("get_or_default needs key") as i32;
+                let d = op["default"]
+                    .as_i64()
+                    .expect("get_or_default needs default") as i32;
+                log.get_or_default_results.push(map.get_or_default(&k, d));
+            }
+            "contains_key" => {
+                let k = op["key"].as_i64().expect("contains_key needs key") as i32;
+                log.contains_results.push(map.contains_key(&k));
+            }
+            "remove" => {
+                let k = op["key"].as_i64().expect("remove needs key") as i32;
+                log.remove_results.push(map.remove(&k));
+            }
+            "clear" => map.clear(),
+            "expire_entries" => {
+                let now = parse_u64_tick(&op["now"]);
+                log.expired_counts.push(map.expire_entries(now) as i32);
+            }
+            // Mid-sequence read-only LRU-order snapshots: record the current
+            // contents WITHOUT refreshing recency or evicting.
+            "snapshot_keys" => log.snapshot_keys_log.push(map.keys()),
+            "snapshot_values" => log.snapshot_values_log.push(map.values()),
+            "snapshot_entries" => {
+                // Exercise the entries() snapshot path directly (key/value
+                // pairing in LRU order), read-only — recorded as [key, value]
+                // pairs so a port with a broken entries() pairing/order fails.
+                log.snapshot_entries_log.push(map.entries());
+            }
+            // Forward-compat: an unknown op must not crash a newer/older runner
+            // mix; skip it (mirrors unknown-collection/assertion skip).
+            _ => {}
+        }
+    }
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_lru_assertion(key, &map, &log, &evict_log.borrow());
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+/// Render an `Option<i32>` array (`null` for absence) in explicit order.
+fn opt_i32_array(v: &[Option<i32>]) -> String {
+    let parts: Vec<String> = v
+        .iter()
+        .map(|x| x.map(|n| n.to_string()).unwrap_or_else(|| "null".into()))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// Render a bool array in explicit order.
+fn bool_array(v: &[bool]) -> String {
+    let parts: Vec<String> = v.iter().map(|b| b.to_string()).collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// Render an array-of-int-arrays (the snapshot logs), inner arrays in their
+/// recorded explicit (LRU) order, NOT sorted.
+fn array_of_i32_arrays(v: &[Vec<i32>]) -> String {
+    let parts: Vec<String> = v.iter().map(|inner| format_array(inner)).collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// Render the snapshot_entries log: an array of LRU-order `[[key,value], ...]`
+/// arrays, explicit order, NOT sorted.
+fn array_of_pair_arrays(v: &[Vec<(i32, i32)>]) -> String {
+    let outer: Vec<String> = v
+        .iter()
+        .map(|inner| {
+            let pairs: Vec<String> = inner
+                .iter()
+                .map(|(k, val)| format!("[{},{}]", k, val))
+                .collect();
+            format!("[{}]", pairs.join(","))
+        })
+        .collect();
+    format!("[{}]", outer.join(","))
+}
+
+fn eval_lru_assertion(
+    key: &str,
+    map: &BoundedLruMap<i32>,
+    log: &LruLog,
+    evict_log: &[(i32, i32, EvictionCause)],
+) -> String {
+    match key {
+        "size" => map.len().to_string(),
+        "is_empty" => map.is_empty().to_string(),
+        // Post-sequence contents in LRU order (least-recently-used first).
+        // Explicit-order keys: NEVER re-sorted.
+        "lru_order_keys" => format_array(&map.keys()),
+        "lru_order_values" => format_array(&map.values()),
+        // The load-bearing oracle: the ordered eviction LOG, each element a
+        // fixed 3-tuple [key, value, "cause"], in invocation order (NOT sorted).
+        "eviction_log" => {
+            let parts: Vec<String> = evict_log
+                .iter()
+                .map(|(k, v, c)| format!("[{},{},\"{}\"]", k, v, c.as_str()))
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        // Per-op result logs, in execution order.
+        "put_results" => opt_i32_array(&log.put_results),
+        "get_results" => opt_i32_array(&log.get_results),
+        "get_or_default_results" => format_array(&log.get_or_default_results),
+        "contains_results" => bool_array(&log.contains_results),
+        "remove_results" => opt_i32_array(&log.remove_results),
+        "expired_counts" => format_array(&log.expired_counts),
+        "snapshot_keys_log" => array_of_i32_arrays(&log.snapshot_keys_log),
+        "snapshot_values_log" => array_of_i32_arrays(&log.snapshot_values_log),
+        "snapshot_entries_log" => array_of_pair_arrays(&log.snapshot_entries_log),
+        // Post-op out-of-band reads: MUST NOT refresh recency, evict, or mutate.
+        // `contains_key` is read-only; `get_<k>` is computed read-only via the
+        // LRU-order snapshot (NOT map.get, which WOULD refresh recency).
+        _ if key.starts_with("get_") => {
+            let k: i32 = key[4..].parse().expect("get_<k> integer");
+            map.entries()
+                .into_iter()
+                .find(|(ek, _)| *ek == k)
+                .map(|(_, v)| v.to_string())
+                .unwrap_or_else(|| "null".into())
+        }
+        _ if key.starts_with("contains_") => {
+            let k: i32 = key[9..].parse().expect("contains_<k> integer");
+            map.contains_key(&k).to_string()
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
 }

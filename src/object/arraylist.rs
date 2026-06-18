@@ -22,6 +22,18 @@ impl<T> ArrayList<T> {
         }
     }
 
+    /// Bulk-loads a fresh list from `iter` in one allocation pass: reserves the
+    /// source's size hint up front, then extends. Order is preserved; no
+    /// validation (lists accept any order, any duplicates). This is the list
+    /// family's data-pump entry point — a thin, discoverable alias over
+    /// `Vec::with_capacity` + `extend`.
+    pub fn bulk_load<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let mut items = Vec::with_capacity(iter.size_hint().0);
+        items.extend(iter);
+        ArrayList { items }
+    }
+
     /// Borrows the backing storage as a contiguous slice.
     ///
     /// This is the bridge to the [`parallel`](crate::parallel) module: the
@@ -258,5 +270,13 @@ mod tests {
         let c = ArrayList::from_iter(vec![3, 2, 1]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn bulk_load_preserves_order() {
+        let list = ArrayList::bulk_load(vec![3, 1, 2, 1]);
+        assert_eq!(list.to_vec(), vec![3, 1, 2, 1]);
+        let empty: ArrayList<i32> = ArrayList::bulk_load(Vec::new());
+        assert!(empty.is_empty());
     }
 }

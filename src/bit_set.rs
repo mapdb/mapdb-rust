@@ -4,6 +4,7 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
+use std::cmp::Ordering;
 use std::fmt;
 
 const BITS_PER_WORD: usize = 64;
@@ -43,6 +44,39 @@ impl BitSet {
             words: vec![0u64; n_words],
             bit_length: n_bits,
         }
+    }
+
+    /// Bulk-loads a fresh `BitSet` from **strictly-ascending** bit indices in a
+    /// single allocation: the largest index fixes the word count, so all words
+    /// are reserved once and every bit set directly (no incremental `ensure`
+    /// growth). A non-ascending or repeated index is a
+    /// [`BulkError::OutOfOrder`](crate::BulkError::OutOfOrder) /
+    /// [`BulkError::Duplicate`](crate::BulkError::Duplicate) per `dup`.
+    pub fn from_sorted_indices<I: IntoIterator<Item = usize>>(
+        iter: I,
+        dup: crate::bulk::DuplicatePolicy,
+    ) -> Result<Self, crate::bulk::BulkError> {
+        use crate::bulk::{BulkError, DuplicatePolicy};
+        // Buffer once so we can size from the max index in a single allocation.
+        let bits: Vec<usize> = iter.into_iter().collect();
+        // Validate strict ascending order under the natural ordering of indices.
+        for (i, w) in bits.windows(2).enumerate() {
+            match w[0].cmp(&w[1]) {
+                Ordering::Less => {}
+                Ordering::Equal => match dup {
+                    DuplicatePolicy::IgnoreDuplicates => {}
+                    DuplicatePolicy::Error => return Err(BulkError::Duplicate { index: i + 1 }),
+                },
+                Ordering::Greater => return Err(BulkError::OutOfOrder { index: i + 1 }),
+            }
+        }
+        let bit_length = bits.last().map(|&b| b + 1).unwrap_or(0);
+        let n_words = bit_length.div_ceil(BITS_PER_WORD);
+        let mut words = vec![0u64; n_words];
+        for &b in &bits {
+            words[word_index(b)] |= bit_mask(b);
+        }
+        Ok(BitSet { words, bit_length })
     }
 
     fn ensure(&mut self, bit: usize) {
@@ -432,5 +466,34 @@ mod tests {
             sum += i;
         }
         assert_eq!(sum, 5 + 63 + 64 + 200);
+    }
+
+    #[test]
+    fn from_sorted_indices_equals_incremental() {
+        use crate::bulk::DuplicatePolicy;
+        let idx = [0usize, 5, 63, 64, 200];
+        let bulk = BitSet::from_sorted_indices(idx, DuplicatePolicy::Error).unwrap();
+        let mut inc = BitSet::new();
+        for &i in &idx {
+            inc.set(i);
+        }
+        assert_eq!(bulk, inc);
+        assert_eq!(bulk.cardinality(), 5);
+    }
+
+    #[test]
+    fn from_sorted_indices_order_and_dup_errors() {
+        use crate::bulk::{BulkError, DuplicatePolicy};
+        let err = BitSet::from_sorted_indices([3usize, 1], DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+        let err = BitSet::from_sorted_indices([3usize, 3], DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 1 }));
+        // IgnoreDuplicates tolerates the repeat.
+        let b =
+            BitSet::from_sorted_indices([3usize, 3, 7], DuplicatePolicy::IgnoreDuplicates).unwrap();
+        assert_eq!(b.cardinality(), 2);
+        // empty.
+        let e = BitSet::from_sorted_indices(Vec::<usize>::new(), DuplicatePolicy::Error).unwrap();
+        assert_eq!(e.cardinality(), 0);
     }
 }

@@ -14,7 +14,10 @@
 // `HashableFx`. Dedupe cost is `O(k)` per insert, fine for typical
 // group-by workloads.
 
+use crate::bulk::BulkError;
 use crate::hash_table::OpenHashMap;
+use crate::object::strategy::Comparator;
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 
@@ -30,6 +33,108 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
             data: OpenHashMap::new(),
             size: 0,
         }
+    }
+
+    /// Bulk-loads a fresh set-multimap from `(key, value)` pairs in **any**
+    /// order (hash/group accumulation — no sortedness claimed). Duplicate
+    /// `(key, value)` pairs are deduped per key (set semantics) via the
+    /// existing linear-scan `insert`. Value order per key is first-seen order.
+    pub fn bulk_load<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut m = SetMultimap::new();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+
+    /// Bulk-loads from input **grouped by key** (key runs strictly ascending
+    /// under `cmp`). Within a key run, values are deduped (set semantics) by a
+    /// linear scan, preserving first-seen order. Out-of-order keys are a
+    /// [`BulkError::OutOfOrder`].
+    pub fn from_sorted_keys<I: IntoIterator<Item = (K, V)>>(
+        cmp: Comparator<K>,
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let mut m = SetMultimap::new();
+        let mut last_key: Option<K> = None;
+        let mut bucket: Vec<V> = Vec::new();
+        let close = |m: &mut SetMultimap<K, V>, key: K, b: Vec<V>| {
+            m.size += b.len();
+            m.data.insert(key, b);
+        };
+        for (index, (k, v)) in iter.into_iter().enumerate() {
+            match last_key {
+                None => {
+                    last_key = Some(k);
+                    bucket.push(v);
+                }
+                Some(ref prev) => match cmp.compare(prev, &k) {
+                    Ordering::Equal => {
+                        if !bucket.iter().any(|x| x == &v) {
+                            bucket.push(v);
+                        }
+                    }
+                    Ordering::Less => {
+                        let prev_key = last_key.take().unwrap();
+                        close(&mut m, prev_key, std::mem::take(&mut bucket));
+                        last_key = Some(k);
+                        bucket.push(v);
+                    }
+                    Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
+                },
+            }
+        }
+        if let Some(prev_key) = last_key {
+            close(&mut m, prev_key, bucket);
+        }
+        Ok(m)
+    }
+
+    /// Bulk-loads from input sorted by **key then value** (`key_cmp` strictly
+    /// ascending across key runs; `val_cmp` non-decreasing within a run). Equal
+    /// adjacent values within a run are deduped in O(1) (no linear scan needed
+    /// because equal values are adjacent). A value that decreases within a run
+    /// is a [`BulkError::OutOfOrder`].
+    pub fn from_sorted_key_values<I: IntoIterator<Item = (K, V)>>(
+        key_cmp: Comparator<K>,
+        val_cmp: Comparator<V>,
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let mut m = SetMultimap::new();
+        let mut last_key: Option<K> = None;
+        let mut bucket: Vec<V> = Vec::new();
+        for (index, (k, v)) in iter.into_iter().enumerate() {
+            match last_key {
+                None => {
+                    last_key = Some(k);
+                    bucket.push(v);
+                }
+                Some(ref prev) => match key_cmp.compare(prev, &k) {
+                    Ordering::Equal => {
+                        // within a run: value must be >= last value.
+                        let last_v = bucket.last().unwrap();
+                        match val_cmp.compare(last_v, &v) {
+                            Ordering::Less => bucket.push(v),
+                            Ordering::Equal => { /* adjacent dup -> drop */ }
+                            Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
+                        }
+                    }
+                    Ordering::Less => {
+                        let prev_key = last_key.take().unwrap();
+                        m.size += bucket.len();
+                        m.data.insert(prev_key, std::mem::take(&mut bucket));
+                        last_key = Some(k);
+                        bucket.push(v);
+                    }
+                    Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
+                },
+            }
+        }
+        if let Some(prev_key) = last_key {
+            m.size += bucket.len();
+            m.data.insert(prev_key, bucket);
+        }
+        Ok(m)
     }
 
     /// Inserts `value` into the set for `key`. Idempotent — a duplicate
@@ -307,5 +412,64 @@ mod tests {
         m.insert(2, 20);
         assert_eq!(m.len(), 2);
         assert_eq!((&m).into_iter().count(), 2);
+    }
+
+    use crate::bulk::BulkError;
+    use crate::object::strategy::natural_comparator;
+
+    #[test]
+    fn bulk_load_dedupes_equal_incremental() {
+        let data = vec![(1, 10), (1, 20), (1, 10), (2, 30)];
+        let bulk = SetMultimap::bulk_load(data.clone());
+        let mut inc = SetMultimap::new();
+        for (k, v) in &data {
+            inc.insert(*k, *v);
+        }
+        assert_eq!(bulk.len(), inc.len());
+        assert_eq!(bulk.get(&1), &[10, 20]);
+        assert_eq!(bulk.len(), 3);
+    }
+
+    #[test]
+    fn from_sorted_keys_dedupes_within_run() {
+        let data = vec![(1, 10), (1, 20), (1, 10), (2, 30)];
+        let m = SetMultimap::from_sorted_keys(natural_comparator::<i32>(), data).unwrap();
+        assert_eq!(m.get(&1), &[10, 20]);
+        assert_eq!(m.get(&2), &[30]);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn from_sorted_key_values_adjacent_dedupe() {
+        // sorted by key then value; equal adjacent values deduped O(1).
+        let data = vec![(1, 10), (1, 10), (1, 20), (2, 5), (2, 30)];
+        let m = SetMultimap::from_sorted_key_values(
+            natural_comparator::<i32>(),
+            natural_comparator::<i32>(),
+            data,
+        )
+        .unwrap();
+        assert_eq!(m.get(&1), &[10, 20]);
+        assert_eq!(m.get(&2), &[5, 30]);
+        assert_eq!(m.len(), 4);
+    }
+
+    #[test]
+    fn from_sorted_key_values_value_decrease_errors() {
+        let data = vec![(1, 20), (1, 10)]; // value decreases within key run
+        let err = SetMultimap::from_sorted_key_values(
+            natural_comparator::<i32>(),
+            natural_comparator::<i32>(),
+            data,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+    }
+
+    #[test]
+    fn from_sorted_keys_key_out_of_order_errors() {
+        let data = vec![(2, 10), (1, 20)];
+        let err = SetMultimap::from_sorted_keys(natural_comparator::<i32>(), data).unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
     }
 }

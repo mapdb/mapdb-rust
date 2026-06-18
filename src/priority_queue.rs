@@ -31,6 +31,14 @@ impl<T: Ord> PriorityQueue<T> {
         }
     }
 
+    /// The heap's data pump: collect `iter` and heapify in O(n) via Floyd's
+    /// bottom-up sift-down (not n× `push`). This is exactly
+    /// [`FromIterator`](PriorityQueue::from_iter); it exists as a named,
+    /// discoverable alias so the pump API is uniform across collections.
+    pub fn bulk_load<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self::from_iter(iter)
+    }
+
     pub fn push(&mut self, value: T) {
         self.items.push(value);
         self.sift_up(self.items.len() - 1);
@@ -308,5 +316,15 @@ mod tests {
         q.extend([1, 7]);
         assert_eq!(q.peek(), Some(&1));
         assert_eq!(q.len(), 4);
+    }
+
+    #[test]
+    fn bulk_load_equals_from_iter_and_drains_sorted() {
+        let bulk = PriorityQueue::bulk_load([5, 1, 3, 9, 2]);
+        let from_iter = PriorityQueue::from_iter([5, 1, 3, 9, 2]);
+        assert_eq!(bulk.peek(), from_iter.peek());
+        assert_eq!(bulk.len(), 5);
+        let sorted: Vec<i32> = bulk.drain_sorted();
+        assert_eq!(sorted, vec![1, 2, 3, 5, 9]);
     }
 }

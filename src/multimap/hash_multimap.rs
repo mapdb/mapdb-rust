@@ -8,7 +8,10 @@
 // Generic multimap (one key to many values), built on the project's ported
 // `OpenHashMap` rather than `std::HashMap`.
 
+use crate::bulk::BulkError;
 use crate::hash_table::OpenHashMap;
+use crate::object::strategy::Comparator;
+use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
 
@@ -34,6 +37,60 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
             self.data.insert(key, vec![value]);
         }
         self.size += 1;
+    }
+
+    /// Bulk-loads a fresh multimap from `(key, value)` pairs in **any** order
+    /// (hash/group accumulation — no sortedness is claimed or required). Values
+    /// for a key preserve their input order; duplicate `(key, value)` pairs are
+    /// all kept (list semantics). O(n) amortised, one bucket allocation per
+    /// distinct key.
+    pub fn bulk_load<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut m = Multimap::new();
+        for (k, v) in iter {
+            m.insert(k, v);
+        }
+        m
+    }
+
+    /// Bulk-loads from input already **grouped by key** (all values of a key
+    /// appear in one contiguous run). Key runs are validated to be strictly
+    /// ascending under `cmp`; a key that reappears after its run closed, or an
+    /// out-of-order key, is a [`BulkError::OutOfOrder`]. Value order within
+    /// each key run is preserved. One bucket allocation per key. O(n).
+    pub fn from_sorted_keys<I: IntoIterator<Item = (K, V)>>(
+        cmp: Comparator<K>,
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let mut m = Multimap::new();
+        let mut last_key: Option<K> = None;
+        let mut bucket: Vec<V> = Vec::new();
+        for (index, (k, v)) in iter.into_iter().enumerate() {
+            match last_key {
+                None => {
+                    last_key = Some(k);
+                    bucket.push(v);
+                }
+                Some(ref prev) => match cmp.compare(prev, &k) {
+                    Ordering::Equal => bucket.push(v),
+                    Ordering::Less => {
+                        // close previous run
+                        let prev_key = last_key.take().unwrap();
+                        m.size += bucket.len();
+                        m.data.insert(prev_key, std::mem::take(&mut bucket));
+                        last_key = Some(k);
+                        bucket.push(v);
+                    }
+                    Ordering::Greater => {
+                        return Err(BulkError::OutOfOrder { index });
+                    }
+                },
+            }
+        }
+        if let Some(prev_key) = last_key {
+            m.size += bucket.len();
+            m.data.insert(prev_key, bucket);
+        }
+        Ok(m)
     }
 
     /// Returns the values for `key` as an immutable view.
@@ -255,5 +312,48 @@ mod tests {
         m.insert(1, "b");
         m.insert(2, "c");
         assert_eq!((&m).into_iter().count(), 3);
+    }
+
+    use crate::bulk::BulkError;
+    use crate::object::strategy::natural_comparator;
+
+    #[test]
+    fn bulk_load_equals_incremental() {
+        let data = vec![(1, "a"), (2, "b"), (1, "c"), (3, "d"), (2, "e")];
+        let bulk = Multimap::bulk_load(data.clone());
+        let mut inc = Multimap::new();
+        for (k, v) in &data {
+            inc.insert(*k, *v);
+        }
+        assert_eq!(bulk.len(), inc.len());
+        assert_eq!(bulk.distinct_len(), inc.distinct_len());
+        for k in [1, 2, 3] {
+            assert_eq!(bulk.get(&k), inc.get(&k));
+        }
+    }
+
+    #[test]
+    fn from_sorted_keys_groups_and_preserves_value_order() {
+        let data = vec![(1, "a"), (1, "b"), (2, "c"), (3, "d"), (3, "e")];
+        let m = Multimap::from_sorted_keys(natural_comparator::<i32>(), data).unwrap();
+        assert_eq!(m.get(&1), &["a", "b"]); // value order preserved within run
+        assert_eq!(m.get(&2), &["c"]);
+        assert_eq!(m.get(&3), &["d", "e"]);
+        assert_eq!(m.len(), 5);
+        assert_eq!(m.distinct_len(), 3);
+    }
+
+    #[test]
+    fn from_sorted_keys_out_of_order_errors() {
+        let data = vec![(1, "a"), (3, "b"), (2, "c")];
+        let err = Multimap::from_sorted_keys(natural_comparator::<i32>(), data).unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 2 }));
+    }
+
+    #[test]
+    fn from_sorted_keys_empty() {
+        let m: Multimap<i32, i32> =
+            Multimap::from_sorted_keys(natural_comparator::<i32>(), Vec::new()).unwrap();
+        assert!(m.is_empty());
     }
 }

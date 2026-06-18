@@ -30,6 +30,16 @@ impl<T> ArrayDeque<T> {
         }
     }
 
+    /// Bulk-loads a fresh deque from `iter` in one allocation pass (reserve the
+    /// size hint, then push to the back in order). The deque family's data-pump
+    /// entry point — a thin alias over `VecDeque::with_capacity` + `extend`.
+    pub fn bulk_load<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let iter = iter.into_iter();
+        let mut data = VecDeque::with_capacity(iter.size_hint().0);
+        data.extend(iter);
+        ArrayDeque { data }
+    }
+
     pub fn push_front(&mut self, value: T) {
         self.data.push_front(value);
     }
@@ -271,5 +281,13 @@ mod tests {
         assert_eq!(d.to_vec(), vec![10, 20, 30]);
         d.extend([40, 50]);
         assert_eq!(d.to_vec(), vec![10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn bulk_load_preserves_order() {
+        let d = ArrayDeque::bulk_load(vec![1, 2, 3]);
+        assert_eq!(d.to_vec(), vec![1, 2, 3]);
+        let empty: ArrayDeque<i32> = ArrayDeque::bulk_load(Vec::new());
+        assert!(empty.is_empty());
     }
 }

@@ -40,8 +40,8 @@ pub use strategy::{
 pub use strategy_hashmap::HashMapWithStrategy;
 pub use strategy_hashset::HashSetWithStrategy;
 pub use traits::*;
-pub use treemap::TreeMap;
-pub use treeset::TreeSet;
+pub use treemap::{TreeMap, TreeMapSink};
+pub use treeset::{TreeSet, TreeSetSink};
 
 #[cfg(test)]
 mod property_tests;

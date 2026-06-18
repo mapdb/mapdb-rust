@@ -77,7 +77,7 @@ impl<T: Ord> Cut<T> {
     /// three side-aware spec comparators all reduce to this because the two
     /// unbounded states are distinct sentinels rather than one ambiguous
     /// `Unbounded`.
-    fn cmp(&self, other: &Cut<T>) -> Ordering {
+    pub(crate) fn cmp(&self, other: &Cut<T>) -> Ordering {
         fn rank<T>(c: &Cut<T>) -> u8 {
             match c {
                 Cut::BelowAll => 0,
@@ -97,6 +97,17 @@ impl<T: Ord> Cut<T> {
             },
             _ => rank(self).cmp(&rank(other)),
         }
+    }
+
+    /// Total order on cuts — the single source of truth for the cut algebra,
+    /// exposed for the [`RangeSet`](crate::range_set::RangeSet) /
+    /// [`RangeMap`](crate::range_map::RangeMap) coalescing, split, complement,
+    /// and ascending-by-lower-cut ordering. Because the four-variant `Cut`
+    /// carries two distinct unbounded sentinels, this single order already
+    /// realises all three spec comparators (`compare_lower_cuts`,
+    /// `compare_upper_cuts`, `compare_lower_to_upper`).
+    pub fn cmp_cut(&self, other: &Cut<T>) -> Ordering {
+        self.cmp(other)
     }
 }
 
@@ -119,6 +130,22 @@ impl<T: Ord + Copy> Range<T> {
             panic!("Range: lower cut must not exceed upper cut");
         }
         Range { lower, upper }
+    }
+
+    /// Construct a [`Range`] directly from two [`Cut`]s, validating
+    /// `lower <= upper`. Crate-internal so the
+    /// [`RangeSet`](crate::range_set::RangeSet) /
+    /// [`RangeMap`](crate::range_map::RangeMap) split / complement / clip logic
+    /// can re-assemble a range from the cut endpoints it computed (the
+    /// boundary-flip of `remove`/`complement`, the clip of `sub_range_set`),
+    /// keeping all boundary arithmetic in cut space — never `±1` endpoint math.
+    /// **Panics** if `lower > upper`. Deliberately **not** part of the public
+    /// API: it does not re-check cut-side legality (a lower cut must never be
+    /// `AboveAll`, an upper cut never `BelowAll`), an invariant the public
+    /// factories establish; all in-crate callers pass cuts copied from valid
+    /// ranges, so the side invariant is preserved by construction.
+    pub(crate) fn from_cuts_internal(lower: Cut<T>, upper: Cut<T>) -> Self {
+        Self::from_cuts(lower, upper)
     }
 
     // ---- factories (Guava-parity names) -----------------------------------

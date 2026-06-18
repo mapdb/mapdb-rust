@@ -21,7 +21,8 @@ use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::range::{BoundType, Range};
 use mapdb_collections::{
-    HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet,
+    HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet, RangeMap,
+    RangeSet,
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -245,6 +246,8 @@ fn main() {
         "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
         "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
         "Range<i32>" => run_range(name, operations, assertions, &scenario),
+        "RangeSet<i32>" => run_range_set(name, operations, assertions, &scenario),
+        "RangeMap<i32, i32>" => run_range_map(name, operations, assertions, &scenario),
         "ImmutableSortedMap<i32, i32>" => {
             run_immutable_sorted_map(name, operations, assertions, &scenario)
         }
@@ -1929,6 +1932,221 @@ fn run_immutable_sorted_set(
             _ if key.starts_with("contains_") => {
                 let k: i32 = key[9..].parse().unwrap();
                 set.contains(&k).to_string()
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &v, expected, FloatMode::None);
+    }
+}
+
+// ---- RangeSet<i32> / RangeMap<i32, i32> -----------------------------------
+//
+// The auto-coalescing RangeSet / piecewise RangeMap (spec/features/
+// range-set-map.md). Routed through the PRODUCTION RangeSet / RangeMap — every
+// assertion is proved against the real cut-algebra coalescing/split/complement
+// code, not re-derived here.
+//
+// A RangeSet/RangeMap is a STATEFUL structure built by a sequence of mutating
+// ops, each naming a `range` via the shared 10-range builder object:
+//   RangeSet: {"op":"add","range":{...}} / {"op":"remove_range","range":{...}}
+//             / {"op":"clear"}
+//   RangeMap: {"op":"put","range":{...},"value":N}
+//             / {"op":"put_coalescing","range":{...},"value":N}
+//             / {"op":"remove_range","range":{...}} / {"op":"clear"}
+// An optional top-level `query` (same builder shape) supplies the range for
+// `encloses_query`/`intersects_query`/`sub_range_set_ranges`/
+// `sub_range_map_entries`. Unknown ops/keys/kinds SKIP (forward-compat).
+//
+// The `as_ranges`/`complement_ranges`/`sub_range_set_ranges`/`as_map_of_ranges`/
+// `sub_range_map_entries` arrays are EXPLICIT-ORDER (ascending by lower cut),
+// each element a fixed-shape range/entry object pinning the exact cut.
+
+/// Serialize a `Range<i32>` as the fixed-shape assertion object
+/// `{"lower":..,"lower_type":..,"upper":..,"upper_type":..}` — endpoints are
+/// the i32 value or `null` when unbounded; `*_type` is `"open"`/`"closed"`/null.
+/// Rendered as a single compact line so it matches the JSON `to_string()` of the
+/// expected array element (keys in the same `serde_json` object order).
+fn range_obj_str(r: &Range<i32>) -> String {
+    format!(
+        "{{\"lower\":{},\"lower_type\":{},\"upper\":{},\"upper_type\":{}}}",
+        opt_i32_json(r.lower_endpoint()),
+        bound_type_json(r.lower_bound_type()),
+        opt_i32_json(r.upper_endpoint()),
+        bound_type_json(r.upper_bound_type()),
+    )
+}
+
+/// Serialize a `(Range<i32>, value)` RangeMap entry: the range object plus a
+/// trailing `"value":<i32>`.
+fn entry_obj_str(r: &Range<i32>, value: i32) -> String {
+    format!(
+        "{{\"lower\":{},\"lower_type\":{},\"upper\":{},\"upper_type\":{},\"value\":{}}}",
+        opt_i32_json(r.lower_endpoint()),
+        bound_type_json(r.lower_bound_type()),
+        opt_i32_json(r.upper_endpoint()),
+        bound_type_json(r.upper_bound_type()),
+        value,
+    )
+}
+
+fn opt_i32_json(v: Option<i32>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "null".into())
+}
+
+fn bound_type_json(bt: Option<BoundType>) -> String {
+    match bt {
+        Some(BoundType::Open) => "\"open\"".to_string(),
+        Some(BoundType::Closed) => "\"closed\"".to_string(),
+        None => "null".to_string(),
+    }
+}
+
+/// Render an explicit-order array of range objects as a compact JSON line
+/// matching `serde_json::Value::to_string()` of the expected array.
+fn range_array_str(ranges: &[Range<i32>]) -> String {
+    let parts: Vec<String> = ranges.iter().map(range_obj_str).collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn entry_array_str(entries: &[(Range<i32>, i32)]) -> String {
+    let parts: Vec<String> = entries.iter().map(|(r, v)| entry_obj_str(r, *v)).collect();
+    format!("[{}]", parts.join(","))
+}
+
+/// Parse a signed base-10 i32 suffix (leading `-` allowed, rejects `+`) from a
+/// `<prefix><N>` assertion key — the `contains_<v>` / `get_<v>` /
+/// `range_containing_<v>` / `get_entry_<v>` convention.
+fn signed_i32_suffix(key: &str, prefix: &str) -> Option<i32> {
+    let rest = key.strip_prefix(prefix)?;
+    let digits = rest.strip_prefix('-').unwrap_or(rest);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+fn run_range_set(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let mut set: RangeSet<i32> = RangeSet::new();
+    for op in operations {
+        match op["op"].as_str().unwrap_or("") {
+            "add" => set.add(build_range_obj(&op["range"])),
+            "remove_range" => set.remove(build_range_obj(&op["range"])),
+            "clear" => set.clear(),
+            // Forward-compat: unknown op kinds skip (do not crash the runner).
+            _ => {}
+        }
+    }
+    let query = scenario_obj.get("query").map(build_range_obj);
+    let span = set.span();
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let v = match key.as_str() {
+            "is_empty" => set.is_empty().to_string(),
+            "as_ranges" => range_array_str(&set.as_ranges().collect::<Vec<_>>()),
+            "span_lower" => opt_i32_str(span.and_then(|r| r.lower_endpoint())),
+            "span_upper" => opt_i32_str(span.and_then(|r| r.upper_endpoint())),
+            "span_lower_type" => bound_type_str(span.and_then(|r| r.lower_bound_type())),
+            "span_upper_type" => bound_type_str(span.and_then(|r| r.upper_bound_type())),
+            "encloses_query" => match &query {
+                Some(q) => set.encloses(q).to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "intersects_query" => match &query {
+                Some(q) => set.intersects(q).to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "complement_ranges" => {
+                range_array_str(&set.complement().as_ranges().collect::<Vec<_>>())
+            }
+            "sub_range_set_ranges" => match &query {
+                Some(q) => range_array_str(&set.sub_range_set(q).as_ranges().collect::<Vec<_>>()),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            _ if signed_i32_suffix(key, "range_containing_").is_some() => {
+                let n = signed_i32_suffix(key, "range_containing_").unwrap();
+                match set.range_containing(n) {
+                    Some(r) => range_obj_str(&r),
+                    None => "null".to_string(),
+                }
+            }
+            _ if signed_i32_suffix(key, "contains_").is_some() => {
+                let n = signed_i32_suffix(key, "contains_").unwrap();
+                set.contains(n).to_string()
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &v, expected, FloatMode::None);
+    }
+}
+
+fn run_range_map(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let mut map: RangeMap<i32, i32> = RangeMap::new();
+    for op in operations {
+        match op["op"].as_str().unwrap_or("") {
+            "put" => {
+                let value = op["value"].as_i64().expect("put needs value") as i32;
+                map.put(build_range_obj(&op["range"]), value);
+            }
+            "put_coalescing" => {
+                let value = op["value"].as_i64().expect("put_coalescing needs value") as i32;
+                map.put_coalescing(build_range_obj(&op["range"]), value);
+            }
+            "remove_range" => map.remove(build_range_obj(&op["range"])),
+            "clear" => map.clear(),
+            // Forward-compat: unknown op kinds skip.
+            _ => {}
+        }
+    }
+    let query = scenario_obj.get("query").map(build_range_obj);
+    let span = map.span();
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let v = match key.as_str() {
+            "is_empty" => map.is_empty().to_string(),
+            "as_map_of_ranges" => {
+                let entries: Vec<(Range<i32>, i32)> =
+                    map.as_map_of_ranges().map(|(r, v)| (r, *v)).collect();
+                entry_array_str(&entries)
+            }
+            "span_lower" => opt_i32_str(span.and_then(|r| r.lower_endpoint())),
+            "span_upper" => opt_i32_str(span.and_then(|r| r.upper_endpoint())),
+            "span_lower_type" => bound_type_str(span.and_then(|r| r.lower_bound_type())),
+            "span_upper_type" => bound_type_str(span.and_then(|r| r.upper_bound_type())),
+            "sub_range_map_entries" => match &query {
+                Some(q) => {
+                    let entries: Vec<(Range<i32>, i32)> = map
+                        .sub_range_map(q)
+                        .as_map_of_ranges()
+                        .map(|(r, v)| (r, *v))
+                        .collect();
+                    entry_array_str(&entries)
+                }
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            _ if signed_i32_suffix(key, "get_entry_").is_some() => {
+                let n = signed_i32_suffix(key, "get_entry_").unwrap();
+                match map.get_entry(n) {
+                    Some((r, v)) => entry_obj_str(&r, *v),
+                    None => "null".to_string(),
+                }
+            }
+            _ if signed_i32_suffix(key, "get_").is_some() => {
+                let n = signed_i32_suffix(key, "get_").unwrap();
+                opt_i32_str(map.get(n).copied())
             }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };

@@ -243,8 +243,12 @@ fn main() {
         "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
         "Range<i32>" => run_range(name, operations, assertions, &scenario),
         other => {
-            eprintln!("unsupported collection type: {}", other);
-            std::process::exit(1);
+            // Forward-compat (README "unknown collection kinds skip"): a runner
+            // that does not understand a collection kind must SKIP, not fail, so
+            // newer scenarios never break an older runner. Mirrors the
+            // unknown-assertion-key skip in `emit`.
+            eprintln!("skip: unsupported collection kind (forward-compat): {}", other);
+            return;
         }
     }
 

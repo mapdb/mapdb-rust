@@ -13,6 +13,7 @@
 
 pub mod array_deque;
 pub mod bit_set;
+pub mod count_min;
 pub mod hash;
 pub mod hash_table;
 pub mod hashable_float;
@@ -25,12 +26,14 @@ pub mod pair;
 pub mod parallel;
 pub mod priority_queue;
 pub mod range;
+pub mod space_saving;
 pub mod stream;
 pub mod synchronized;
 pub mod traits;
 
 pub use array_deque::ArrayDeque;
 pub use bit_set::BitSet;
+pub use count_min::CountMin;
 pub use hash_table::{OpenHashMap, OpenHashSet};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};
@@ -44,4 +47,5 @@ pub use parallel::BatchIterable;
 pub use parallel::{as_parallel, ParallelSlice};
 pub use priority_queue::PriorityQueue;
 pub use range::{BoundType, Cut, Range};
+pub use space_saving::SpaceSaving;
 pub use synchronized::{synchronized, SyncGuard, Synchronized};

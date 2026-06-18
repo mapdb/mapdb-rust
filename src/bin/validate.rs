@@ -13,6 +13,7 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::count_min::CountMin;
 use mapdb_collections::hash;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
@@ -20,6 +21,7 @@ use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::range::{BoundType, Range};
+use mapdb_collections::space_saving::SpaceSaving;
 use mapdb_collections::{
     HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet,
 };
@@ -252,6 +254,8 @@ fn main() {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
+        "CountMin" => run_count_min(name, operations, assertions),
+        "SpaceSaving" => run_space_saving(name, operations, assertions),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -462,6 +466,236 @@ fn eval_positions(p: &[u32], key: &str) -> String {
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
+}
+
+// ---- CountMin (spec/features/count-min.md) -------------------------------
+//
+// A `d×w` integer counter matrix. Built by exactly ONE `with_params` op (zero
+// or multiple => malformed => SKIP, like `from_sorted`/`HashPipeline`); never
+// `optimal` (the float-derivation trap is kept out of the shared suite — an
+// `optimal`/`epsilon`/`delta` op is unknown here => SKIP). Subsequent `add` ops
+// carry an i32 `value` and a `count` DECIMAL STRING (omitted => 1; may exceed
+// 2^53). Counters / `estimate_<v>` / `total` are u64 DECIMAL STRINGS (the 2^64
+// range exceeds JSON-safe 2^53); `depth`/`width` are plain ints. `counters` is
+// the row-major (explicit-order, NOT sorted) primary oracle. Unknown ops/keys
+// SKIP (forward-compat).
+
+/// Parse a `count` operand: a DECIMAL STRING parsed straight to u64 (never via
+/// f64), reusing the i64-suite's wide-integer discipline. A bare JSON number is
+/// also accepted for small counts. Returns `None` if malformed (negative,
+/// non-numeric, or exceeding `u64::MAX`) so the caller can SKIP the scenario.
+fn parse_count_opt(v: &Value) -> Option<u64> {
+    if v.is_null() {
+        return Some(1); // count omitted => 1 (the add_one shape)
+    }
+    if let Some(s) = v.as_str() {
+        s.parse::<u64>().ok()
+    } else {
+        v.as_u64()
+    }
+}
+
+fn run_count_min(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    // Authoring rule: exactly ONE `with_params` op, first. The remaining ops are
+    // `add`. Anything else (e.g. `optimal`) makes the scenario un-runnable here
+    // => SKIP (forward-compat / float-trap quarantine).
+    let with_params: Vec<&Value> = operations
+        .iter()
+        .filter(|op| op["op"].as_str() == Some("with_params"))
+        .collect();
+    if with_params.len() != 1 || operations.first().map(|o| &o["op"]) != Some(&with_params[0]["op"])
+    {
+        eprintln!(
+            "skip: CountMin scenario needs exactly one leading `with_params` op (forward-compat)"
+        );
+        return;
+    }
+    let ctor = with_params[0];
+    let d = ctor["d"].as_u64().expect("with_params needs d") as u32;
+    let w = ctor["w"].as_u64().expect("with_params needs w") as u32;
+    let mut cms = CountMin::with_params(d, w);
+
+    for op in &operations[1..] {
+        match op["op"].as_str().unwrap_or("") {
+            "add" => {
+                let value = op["value"].as_i64().expect("add needs i32 value") as i32;
+                let count = match parse_count_opt(&op["count"]) {
+                    Some(c) => c,
+                    None => {
+                        eprintln!("skip: CountMin add `count` is not a 0..=u64::MAX integer");
+                        return;
+                    }
+                };
+                cms.add(value, count);
+            }
+            other => {
+                // Forward-compat: an unknown op makes the scenario un-runnable.
+                eprintln!("skip: unknown CountMin op (forward-compat): {}", other);
+                return;
+            }
+        }
+    }
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_count_min(key, &cms);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_count_min(key: &str, cms: &CountMin) -> String {
+    match key {
+        // Row-major counter matrix, each u64 as a decimal string; explicit order.
+        "counters" => {
+            let parts: Vec<String> = cms
+                .to_counters()
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        // Scalar u64 decimal strings: emitted UNQUOTED (the expected JSON string
+        // "8" renders via render_expected to the bare `8` in FloatMode::None,
+        // matching the hash-pipeline hex-string convention). Only the `counters`
+        // ARRAY elements keep their JSON quotes.
+        "total" => cms.total().to_string(),
+        "depth" => cms.depth().to_string(),
+        "width" => cms.width().to_string(),
+        // estimate_<v>: signed i32 suffix (matches ^estimate_(-?[0-9]+)$).
+        _ if estimate_key(key).is_some() => cms.estimate(estimate_key(key).unwrap()).to_string(),
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+/// Recognise an `estimate_<v>` assertion: `<v>` is a SIGNED base-10 i32
+/// (exact `^estimate_(-?[0-9]+)$`, full i32 range incl. negatives). A leading
+/// `+` is rejected so the recogniser matches the documented regex.
+fn estimate_key(key: &str) -> Option<i32> {
+    let rest = key.strip_prefix("estimate_")?;
+    let digits = rest.strip_prefix('-').unwrap_or(rest);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+// ---- SpaceSaving (spec/features/count-min.md) ----------------------------
+//
+// A bounded heavy-hitters summary. Built by exactly ONE `with_capacity` op,
+// first (zero or multiple => SKIP). Subsequent `add` ops are applied IN LISTED
+// ORDER (Space-Saving is order-dependent — a runner MUST NOT reorder). `value`
+// is an i32; `count` is a u64 decimal string (omitted => 1). `monitored_set` /
+// `top_k_<k>` are explicit-order arrays of `[item, count_str, error_str]`
+// triples in canonical order (count DESC, signed item ASC). count/error are u64
+// decimal strings (2^64 range); size/capacity plain ints. Unknown ops/keys SKIP.
+
+fn run_space_saving(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let with_capacity: Vec<&Value> = operations
+        .iter()
+        .filter(|op| op["op"].as_str() == Some("with_capacity"))
+        .collect();
+    if with_capacity.len() != 1
+        || operations.first().map(|o| &o["op"]) != Some(&with_capacity[0]["op"])
+    {
+        eprintln!(
+            "skip: SpaceSaving scenario needs exactly one leading `with_capacity` op (forward-compat)"
+        );
+        return;
+    }
+    let m = with_capacity[0]["m"]
+        .as_u64()
+        .expect("with_capacity needs m") as u32;
+    let mut ss = SpaceSaving::with_capacity(m);
+
+    for op in &operations[1..] {
+        match op["op"].as_str().unwrap_or("") {
+            "add" => {
+                let value = op["value"].as_i64().expect("add needs i32 value") as i32;
+                let count = match parse_count_opt(&op["count"]) {
+                    Some(c) => c,
+                    None => {
+                        eprintln!("skip: SpaceSaving add `count` is not a 0..=u64::MAX integer");
+                        return;
+                    }
+                };
+                ss.add(value, count);
+            }
+            other => {
+                eprintln!("skip: unknown SpaceSaving op (forward-compat): {}", other);
+                return;
+            }
+        }
+    }
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_space_saving(key, &ss);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+/// Render a `(item, count, error)` triple list as a JSON array of
+/// `[item, "count", "error"]` (item int, count/error u64 decimal strings).
+fn format_ss_triples(triples: &[(i32, u64, u64)]) -> String {
+    let parts: Vec<String> = triples
+        .iter()
+        .map(|(item, count, error)| format!("[{},\"{}\",\"{}\"]", item, count, error))
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn eval_space_saving(key: &str, ss: &SpaceSaving) -> String {
+    match key {
+        "monitored_set" => format_ss_triples(&ss.monitored_set()),
+        "size" => ss.size().to_string(),
+        "capacity" => ss.capacity().to_string(),
+        // top_k_<k>: non-negative int suffix (matches ^top_k_([0-9]+)$).
+        _ if top_k_key(key).is_some() => format_ss_triples(&ss.top_k(top_k_key(key).unwrap())),
+        // count_<v> / error_<v>: signed i32 suffix; scalar u64 decimal strings
+        // emitted UNQUOTED (the `monitored_set`/`top_k` triple ARRAYS keep the
+        // count/error quotes; bare scalars do not, matching render_expected).
+        _ if ss_signed_key(key, "count_").is_some() => {
+            ss.count(ss_signed_key(key, "count_").unwrap()).to_string()
+        }
+        _ if ss_signed_key(key, "error_").is_some() => {
+            ss.error(ss_signed_key(key, "error_").unwrap()).to_string()
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+/// Recognise a `top_k_<k>` assertion: `<k>` is a NON-NEGATIVE base-10 int
+/// (exact `^top_k_([0-9]+)$`).
+fn top_k_key(key: &str) -> Option<u32> {
+    let rest = key.strip_prefix("top_k_")?;
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
+}
+
+/// Recognise a `<prefix><v>` assertion whose `<v>` is a SIGNED base-10 i32
+/// (full range incl. negatives; leading `+` rejected). Used for
+/// `count_<v>`/`error_<v>`.
+fn ss_signed_key(key: &str, prefix: &str) -> Option<i32> {
+    let rest = key.strip_prefix(prefix)?;
+    let digits = rest.strip_prefix('-').unwrap_or(rest);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 // ---- HashMap<i32, i32> ---------------------------------------------------

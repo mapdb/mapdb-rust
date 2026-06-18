@@ -70,6 +70,13 @@ impl<K, V> TreeMap<K, V> {
         }
     }
 
+    /// Returns a clone of this map's comparator (shares the underlying
+    /// closure). Used to preserve ordering semantics when building a
+    /// materialized snapshot (`sub_map`).
+    pub fn comparator(&self) -> Comparator<K> {
+        self.cmp.clone()
+    }
+
     /// Inserts a key-value pair. Returns `Some(old_value)` if the key was
     /// already present, or `None` if it was new.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -428,14 +435,15 @@ impl<K: Ord + Copy, V> TreeMap<K, V> {
 
     /// A **new independent** map of the entries whose key ∈ `range`.
     /// Mutating the snapshot never affects the original and vice versa
-    /// (it is a materialized copy, not a live view). The snapshot is keyed
-    /// by the natural comparator over `K: Ord`.
+    /// (it is a materialized copy, not a live view). The snapshot preserves the
+    /// **source map's comparator**, so reverse/custom/float-total-order keyed
+    /// maps keep their ordering semantics in the slice.
     pub fn sub_map(&self, range: Range<K>) -> TreeMap<K, V>
     where
         K: 'static,
         V: Copy,
     {
-        let mut out = TreeMap::new(crate::object::natural_comparator::<K>());
+        let mut out = TreeMap::new(self.cmp.clone());
         for (k, v) in self.iter() {
             if range.contains(*k) {
                 out.insert(*k, *v);

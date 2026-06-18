@@ -167,12 +167,14 @@ impl<T: Ord + Copy> TreeSet<T> {
     }
 
     /// A **new independent** set of the elements ∈ `range` (materialized
-    /// snapshot; mutating it never affects the original and vice versa).
+    /// snapshot; mutating it never affects the original and vice versa). The
+    /// snapshot preserves the **source set's comparator** so reverse/custom/
+    /// float-total-order ordering is retained.
     pub fn sub_set(&self, range: Range<T>) -> TreeSet<T>
     where
         T: 'static,
     {
-        let mut out = TreeSet::new(crate::object::natural_comparator::<T>());
+        let mut out = TreeSet::new(self.tree.comparator());
         for x in self.range_elements(range) {
             out.insert(x);
         }
@@ -216,6 +218,24 @@ impl<'a, T> IntoIterator for &'a TreeSet<T> {
 mod tests {
     use super::*;
     use crate::object::strategy::*;
+
+    #[test]
+    fn test_sub_set_preserves_comparator() {
+        // sub_set must keep the source ordering (reverse), not reset to natural.
+        let mut s = TreeSet::new(reverse_comparator::<i32>());
+        for k in [10, 20, 30, 40, 50] {
+            s.insert(k);
+        }
+        // Source iterates descending under the reverse comparator.
+        assert_eq!(s.to_vec(), vec![&50, &40, &30, &20, &10]);
+        let sub = s.sub_set(Range::closed_open(20, 50)); // {20,30,40}
+                                                         // The snapshot must also be reverse-ordered, proving comparator carried.
+        assert_eq!(sub.to_vec(), vec![&40, &30, &20]);
+        // Independence: mutating the snapshot does not touch the original.
+        let mut sub2 = sub;
+        sub2.remove(&30);
+        assert!(s.contains(&30));
+    }
 
     #[test]
     fn test_basic() {

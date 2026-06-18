@@ -108,15 +108,29 @@ where
 
 /// A comparator defines an ordering between two values.
 ///
-/// Stored as a boxed closure so it can capture state (e.g. field extractors).
+/// Stored as a reference-counted closure so it can capture state (e.g. field
+/// extractors) and be cloned cheaply (shared) into materialized snapshots.
 pub struct Comparator<T: ?Sized> {
-    cmp: Box<CmpFn<T>>,
+    cmp: Arc<CmpFn<T>>,
+}
+
+// Cloning shares the underlying closure (refcount bump) so a comparator can be
+// carried into a materialized snapshot (e.g. `TreeMap::sub_map`) without
+// resetting ordering to natural order. `Fn` (not `FnMut`) so sharing is sound.
+impl<T: ?Sized> Clone for Comparator<T> {
+    fn clone(&self) -> Self {
+        Comparator {
+            cmp: Arc::clone(&self.cmp),
+        }
+    }
 }
 
 impl<T: ?Sized> Comparator<T> {
     /// Creates a new comparator from a comparison function.
     pub fn new(cmp: Box<CmpFn<T>>) -> Self {
-        Comparator { cmp }
+        Comparator {
+            cmp: Arc::from(cmp),
+        }
     }
 
     /// Compare two values using this comparator.
@@ -134,14 +148,14 @@ impl<T: ?Sized> std::fmt::Debug for Comparator<T> {
 /// Returns a comparator using the natural ordering of `Ord` types.
 pub fn natural_comparator<T: Ord + 'static>() -> Comparator<T> {
     Comparator {
-        cmp: Box::new(|a: &T, b: &T| a.cmp(b)),
+        cmp: Arc::new(|a: &T, b: &T| a.cmp(b)),
     }
 }
 
 /// Returns a comparator with reversed natural ordering.
 pub fn reverse_comparator<T: Ord + 'static>() -> Comparator<T> {
     Comparator {
-        cmp: Box::new(|a: &T, b: &T| b.cmp(a)),
+        cmp: Arc::new(|a: &T, b: &T| b.cmp(a)),
     }
 }
 
@@ -156,7 +170,7 @@ where
     E: Fn(&T) -> F + 'static,
 {
     Comparator {
-        cmp: Box::new(move |a: &T, b: &T| extract(a).cmp(&extract(b))),
+        cmp: Arc::new(move |a: &T, b: &T| extract(a).cmp(&extract(b))),
     }
 }
 
@@ -170,7 +184,7 @@ where
 /// ```
 pub fn reversed<T: 'static>(cmp: Comparator<T>) -> Comparator<T> {
     Comparator {
-        cmp: Box::new(move |a: &T, b: &T| cmp.compare(b, a)),
+        cmp: Arc::new(move |a: &T, b: &T| cmp.compare(b, a)),
     }
 }
 
@@ -192,7 +206,7 @@ where
     E: Fn(&T) -> F + 'static,
 {
     Comparator {
-        cmp: Box::new(move |a: &T, b: &T| sub.compare(&extract(a), &extract(b))),
+        cmp: Arc::new(move |a: &T, b: &T| sub.compare(&extract(a), &extract(b))),
     }
 }
 
@@ -202,7 +216,7 @@ pub fn then_comparing<T: 'static>(
     secondary: Comparator<T>,
 ) -> Comparator<T> {
     Comparator {
-        cmp: Box::new(move |a: &T, b: &T| {
+        cmp: Arc::new(move |a: &T, b: &T| {
             let r = primary.compare(a, b);
             if r != Ordering::Equal {
                 r

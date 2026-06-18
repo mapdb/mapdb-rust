@@ -248,6 +248,67 @@ impl<T: Ord + Copy> Range<T> {
         matches!(self.upper, Cut::Below(_) | Cut::Above(_))
     }
 
+    /// The lower [`Cut`] of this range (the cut sitting at the lower
+    /// endpoint). `BelowAll` when unbounded below. Exposed so a packed
+    /// sorted-array collection can bracket a contiguous in-range slice
+    /// directly from the cut semantics (`Below(v)`/`Above(v)`/`BelowAll`),
+    /// never from `±1` endpoint arithmetic — the overflow trap at
+    /// `INT_MIN`/`INT_MAX` the `sorted-table-map` spec guards against.
+    pub fn lower_cut(&self) -> Cut<T> {
+        self.lower
+    }
+
+    /// The upper [`Cut`] of this range. `AboveAll` when unbounded above.
+    /// See [`lower_cut`](Self::lower_cut).
+    pub fn upper_cut(&self) -> Cut<T> {
+        self.upper
+    }
+
+    /// Bracket the contiguous `[start, end)` index window of a **strictly
+    /// ascending** slice whose elements fall inside this range. Membership
+    /// over a sorted slice is contiguous (the range is convex), so two binary
+    /// searches suffice: `start` is the first index `i` with
+    /// `lower_cut < keys[i]` and `end` is the first index `i` with
+    /// `upper_cut < keys[i]` (equivalently `!(keys[i] < upper_cut)`).
+    ///
+    /// The brackets are derived purely from the cut comparison — `Below(v)`
+    /// vs `Above(v)` vs the unbounded sentinels — so open/closed bounds at
+    /// `INT_MIN`/`INT_MAX` never compute a predecessor/successor (`v ± 1`)
+    /// and never overflow. `start == end` is an empty (possibly cut-empty or
+    /// discrete-empty, e.g. `open(1, 2)` over `i32`) result, never an error.
+    pub fn bracket(&self, sorted: &[T]) -> (usize, usize) {
+        // start: first index whose key is strictly ABOVE the lower cut, i.e.
+        // the lower cut sits strictly below keys[i]. Equivalent to the lower
+        // bound of the in-range window.
+        let start = match self.lower {
+            Cut::BelowAll => 0,
+            // Closed lower `[v`: include v -> first key >= v.
+            Cut::Below(v) => sorted.partition_point(|k| *k < v),
+            // Open lower `(v`: exclude v -> first key > v.
+            Cut::Above(v) => sorted.partition_point(|k| *k <= v),
+            // A lower cut is never AboveAll (factory invariant); treat as empty.
+            Cut::AboveAll => sorted.len(),
+        };
+        // end: first index whose key is NOT below the upper cut (one past the
+        // last in-range key).
+        let end = match self.upper {
+            Cut::AboveAll => sorted.len(),
+            // Open upper `v)`: exclude v -> first key >= v.
+            Cut::Below(v) => sorted.partition_point(|k| *k < v),
+            // Closed upper `v]`: include v -> first key > v.
+            Cut::Above(v) => sorted.partition_point(|k| *k <= v),
+            // An upper cut is never BelowAll (factory invariant); empty.
+            Cut::BelowAll => 0,
+        };
+        // Clamp: a fully-disjoint range can yield start > end; normalise to
+        // an empty window so callers can slice safely.
+        if start > end {
+            (end, end)
+        } else {
+            (start, end)
+        }
+    }
+
     // ---- algebra (all via cut comparison) ---------------------------------
 
     /// Cut-defined containment: `self.lower <= other.lower` and

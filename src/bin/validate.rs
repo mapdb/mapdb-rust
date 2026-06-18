@@ -19,7 +19,9 @@ use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::range::{BoundType, Range};
-use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
+use mapdb_collections::{
+    HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet,
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -242,6 +244,12 @@ fn main() {
         "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
         "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
         "Range<i32>" => run_range(name, operations, assertions, &scenario),
+        "ImmutableSortedMap<i32, i32>" => {
+            run_immutable_sorted_map(name, operations, assertions, &scenario)
+        }
+        "ImmutableSortedSet<i32>" => {
+            run_immutable_sorted_set(name, operations, assertions, &scenario)
+        }
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -1561,5 +1569,178 @@ fn eval_range_assertion(key: &str, range: &Range<i32>, other: Option<&Range<i32>
             .unwrap_or(false)
             .to_string(),
         _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+// ---- ImmutableSortedMap<i32, i32> / ImmutableSortedSet<i32> --------------
+//
+// The compact immutable sorted map/set (spec/features/sorted-table-map.md).
+// Routed through the PRODUCTION ImmutableSortedMap/Set — every assertion is
+// proved against the real packed-array binary-search code, not re-derived.
+//
+// Construction is a SINGLE `from_sorted` bulk op (no incremental put/add):
+//   map: {"op":"from_sorted","keys":[...],"values":[...]}  (strictly ascending)
+//   set: {"op":"from_sorted","elements":[...]}             (strictly ascending)
+// Authoring rule (spec §"Cross-language test scenarios"): exactly ONE
+// `from_sorted` op. Zero or multiple is a MALFORMED scenario -> SKIP it (do
+// not silently apply the first, do not fail), pinning the behaviour so runner
+// authors do not each invent their own. Scenarios in the suite are authored
+// strictly-ascending, so production never traps here.
+
+/// The single `from_sorted` op from a well-formed sorted-table scenario, or
+/// `None` (malformed) -> the caller SKIPs. A sorted-table collection is built
+/// by EXACTLY ONE bulk `from_sorted` op: the `operations` array must be that
+/// one op and nothing else. Any other shape — zero ops, multiple ops, or a
+/// `from_sorted` mixed with a stray `put`/`add`/unknown op — is malformed and
+/// is skipped (never partially applied), so runner authors cannot diverge on
+/// how to treat the extras.
+fn single_from_sorted(operations: &[Value]) -> Option<&Value> {
+    match operations {
+        [only] if only["op"].as_str() == Some("from_sorted") => Some(only),
+        _ => None,
+    }
+}
+
+fn i32_array(v: &Value) -> Vec<i32> {
+    v.as_array()
+        .expect("from_sorted: expected array")
+        .iter()
+        .map(|e| e.as_i64().expect("i32 array element") as i32)
+        .collect()
+}
+
+fn run_immutable_sorted_map(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let Some(op) = single_from_sorted(operations) else {
+        // Malformed (zero or multiple from_sorted) -> SKIP, do not fail.
+        eprintln!("skip: malformed sorted-table scenario (expected exactly one from_sorted)");
+        return;
+    };
+    let keys = i32_array(&op["keys"]);
+    let values = i32_array(&op["values"]);
+    let map: ImmutableSortedMap<i32, i32> = ImmutableSortedMap::from_sorted(&keys, &values);
+    let query = scenario_obj.get("query").map(build_range_obj);
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let v = match key.as_str() {
+            "size" => map.len().to_string(),
+            "is_empty" => map.is_empty().to_string(),
+            "min" | "first_key" => opt_i32_str(map.first_key().copied()),
+            "max" | "last_key" => opt_i32_str(map.last_key().copied()),
+            "sorted_keys" => format_array(&map.keys().copied().collect::<Vec<i32>>()),
+            // values() iterates in ascending-KEY order; the suite's
+            // `sorted_values` means "all values sorted ascending" (it cannot
+            // pin key-order pairing — that is a native test), so sort a copy.
+            "sorted_values" => {
+                let mut vs: Vec<i32> = map.values().copied().collect();
+                vs.sort();
+                format_array(&vs)
+            }
+            "descending_keys" => format_array(&map.descending_keys()),
+            "range_keys" => match &query {
+                Some(r) => format_array(&map.range_keys(*r)),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_keys_desc" => match &query {
+                Some(r) => format_array(&map.descending_range_keys(*r)),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_size" => match &query {
+                Some(r) => map.range_keys(*r).len().to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            _ if nav_key_prefix(key).is_some() => {
+                let (kind, n) = nav_key_prefix(key).unwrap();
+                let r = match kind {
+                    "floor" => map.floor_key(&n),
+                    "ceiling" => map.ceiling_key(&n),
+                    "lower" => map.lower_key(&n),
+                    _ => map.higher_key(&n),
+                };
+                opt_i32_str(r.copied())
+            }
+            _ if rank_key(key).is_some() => map.rank(&rank_key(key).unwrap()).to_string(),
+            _ if select_index(key).is_some() => {
+                opt_i32_str(map.select_key(select_index(key).unwrap()).copied())
+            }
+            _ if key.starts_with("get_") => {
+                let k: i32 = key[4..].parse().unwrap();
+                opt_i32_str(map.get(&k).copied())
+            }
+            _ if key.starts_with("contains_") => {
+                let k: i32 = key[9..].parse().unwrap();
+                map.contains_key(&k).to_string()
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &v, expected, FloatMode::None);
+    }
+}
+
+fn run_immutable_sorted_set(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let Some(op) = single_from_sorted(operations) else {
+        eprintln!("skip: malformed sorted-table scenario (expected exactly one from_sorted)");
+        return;
+    };
+    let elements = i32_array(&op["elements"]);
+    let set: ImmutableSortedSet<i32> = ImmutableSortedSet::from_sorted(&elements);
+    let query = scenario_obj.get("query").map(build_range_obj);
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let v = match key.as_str() {
+            "size" => set.len().to_string(),
+            "is_empty" => set.is_empty().to_string(),
+            "min" | "first" => opt_i32_str(set.first().copied()),
+            "max" | "last" => opt_i32_str(set.last().copied()),
+            "to_sorted_array" => format_array(&set.elements().copied().collect::<Vec<i32>>()),
+            "descending_elements" => format_array(&set.descending_elements()),
+            "range_elements" => match &query {
+                Some(r) => format_array(&set.range_elements(*r)),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_elements_desc" => match &query {
+                Some(r) => format_array(&set.descending_range_elements(*r)),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            "range_size" => match &query {
+                Some(r) => set.range_elements(*r).len().to_string(),
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            _ if nav_key_prefix(key).is_some() => {
+                let (kind, n) = nav_key_prefix(key).unwrap();
+                let r = match kind {
+                    "floor" => set.floor(&n),
+                    "ceiling" => set.ceiling(&n),
+                    "lower" => set.lower(&n),
+                    _ => set.higher(&n),
+                };
+                opt_i32_str(r.copied())
+            }
+            _ if rank_key(key).is_some() => set.rank(&rank_key(key).unwrap()).to_string(),
+            _ if select_index(key).is_some() => {
+                opt_i32_str(set.select(select_index(key).unwrap()).copied())
+            }
+            _ if key.starts_with("contains_") => {
+                let k: i32 = key[9..].parse().unwrap();
+                set.contains(&k).to_string()
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &v, expected, FloatMode::None);
     }
 }

@@ -988,7 +988,14 @@ fn nav_key_prefix(key: &str) -> Option<(&'static str, i32)> {
 /// base-10 i32 (exact `^rank_(-?[0-9]+)$`, full i32 range incl. negatives).
 /// Returns the parsed key on a match.
 fn rank_key(key: &str) -> Option<i32> {
-    key.strip_prefix("rank_").and_then(|rest| rest.parse().ok())
+    let rest = key.strip_prefix("rank_")?;
+    // Exact grammar `-?[0-9]+`: reject a leading `+` (which `i32::parse` would
+    // otherwise accept) so the recogniser matches the documented regex.
+    let digits = rest.strip_prefix('-').unwrap_or(rest);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 /// Recognise a `select_<i>` order-statistic assertion: `<i>` is a
@@ -997,8 +1004,13 @@ fn rank_key(key: &str) -> Option<i32> {
 /// keys (`select_gt_N`, `select_even`, …) — `parse::<usize>` rejects them
 /// since they are not all-digits.
 fn select_index(key: &str) -> Option<usize> {
-    key.strip_prefix("select_")
-        .and_then(|rest| rest.parse().ok())
+    let rest = key.strip_prefix("select_")?;
+    // Exact grammar `[0-9]+`: all-digits (rejects a leading `+`/`-` and the
+    // functional `select_gt_N`/`select_even` predicate keys).
+    if rest.is_empty() || !rest.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 /// `rank` over a sorted-int oracle: count of elements strictly less than `k`.

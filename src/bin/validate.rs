@@ -13,6 +13,7 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::hash;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
@@ -250,6 +251,7 @@ fn main() {
         "ImmutableSortedSet<i32>" => {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
+        "HashPipeline" => run_hash_pipeline(name, operations, assertions),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -271,6 +273,195 @@ fn main() {
 fn format_array(v: &[i32]) -> String {
     let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
     format!("[{}]", parts.join(","))
+}
+
+// ---- HashPipeline (spec/features/hash-pipeline.md) ------------------------
+//
+// A stateless probe (not a stored collection): exactly ONE hash op carries the
+// input + seed under test; the assertions read the deterministic hash output.
+// Outputs are serialized as fixed-width, lower-case, `0x`-prefixed hex strings
+// (8 digits for a u32, 16 for a u64) so a 64-bit hash survives the JSON `2^53`
+// ceiling and every port's consensus diff is byte-identical. `positions` is an
+// int[] in derivation order (NOT sorted). Unknown ops/keys SKIP (forward-compat).
+
+/// Parse a `0x`-prefixed hex word operand to a `u64` (used for `word` operands;
+/// the caller narrows to `u32` where the op needs a 32-bit word).
+fn parse_hex_word(v: &Value) -> u64 {
+    let s = v
+        .as_str()
+        .expect("hash-pipeline `word` must be a 0x-hex string");
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or_else(|| panic!("hash-pipeline word must start with 0x: {:?}", s));
+    u64::from_str_radix(body, 16).unwrap_or_else(|_| panic!("invalid hex word: {:?}", s))
+}
+
+/// Parse a `seed` operand: a DECIMAL STRING parsed straight to u64 (never via
+/// f64), reusing the i64-suite's decimal-string discipline. A bare JSON number
+/// is also accepted for small seeds.
+fn parse_seed(v: &Value) -> u64 {
+    if let Some(s) = v.as_str() {
+        s.parse::<u64>()
+            .unwrap_or_else(|_| panic!("invalid u64 decimal-string seed: {:?}", s))
+    } else if let Some(n) = v.as_u64() {
+        n
+    } else {
+        panic!("expected u64 seed (decimal string or number), got {:?}", v);
+    }
+}
+
+/// Parse a `0x`-hex byte string (e.g. `"0x01020304"`) to a byte vector.
+fn parse_hex_bytes(v: &Value) -> Vec<u8> {
+    let s = v
+        .as_str()
+        .expect("hash-pipeline `bytes` must be a 0x-hex string");
+    let body = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or_else(|| panic!("hash-pipeline bytes must start with 0x: {:?}", s));
+    assert!(
+        body.len() % 2 == 0,
+        "hash-pipeline bytes must have an even hex-digit count: {:?}",
+        s
+    );
+    (0..body.len() / 2)
+        .map(|i| {
+            u8::from_str_radix(&body[2 * i..2 * i + 2], 16)
+                .unwrap_or_else(|_| panic!("invalid hex byte in {:?}", s))
+        })
+        .collect()
+}
+
+/// The probe a hash op builds. `Word32`/`Word64` carry an already-encoded input
+/// word (so only the matching hash width is meaningful); `I32`/`Bytes` carry the
+/// logical input so EITHER the 32- or 64-bit form (incl. lanes) can be asserted;
+/// `Positions` carries the derived-position array.
+enum HashProbe {
+    Word32(u32),
+    Word64(u64),
+    I32 { value: i32, seed: u64 },
+    Bytes { bytes: Vec<u8>, seed: u64 },
+    Positions(Vec<u32>),
+}
+
+fn run_hash_pipeline(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    // Authoring rule: exactly ONE hash op. Zero or multiple => malformed =>
+    // SKIP (like the sorted-table `from_sorted` rule). Forward-compat: an
+    // unrecognised op kind also makes the scenario un-runnable here => SKIP.
+    if operations.len() != 1 {
+        eprintln!(
+            "skip: hash-pipeline scenario must have exactly one op (forward-compat): got {}",
+            operations.len()
+        );
+        return;
+    }
+    let op = &operations[0];
+    let probe = match op["op"].as_str().unwrap_or("") {
+        "hash_word32" => {
+            let raw = parse_hex_word(&op["word"]);
+            assert!(
+                raw <= u32::MAX as u64,
+                "hash_word32 `word` exceeds 32 bits: {:#x}",
+                raw
+            );
+            let word = raw as u32;
+            let seed = parse_seed(&op["seed"]);
+            HashProbe::Word32(hash::hash32(word, seed))
+        }
+        "hash_word64" => {
+            let word = parse_hex_word(&op["word"]);
+            let seed = parse_seed(&op["seed"]);
+            HashProbe::Word64(hash::hash64(word, seed))
+        }
+        "hash_i32" => {
+            let value = op["value"].as_i64().expect("hash_i32 needs i32 value") as i32;
+            let seed = parse_seed(&op["seed"]);
+            HashProbe::I32 { value, seed }
+        }
+        "hash_bytes" => {
+            let bytes = parse_hex_bytes(&op["bytes"]);
+            let seed = parse_seed(&op["seed"]);
+            HashProbe::Bytes { bytes, seed }
+        }
+        "positions" => {
+            let value = op["value"].as_i64().expect("positions needs i32 value") as i32;
+            let m = op["m"].as_u64().expect("positions needs m") as u32;
+            let k = op["k"].as_u64().expect("positions needs k") as u32;
+            // The byte encoding of an i32 element drives positions: encode the
+            // i32 to its little-endian 4-byte form (the byte path the sketches
+            // use), then derive. No op-level seed (the scheme fixes 0 / SALT2).
+            let bytes = (value as u32).to_le_bytes();
+            HashProbe::Positions(hash::positions(&bytes, m, k))
+        }
+        other => {
+            eprintln!("skip: unknown hash-pipeline op (forward-compat): {}", other);
+            return;
+        }
+    };
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = probe.eval(key);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+impl HashProbe {
+    fn eval(&self, key: &str) -> String {
+        match self {
+            HashProbe::Word32(h) => eval_h32_only(*h, key),
+            HashProbe::Word64(h) => eval_h64_only(*h, key),
+            HashProbe::Positions(p) => eval_positions(p, key),
+            HashProbe::I32 { value, seed } => match key {
+                "hash32" => eval_h32_only(hash::hash32_i32(*value, *seed), "hash32"),
+                "hash64" | "hash64_hi" | "hash64_lo" => {
+                    eval_h64_only(hash::hash64_i32(*value, *seed), key)
+                }
+                _ => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            HashProbe::Bytes { bytes, seed } => match key {
+                "hash32" => eval_h32_only(hash::hash32_bytes(bytes, *seed), "hash32"),
+                "hash64" | "hash64_hi" | "hash64_lo" => {
+                    eval_h64_only(hash::hash64_bytes(bytes, *seed), key)
+                }
+                _ => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+        }
+    }
+}
+
+fn eval_h32_only(h: u32, key: &str) -> String {
+    match key {
+        "hash32" => format!("0x{:08x}", h),
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+fn eval_h64_only(h: u64, key: &str) -> String {
+    match key {
+        "hash64" => format!("0x{:016x}", h),
+        "hash64_hi" => format!("0x{:08x}", (h >> 32) as u32),
+        "hash64_lo" => format!("0x{:08x}", h as u32),
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+fn eval_positions(p: &[u32], key: &str) -> String {
+    match key {
+        // Emitted in DERIVATION order (p_0 … p_{k-1}), NOT sorted.
+        "positions" => {
+            let parts: Vec<String> = p.iter().map(|x| x.to_string()).collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
 }
 
 // ---- HashMap<i32, i32> ---------------------------------------------------

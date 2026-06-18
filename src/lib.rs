@@ -13,6 +13,7 @@
 
 pub mod array_deque;
 pub mod bit_set;
+pub mod hash;
 pub mod hash_table;
 pub mod hashable_float;
 pub mod immutable;

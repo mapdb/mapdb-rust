@@ -13,9 +13,11 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::bulk::DuplicatePolicy;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
+use mapdb_collections::object::TreeMap as ObjectTreeMap;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
@@ -212,6 +214,7 @@ fn main() {
 
     let name = scenario["name"].as_str().expect("missing name");
     let collection = scenario["collection"].as_str().expect("missing collection");
+    let construction = scenario.get("construction").and_then(Value::as_str);
     let operations = scenario["operations"]
         .as_array()
         .expect("missing operations");
@@ -222,15 +225,17 @@ fn main() {
     println!("=== scenario: {} ===", name);
 
     match collection {
-        "HashMap<i32, i32>" => run_hashmap(name, operations, assertions),
+        "HashMap<i32, i32>" => run_hashmap(name, operations, assertions, construction),
         "HashMap<i64, i32>" => run_i64_hashmap(name, operations, assertions),
-        "ListMultimap<i64, i32>" => run_i64_list_multimap(name, operations, assertions),
-        "SetMultimap<i64, i32>" => run_i64_set_multimap(name, operations, assertions),
+        "ListMultimap<i64, i32>" => {
+            run_i64_list_multimap(name, operations, assertions, construction)
+        }
+        "SetMultimap<i64, i32>" => run_i64_set_multimap(name, operations, assertions, construction),
         "ArrayList<i32>" => run_arraylist(name, operations, assertions),
         "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
         "HashBag<i32>" => run_hashbag(name, operations, assertions),
         "TreeSet<i32>" => run_treeset(name, operations, assertions),
-        "TreeMap<i32, i32>" => run_treemap(name, operations, assertions),
+        "TreeMap<i32, i32>" => run_treemap(name, operations, assertions, construction),
         "HashMap<f32, i32>" => run_f32_hashmap(name, operations, assertions),
         "HashSet<f32>" => run_f32_hashset(name, operations, assertions),
         "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
@@ -253,29 +258,44 @@ fn format_array(v: &[i32]) -> String {
 
 // ---- HashMap<i32, i32> ---------------------------------------------------
 
-fn run_hashmap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
-    let mut map: OpenHashMap<i32, i32> = OpenHashMap::new();
-    for op in operations {
-        match op["op"].as_str().unwrap() {
-            "put" => {
-                let k = op["key"].as_i64().unwrap() as i32;
-                let v = op["value"].as_i64().unwrap() as i32;
-                map.insert(k, v);
+fn run_hashmap(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    construction: Option<&str>,
+) {
+    let map: OpenHashMap<i32, i32> = if construction == Some("bulkLoadExact") {
+        OpenHashMap::bulk_load_exact(
+            i32_pairs(operations),
+            operations.len(),
+            DuplicatePolicy::Error,
+        )
+        .expect("bulkLoadExact failed")
+    } else {
+        let mut map = OpenHashMap::new();
+        for op in operations {
+            match op["op"].as_str().unwrap() {
+                "put" => {
+                    let k = op["key"].as_i64().unwrap() as i32;
+                    let v = op["value"].as_i64().unwrap() as i32;
+                    map.insert(k, v);
+                }
+                "remove" => {
+                    let k = op["key"].as_i64().unwrap() as i32;
+                    map.remove(&k);
+                }
+                "addToValue" => {
+                    let k = op["key"].as_i64().unwrap() as i32;
+                    let delta = op["delta"].as_i64().unwrap() as i32;
+                    let cur = map.get(&k).copied().unwrap_or(0);
+                    map.insert(k, cur.wrapping_add(delta));
+                }
+                "clear" => map.clear(),
+                other => panic!("unknown hashmap op: {}", other),
             }
-            "remove" => {
-                let k = op["key"].as_i64().unwrap() as i32;
-                map.remove(&k);
-            }
-            "addToValue" => {
-                let k = op["key"].as_i64().unwrap() as i32;
-                let delta = op["delta"].as_i64().unwrap() as i32;
-                let cur = map.get(&k).copied().unwrap_or(0);
-                map.insert(k, cur.wrapping_add(delta));
-            }
-            "clear" => map.clear(),
-            other => panic!("unknown hashmap op: {}", other),
         }
-    }
+        map
+    };
     for (key, expected) in assertions {
         if key == "comment" {
             continue; // Scenario authors use "comment" for doc strings; skip.
@@ -283,6 +303,18 @@ fn run_hashmap(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
         let computed = eval_map_assertion(key, &map);
         emit(scenario, key, &computed, expected, FloatMode::None);
     }
+}
+
+fn i32_pairs(operations: &[Value]) -> Vec<(i32, i32)> {
+    operations
+        .iter()
+        .map(|op| {
+            (
+                op["key"].as_i64().unwrap() as i32,
+                op["value"].as_i64().unwrap() as i32,
+            )
+        })
+        .collect()
 }
 
 fn eval_map_assertion(key: &str, map: &OpenHashMap<i32, i32>) -> String {
@@ -427,22 +459,33 @@ macro_rules! run_i64_multimap {
             scenario: &str,
             operations: &[Value],
             assertions: &serde_json::Map<String, Value>,
+            construction: Option<&str>,
         ) {
-            let mut map: $ty = <$ty>::new();
-            for op in operations {
-                match op["op"].as_str().unwrap() {
-                    "put" => {
-                        let k = parse_i64_operand(&op["key"]);
-                        let v = op["value"].as_i64().unwrap() as i32;
-                        map.insert(k, v);
+            let map: $ty = if construction == Some("fromSortedKeyValues") {
+                <$ty>::from_sorted_key_values(
+                    natural_comparator::<i64>(),
+                    natural_comparator::<i32>(),
+                    i64_pairs(operations),
+                )
+                .expect("fromSortedKeyValues failed")
+            } else {
+                let mut map: $ty = <$ty>::new();
+                for op in operations {
+                    match op["op"].as_str().unwrap() {
+                        "put" => {
+                            let k = parse_i64_operand(&op["key"]);
+                            let v = op["value"].as_i64().unwrap() as i32;
+                            map.insert(k, v);
+                        }
+                        "removeAll" => {
+                            let k = parse_i64_operand(&op["key"]);
+                            map.remove_all(&k);
+                        }
+                        other => panic!("unknown i64-multimap op: {}", other),
                     }
-                    "removeAll" => {
-                        let k = parse_i64_operand(&op["key"]);
-                        map.remove_all(&k);
-                    }
-                    other => panic!("unknown i64-multimap op: {}", other),
                 }
-            }
+                map
+            };
             for (key, expected) in assertions {
                 if key == "comment" {
                     continue;
@@ -473,6 +516,18 @@ macro_rules! run_i64_multimap {
 
 run_i64_multimap!(run_i64_list_multimap, Multimap<i64, i32>);
 run_i64_multimap!(run_i64_set_multimap, SetMultimap<i64, i32>);
+
+fn i64_pairs(operations: &[Value]) -> Vec<(i64, i32)> {
+    operations
+        .iter()
+        .map(|op| {
+            (
+                parse_i64_operand(&op["key"]),
+                op["value"].as_i64().unwrap() as i32,
+            )
+        })
+        .collect()
+}
 
 // ---- ArrayList<i32> -------------------------------------------------------
 
@@ -861,21 +916,38 @@ fn run_treeset(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
 
 // ---- TreeMap<i32, i32> ----------------------------------------------------
 
-fn run_treemap(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+fn run_treemap(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    construction: Option<&str>,
+) {
     let mut map: BTreeMap<i32, i32> = BTreeMap::new();
-    for op in operations {
-        match op["op"].as_str().unwrap() {
-            "put" => {
-                let k = op["key"].as_i64().unwrap() as i32;
-                let v = op["value"].as_i64().unwrap() as i32;
-                map.insert(k, v);
+    if construction == Some("fromSorted") {
+        let pumped = ObjectTreeMap::from_sorted(
+            natural_comparator::<i32>(),
+            i32_pairs(operations),
+            DuplicatePolicy::Error,
+        )
+        .expect("fromSorted failed");
+        for (k, v) in &pumped {
+            map.insert(*k, *v);
+        }
+    } else {
+        for op in operations {
+            match op["op"].as_str().unwrap() {
+                "put" => {
+                    let k = op["key"].as_i64().unwrap() as i32;
+                    let v = op["value"].as_i64().unwrap() as i32;
+                    map.insert(k, v);
+                }
+                "remove" => {
+                    let k = op["key"].as_i64().unwrap() as i32;
+                    map.remove(&k);
+                }
+                "clear" => map.clear(),
+                other => panic!("unknown treemap op: {}", other),
             }
-            "remove" => {
-                let k = op["key"].as_i64().unwrap() as i32;
-                map.remove(&k);
-            }
-            "clear" => map.clear(),
-            other => panic!("unknown treemap op: {}", other),
         }
     }
     for (key, expected) in assertions {

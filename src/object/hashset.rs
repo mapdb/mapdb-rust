@@ -5,6 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
+use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::hash_table::OpenHashSet;
 use std::borrow::Borrow;
 use std::hash::Hash;
@@ -22,6 +23,29 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
         HashSet {
             inner: OpenHashSet::new(),
         }
+    }
+
+    /// Bulk-loads a fresh set (size-hint path; may rehash). See
+    /// [`OpenHashSet::bulk_load`].
+    pub fn bulk_load<I: IntoIterator<Item = T>>(
+        iter: I,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError> {
+        Ok(HashSet {
+            inner: OpenHashSet::bulk_load(iter, dup)?,
+        })
+    }
+
+    /// Zero-rehash bulk load for an exactly-`n`-element source. See
+    /// [`OpenHashSet::bulk_load_exact`].
+    pub fn bulk_load_exact<I: IntoIterator<Item = T>>(
+        iter: I,
+        n: usize,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError> {
+        Ok(HashSet {
+            inner: OpenHashSet::bulk_load_exact(iter, n, dup)?,
+        })
     }
 }
 
@@ -248,5 +272,18 @@ mod tests {
         assert!(s.contains("hello"));
         assert!(s.remove("hello"));
         assert!(!s.contains("hello"));
+    }
+
+    #[test]
+    fn bulk_load_equals_incremental() {
+        use crate::bulk::DuplicatePolicy;
+        let data: Vec<i32> = (0..50).collect();
+        let bulk =
+            HashSet::bulk_load_exact(data.clone(), data.len(), DuplicatePolicy::Error).unwrap();
+        let mut inc = HashSet::new();
+        for v in &data {
+            inc.insert(*v);
+        }
+        assert_eq!(bulk, inc);
     }
 }

@@ -5,6 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
+use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::hash_table::OpenHashMap;
 use std::borrow::Borrow;
 use std::hash::Hash;
@@ -27,6 +28,29 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
         HashMap {
             inner: OpenHashMap::with_capacity(cap),
         }
+    }
+
+    /// Bulk-loads a fresh map (size-hint path; may rehash). See
+    /// [`OpenHashMap::bulk_load`].
+    pub fn bulk_load<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError> {
+        Ok(HashMap {
+            inner: OpenHashMap::bulk_load(iter, dup)?,
+        })
+    }
+
+    /// Zero-rehash bulk load for an exactly-`n`-element source. See
+    /// [`OpenHashMap::bulk_load_exact`].
+    pub fn bulk_load_exact<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        n: usize,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError> {
+        Ok(HashMap {
+            inner: OpenHashMap::bulk_load_exact(iter, n, dup)?,
+        })
     }
 }
 
@@ -294,5 +318,18 @@ mod tests {
             *v = 99;
         }
         assert_eq!(m.get(&"a"), Some(&99));
+    }
+
+    #[test]
+    fn bulk_load_equals_incremental() {
+        use crate::bulk::DuplicatePolicy;
+        let data: Vec<(i32, i32)> = (0..50).map(|i| (i, i * 2)).collect();
+        let bulk =
+            HashMap::bulk_load_exact(data.clone(), data.len(), DuplicatePolicy::Error).unwrap();
+        let mut inc = HashMap::new();
+        for (k, v) in &data {
+            inc.insert(*k, *v);
+        }
+        assert_eq!(bulk, inc);
     }
 }

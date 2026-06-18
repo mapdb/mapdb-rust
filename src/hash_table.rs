@@ -23,6 +23,7 @@
 //! [`crate::hashable_float::HashableF32`] / [`crate::hashable_float::HashableF64`]
 //! to get bit-pattern hashing (NaN-aware, ±0 distinct).
 
+use crate::bulk::{BulkError, DuplicatePolicy};
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash};
@@ -366,6 +367,101 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         let new_cap = floor.checked_next_power_of_two().unwrap_or(usize::MAX);
         self.grow_to(new_cap)
     }
+
+    /// Inserts into a table sized for the whole load, never resizing. Returns
+    /// `Err(index)` (the caller's running index) when `key` is a duplicate and
+    /// the policy is [`DuplicatePolicy::Error`]; `Ok(true)` when newly inserted,
+    /// `Ok(false)` when an ignored duplicate.
+    #[inline]
+    fn bulk_insert(
+        &mut self,
+        key: K,
+        value: V,
+        dup: DuplicatePolicy,
+        index: usize,
+    ) -> Result<bool, BulkError> {
+        let mask = self.mask();
+        let mut idx = (self.hash(&key) as usize) & mask;
+        loop {
+            match &mut self.entries[idx] {
+                MapSlot::Empty => {
+                    self.entries[idx] = MapSlot::Occupied { key, value };
+                    self.size += 1;
+                    return Ok(true);
+                }
+                MapSlot::Occupied { key: k, .. } if *k == key => match dup {
+                    DuplicatePolicy::Error => return Err(BulkError::Duplicate { index }),
+                    DuplicatePolicy::IgnoreDuplicates => return Ok(false),
+                },
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
+            }
+        }
+    }
+
+    /// Sets the table to an exact power-of-two capacity for `n` items in a
+    /// single allocation, replacing the (empty) backing store. The caller must
+    /// ensure the map is empty.
+    fn bulk_presize(&mut self, n: usize) -> Result<(), BulkError> {
+        debug_assert_eq!(self.size, 0, "bulk_presize requires an empty table");
+        let cap = crate::bulk::open_addressing_capacity(n, DEFAULT_CAPACITY);
+        let mut entries: Vec<MapSlot<K, V>> = Vec::new();
+        entries.try_reserve_exact(cap)?;
+        entries.resize_with(cap, || MapSlot::Empty);
+        self.entries = entries;
+        Ok(())
+    }
+
+    /// Bulk-load a fresh map from `iter`, pre-sizing the table once for the
+    /// source's length so the load triggers **no** mid-load rehash when the
+    /// length is exact (see [`OpenHashMap::bulk_load_exact`]). For an unsized or
+    /// untrusted source this uses the iterator's size hint; it is correct but
+    /// does not claim the zero-rehash guarantee.
+    ///
+    /// Duplicate keys follow `dup`. Single pass, O(n).
+    pub fn bulk_load<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError>
+    where
+        S: Default,
+    {
+        let iter = iter.into_iter();
+        let hint = iter.size_hint().0;
+        let mut map = Self::with_hasher(S::default());
+        map.bulk_presize(hint)?;
+        for (index, (k, v)) in iter.enumerate() {
+            // Grow if the size hint under-counted; this is the "hint" path and
+            // is allowed to rehash.
+            if map.needs_resize() {
+                map.resize();
+            }
+            map.bulk_insert(k, v, dup, index)?;
+        }
+        Ok(map)
+    }
+
+    /// Bulk-load a fresh map from a source declared to hold exactly `n` items.
+    /// Pre-sizes for `n` in one allocation and **never grows**: the source
+    /// producing more than `n` items is a [`BulkError::ExactSizeExceeded`].
+    /// This is the zero-rehash path (tested at `n = 3·2^k`).
+    pub fn bulk_load_exact<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        n: usize,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError>
+    where
+        S: Default,
+    {
+        let mut map = Self::with_hasher(S::default());
+        map.bulk_presize(n)?;
+        for (index, (k, v)) in iter.into_iter().enumerate() {
+            if map.size >= n {
+                return Err(BulkError::ExactSizeExceeded { expected: n });
+            }
+            map.bulk_insert(k, v, dup, index)?;
+        }
+        Ok(map)
+    }
 }
 
 pub struct OpenHashMapIter<'a, K, V> {
@@ -633,6 +729,86 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         let floor = required.max(DEFAULT_CAPACITY);
         let new_cap = floor.checked_next_power_of_two().unwrap_or(usize::MAX);
         self.grow_to(new_cap)
+    }
+
+    /// No-resize bulk insert with duplicate detection (see the `OpenHashMap`
+    /// twin for semantics).
+    #[inline]
+    fn bulk_insert(
+        &mut self,
+        value: K,
+        dup: DuplicatePolicy,
+        index: usize,
+    ) -> Result<bool, BulkError> {
+        let mask = self.mask();
+        let mut idx = (self.hash(&value) as usize) & mask;
+        loop {
+            match &self.entries[idx] {
+                SetSlot::Empty => {
+                    self.entries[idx] = SetSlot::Occupied { key: value };
+                    self.size += 1;
+                    return Ok(true);
+                }
+                SetSlot::Occupied { key } if *key == value => match dup {
+                    DuplicatePolicy::Error => return Err(BulkError::Duplicate { index }),
+                    DuplicatePolicy::IgnoreDuplicates => return Ok(false),
+                },
+                SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
+            }
+        }
+    }
+
+    fn bulk_presize(&mut self, n: usize) -> Result<(), BulkError> {
+        debug_assert_eq!(self.size, 0, "bulk_presize requires an empty table");
+        let cap = crate::bulk::open_addressing_capacity(n, DEFAULT_CAPACITY);
+        let mut entries: Vec<SetSlot<K>> = Vec::new();
+        entries.try_reserve_exact(cap)?;
+        entries.resize_with(cap, || SetSlot::Empty);
+        self.entries = entries;
+        Ok(())
+    }
+
+    /// Bulk-load a fresh set; size hint path (may rehash). See
+    /// [`OpenHashMap::bulk_load`].
+    pub fn bulk_load<I: IntoIterator<Item = K>>(
+        iter: I,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError>
+    where
+        S: Default,
+    {
+        let iter = iter.into_iter();
+        let hint = iter.size_hint().0;
+        let mut set = Self::with_hasher(S::default());
+        set.bulk_presize(hint)?;
+        for (index, k) in iter.enumerate() {
+            if set.needs_resize() {
+                set.resize();
+            }
+            set.bulk_insert(k, dup, index)?;
+        }
+        Ok(set)
+    }
+
+    /// Zero-rehash bulk load for an exactly-`n`-element source. See
+    /// [`OpenHashMap::bulk_load_exact`].
+    pub fn bulk_load_exact<I: IntoIterator<Item = K>>(
+        iter: I,
+        n: usize,
+        dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError>
+    where
+        S: Default,
+    {
+        let mut set = Self::with_hasher(S::default());
+        set.bulk_presize(n)?;
+        for (index, k) in iter.into_iter().enumerate() {
+            if set.size >= n {
+                return Err(BulkError::ExactSizeExceeded { expected: n });
+            }
+            set.bulk_insert(k, dup, index)?;
+        }
+        Ok(set)
     }
 }
 
@@ -1194,6 +1370,179 @@ mod tests {
         let mut set_owned: Vec<i32> = s.into_iter().collect();
         set_owned.sort();
         assert_eq!(set_owned, vec![1, 2, 3]);
+    }
+
+    // ---- Data pump (bulk_load / bulk_load_exact) ----
+
+    use crate::bulk::{BulkError, DuplicatePolicy};
+
+    // Zero mid-load rehash for bulk_load_exact at n = 3·2^k (3, 6, 12, 24, 48).
+    #[test]
+    fn map_bulk_load_exact_zero_rehash_at_3_times_pow2() {
+        for &n in &[3usize, 6, 12, 24, 48] {
+            let data: Vec<(i32, i32)> = (0..n as i32).map(|i| (i, i * 10)).collect();
+            let m =
+                OpenHashMap::<i32, i32>::bulk_load_exact(data, n, DuplicatePolicy::Error).unwrap();
+            let cap_after = m.entries.len();
+            assert_eq!(m.len(), n);
+            // The capacity must already satisfy the strict growth predicate for
+            // the full load: inserting the (n)th element never grows.
+            assert!(
+                !m.needs_resize() || n == 0,
+                "table at n={n} would resize on the next insert (cap={cap_after})"
+            );
+            // Predicted capacity matches the documented formula.
+            let expected_cap = crate::bulk::open_addressing_capacity(n, DEFAULT_CAPACITY);
+            assert_eq!(cap_after, expected_cap, "capacity mismatch at n={n}");
+            for i in 0..n as i32 {
+                assert_eq!(m.get(&i), Some(&(i * 10)));
+            }
+        }
+    }
+
+    #[test]
+    fn set_bulk_load_exact_zero_rehash_at_3_times_pow2() {
+        for &n in &[3usize, 6, 12, 24, 48] {
+            let data: Vec<i32> = (0..n as i32).collect();
+            let s = OpenHashSet::<i32>::bulk_load_exact(data, n, DuplicatePolicy::Error).unwrap();
+            assert_eq!(s.len(), n);
+            assert!(!s.needs_resize() || n == 0);
+            assert_eq!(
+                s.entries.len(),
+                crate::bulk::open_addressing_capacity(n, DEFAULT_CAPACITY)
+            );
+        }
+    }
+
+    // Bulk-built table must be byte-identical to incremental inserts at the
+    // same final capacity (same slot layout, deterministic hasher).
+    #[test]
+    fn map_bulk_load_byte_identical_to_incremental() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::BuildHasherDefault;
+        type Fixed = BuildHasherDefault<DefaultHasher>;
+        let n = 100usize;
+        let data: Vec<(i32, i32)> = (0..n as i32).map(|i| (i * 7, i)).collect();
+
+        let bulk: OpenHashMap<i32, i32, Fixed> =
+            OpenHashMap::bulk_load_exact(data.clone(), n, DuplicatePolicy::Error).unwrap();
+
+        // Incremental: pre-reserve to the same final capacity, then insert.
+        let mut inc: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        inc.bulk_presize(n).unwrap();
+        for (k, v) in &data {
+            inc.insert(*k, *v);
+        }
+        assert_eq!(bulk.entries.len(), inc.entries.len());
+        // Compare slot-by-slot.
+        for (a, b) in bulk.entries.iter().zip(inc.entries.iter()) {
+            match (a, b) {
+                (MapSlot::Empty, MapSlot::Empty) => {}
+                (
+                    MapSlot::Occupied { key: ka, value: va },
+                    MapSlot::Occupied { key: kb, value: vb },
+                ) => {
+                    assert_eq!((ka, va), (kb, vb));
+                }
+                _ => panic!("slot layout differs between bulk and incremental"),
+            }
+        }
+    }
+
+    #[test]
+    fn map_bulk_load_duplicate_error_reports_index() {
+        // Duplicate at the middle position.
+        let data = vec![(1, 1), (2, 2), (2, 99), (3, 3)];
+        let err = OpenHashMap::<i32, i32>::bulk_load(data, DuplicatePolicy::Error).unwrap_err();
+        match err {
+            BulkError::Duplicate { index } => assert_eq!(index, 2),
+            other => panic!("expected Duplicate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_bulk_load_ignore_duplicates_keeps_first() {
+        let data = vec![(1, 10), (1, 20), (2, 30)];
+        let m =
+            OpenHashMap::<i32, i32>::bulk_load(data, DuplicatePolicy::IgnoreDuplicates).unwrap();
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.get(&1), Some(&10)); // first wins
+        assert_eq!(m.get(&2), Some(&30));
+    }
+
+    #[test]
+    fn map_bulk_load_exact_size_exceeded() {
+        // Source yields more than the declared n.
+        let data = vec![(1, 1), (2, 2), (3, 3)];
+        let err =
+            OpenHashMap::<i32, i32>::bulk_load_exact(data, 2, DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::ExactSizeExceeded { expected: 2 }));
+    }
+
+    #[test]
+    fn map_bulk_load_empty() {
+        let m = OpenHashMap::<i32, i32>::bulk_load_exact(Vec::new(), 0, DuplicatePolicy::Error)
+            .unwrap();
+        assert!(m.is_empty());
+        let m2 = OpenHashMap::<i32, i32>::bulk_load(Vec::new(), DuplicatePolicy::Error).unwrap();
+        assert!(m2.is_empty());
+    }
+
+    #[test]
+    fn map_bulk_load_equals_incremental_observably() {
+        let data: Vec<(i32, i32)> = (0..500).map(|i| (i, i * 3)).collect();
+        let bulk = OpenHashMap::<i32, i32>::bulk_load_exact(
+            data.clone(),
+            data.len(),
+            DuplicatePolicy::Error,
+        )
+        .unwrap();
+        let mut inc = OpenHashMap::<i32, i32>::new();
+        for (k, v) in &data {
+            inc.insert(*k, *v);
+        }
+        assert_eq!(bulk, inc);
+    }
+
+    // NaN / ±0 / Inf flow through the pump path via HashableF32/F64.
+    #[test]
+    fn map_bulk_load_float_edge_cases() {
+        let data = vec![
+            (HashableF64(f64::NAN), 1),
+            (HashableF64(0.0_f64), 2),
+            (HashableF64(-0.0_f64), 3),
+            (HashableF64(f64::INFINITY), 4),
+            (HashableF64(f64::NEG_INFINITY), 5),
+        ];
+        let n = data.len();
+        let m = OpenHashMap::<HashableF64, i32>::bulk_load_exact(data, n, DuplicatePolicy::Error)
+            .unwrap();
+        assert_eq!(m.len(), 5); // ±0 distinct
+        assert_eq!(m.get(&HashableF64(f64::NAN)), Some(&1));
+        assert_eq!(m.get(&HashableF64(0.0_f64)), Some(&2));
+        assert_eq!(m.get(&HashableF64(-0.0_f64)), Some(&3));
+        assert_eq!(m.get(&HashableF64(f64::INFINITY)), Some(&4));
+        assert_eq!(m.get(&HashableF64(f64::NEG_INFINITY)), Some(&5));
+    }
+
+    #[test]
+    fn set_bulk_load_dup_and_ignore() {
+        let err = OpenHashSet::<i32>::bulk_load(vec![1, 2, 2], DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 2 }));
+        let s = OpenHashSet::<i32>::bulk_load(vec![1, 2, 2, 3], DuplicatePolicy::IgnoreDuplicates)
+            .unwrap();
+        assert_eq!(s.len(), 3);
+    }
+
+    // No leak on mid-load allocation failure: bulk_presize fails before any
+    // element is consumed, so the (empty) map is dropped cleanly.
+    #[test]
+    fn map_bulk_load_alloc_failure_no_leak() {
+        let huge = usize::MAX / 2;
+        let data = std::iter::empty::<(i32, i32)>();
+        let err = OpenHashMap::<i32, i32>::bulk_load_exact(data, huge, DuplicatePolicy::Error)
+            .unwrap_err();
+        assert!(matches!(err, BulkError::Alloc(_)));
     }
 
     #[test]

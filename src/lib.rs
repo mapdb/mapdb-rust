@@ -13,6 +13,7 @@
 
 pub mod array_deque;
 pub mod bit_set;
+pub mod bulk;
 pub mod hash_table;
 pub mod hashable_float;
 pub mod immutable;
@@ -28,6 +29,7 @@ pub mod traits;
 
 pub use array_deque::ArrayDeque;
 pub use bit_set::BitSet;
+pub use bulk::{BulkError, DuplicatePolicy};
 pub use hash_table::{OpenHashMap, OpenHashSet};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};

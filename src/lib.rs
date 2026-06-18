@@ -22,6 +22,7 @@ pub mod object;
 pub mod pair;
 pub mod parallel;
 pub mod priority_queue;
+pub mod range;
 pub mod stream;
 pub mod synchronized;
 pub mod traits;
@@ -39,4 +40,5 @@ pub use parallel::BatchIterable;
 #[cfg(feature = "parallel")]
 pub use parallel::{as_parallel, ParallelSlice};
 pub use priority_queue::PriorityQueue;
+pub use range::{BoundType, Cut, Range};
 pub use synchronized::{synchronized, SyncGuard, Synchronized};

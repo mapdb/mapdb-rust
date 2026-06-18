@@ -18,6 +18,7 @@ use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
+use mapdb_collections::range::{BoundType, Range};
 use mapdb_collections::{HashableF32, OpenHashMap, OpenHashSet};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -109,8 +110,13 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
             }
         }
         Value::String(s) => {
-            // Float label scalar (e.g. sum: "NaN", max: "NaN").
-            format_f32(parse_f32_label(s))
+            if mode == FloatMode::None {
+                // Plain string scalar (e.g. Range lower_bound_type: "closed").
+                s.clone()
+            } else {
+                // Float label scalar (e.g. sum: "NaN", max: "NaN").
+                format_f32(parse_f32_label(s))
+            }
         }
         // Bits-escape float scalar (e.g. sum: {"bits":"0xffc00000"}).
         Value::Object(_) if mode != FloatMode::None => format_f32(parse_f32(v)),
@@ -235,6 +241,7 @@ fn main() {
         "HashSet<f32>" => run_f32_hashset(name, operations, assertions),
         "TreeSet<f32>" => run_f32_treeset(name, operations, assertions),
         "ArrayList<f32>" => run_f32_arraylist(name, operations, assertions),
+        "Range<i32>" => run_range(name, operations, assertions, &scenario),
         other => {
             eprintln!("unsupported collection type: {}", other);
             std::process::exit(1);
@@ -1159,5 +1166,134 @@ fn run_f32_arraylist(
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
         emit(scenario, key, &val, expected, FloatMode::F32List);
+    }
+}
+
+// ---- Range<i32> ----------------------------------------------------------
+
+// The Bound/Range value model (spec/features/bound-range.md). Exactly ONE
+// constructor op builds the range under test; an optional "other" block (same
+// single-builder shape) supplies the second range for binary ops. Routed
+// through the production Range<i32> — every assertion is proved against the
+// real cut algebra, not re-derived here.
+fn build_range(ops: &[Value]) -> Range<i32> {
+    let constructors: Vec<&Value> = ops.iter().collect();
+    if constructors.len() != 1 {
+        panic!("Range<i32> scenario must have exactly one constructor op");
+    }
+    let op = constructors[0];
+    let lower = || op["lower"].as_i64().expect("missing lower") as i32;
+    let upper = || op["upper"].as_i64().expect("missing upper") as i32;
+    match op["op"].as_str().unwrap() {
+        "closed" => Range::closed(lower(), upper()),
+        "open" => Range::open(lower(), upper()),
+        "closed_open" => Range::closed_open(lower(), upper()),
+        "open_closed" => Range::open_closed(lower(), upper()),
+        "at_least" => Range::at_least(lower()),
+        "greater_than" => Range::greater_than(lower()),
+        "at_most" => Range::at_most(upper()),
+        "less_than" => Range::less_than(upper()),
+        "all" => Range::all(),
+        "singleton" => Range::singleton(op["value"].as_i64().expect("missing value") as i32),
+        other => panic!("unknown range op: {}", other),
+    }
+}
+
+fn bound_type_str(bt: Option<BoundType>) -> String {
+    match bt {
+        Some(BoundType::Open) => "open".to_string(),
+        Some(BoundType::Closed) => "closed".to_string(),
+        None => "null".to_string(),
+    }
+}
+
+fn opt_i32_str(v: Option<i32>) -> String {
+    v.map(|x| x.to_string()).unwrap_or_else(|| "null".into())
+}
+
+fn run_range(
+    scenario_name: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario: &Value,
+) {
+    let range = build_range(operations);
+    let other = scenario.get("other").map(|spec| {
+        let ops = spec["operations"].as_array().expect("other.operations");
+        build_range(ops)
+    });
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_range_assertion(key, &range, other.as_ref());
+        emit(scenario_name, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_range_assertion(key: &str, range: &Range<i32>, other: Option<&Range<i32>>) -> String {
+    match key {
+        "is_empty" => range.is_empty().to_string(),
+        "has_lower_bound" => range.has_lower_bound().to_string(),
+        "has_upper_bound" => range.has_upper_bound().to_string(),
+        "lower_bound_type" => bound_type_str(range.lower_bound_type()),
+        "upper_bound_type" => bound_type_str(range.upper_bound_type()),
+        "lower_endpoint" => opt_i32_str(range.lower_endpoint()),
+        "upper_endpoint" => opt_i32_str(range.upper_endpoint()),
+        _ if key.starts_with("contains_") => {
+            let n: i32 = key[9..].parse().expect("contains_<N> integer");
+            range.contains(n).to_string()
+        }
+        // ---- binary ops: require "other" -------------------------------
+        "encloses_other" if other.is_some() => range.encloses(other.unwrap()).to_string(),
+        "is_connected_other" if other.is_some() => range.is_connected(other.unwrap()).to_string(),
+        "span_lower" if other.is_some() => opt_i32_str(range.span(other.unwrap()).lower_endpoint()),
+        "span_upper" if other.is_some() => opt_i32_str(range.span(other.unwrap()).upper_endpoint()),
+        "span_lower_type" if other.is_some() => {
+            bound_type_str(range.span(other.unwrap()).lower_bound_type())
+        }
+        "span_upper_type" if other.is_some() => {
+            bound_type_str(range.span(other.unwrap()).upper_bound_type())
+        }
+        "intersection_is_none" if other.is_some() => {
+            range.intersection(other.unwrap()).is_none().to_string()
+        }
+        "intersection_is_empty" if other.is_some() => range
+            .intersection(other.unwrap())
+            .map(|i| i.is_empty())
+            .unwrap_or(false)
+            .to_string(),
+        "intersection_lower" if other.is_some() => opt_i32_str(
+            range
+                .intersection(other.unwrap())
+                .and_then(|i| i.lower_endpoint()),
+        ),
+        "intersection_upper" if other.is_some() => opt_i32_str(
+            range
+                .intersection(other.unwrap())
+                .and_then(|i| i.upper_endpoint()),
+        ),
+        "intersection_lower_type" if other.is_some() => bound_type_str(
+            range
+                .intersection(other.unwrap())
+                .and_then(|i| i.lower_bound_type()),
+        ),
+        "intersection_upper_type" if other.is_some() => bound_type_str(
+            range
+                .intersection(other.unwrap())
+                .and_then(|i| i.upper_bound_type()),
+        ),
+        "intersection_has_lower_bound" if other.is_some() => range
+            .intersection(other.unwrap())
+            .map(|i| i.has_lower_bound())
+            .unwrap_or(false)
+            .to_string(),
+        "intersection_has_upper_bound" if other.is_some() => range
+            .intersection(other.unwrap())
+            .map(|i| i.has_upper_bound())
+            .unwrap_or(false)
+            .to_string(),
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
 }

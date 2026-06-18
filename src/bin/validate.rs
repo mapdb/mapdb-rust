@@ -13,6 +13,7 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::bloom::Bloom;
 use mapdb_collections::hash;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
@@ -252,6 +253,7 @@ fn main() {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
+        "Bloom" => run_bloom(name, operations, assertions, &scenario),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -462,6 +464,152 @@ fn eval_positions(p: &[u32], key: &str) -> String {
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
+}
+
+// ---- Bloom (spec/features/bloom.md) --------------------------------------
+//
+// Approximate set membership riding the hash pipeline. Exactly ONE `with_params`
+// op (explicit m,k — never `optimal`, the float trap) builds the filter; the rest
+// are `add` ops. A `union` scenario carries a second filter in the top-level
+// `"other"` block (same with_params+add shape). Outputs: `bytes`/`union_bytes`
+// are `0x`-hex strings (LSB-first within each byte, ascending bytes, length
+// ceil(m/8)); `set_bits`/`union_set_bits` are sorted-ascending int arrays;
+// `contains_<v>`/`union_contains_<v>` are bools. Unknown ops/keys SKIP
+// (forward-compat); malformed (0 or >1 with_params) SKIPs like `from_sorted`.
+
+/// Render a byte slice as the canonical lower-case `0x`-prefixed hex string,
+/// byte 0 first (the serialized bit-array form).
+fn bloom_bytes_hex(bytes: &[u8]) -> String {
+    let mut s = String::from("0x");
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Build a `Bloom` from a scenario `operations` array: exactly one `with_params`
+/// op (explicit m,k) followed by `add` ops. Returns `None` if the operations are
+/// malformed — the caller then SKIPs (forward-compat), exactly like the
+/// sorted-table `from_sorted` rule. "Malformed" here is anything an older/newer
+/// runner cannot faithfully execute: zero or multiple `with_params`; an unknown
+/// op; `m == 0` (a construction trap, kept native-test-only — never a shared
+/// scenario); or an `m`/`k`/`value` operand outside its declared integer range.
+/// Guarding these here means the shared runner never panics on a malformed or
+/// forward-incompatible Bloom scenario; it SKIPs.
+fn build_bloom(operations: &[Value]) -> Option<Bloom> {
+    // Find the single with_params; reject zero or multiple.
+    let mut params: Option<(u32, u32)> = None;
+    for op in operations {
+        if op["op"].as_str() == Some("with_params") {
+            if params.is_some() {
+                return None; // multiple with_params => malformed
+            }
+            // m/k must be exact u32 (a wider value would wrap under `as u32`).
+            let m = u32::try_from(op["m"].as_u64()?).ok()?;
+            let k = u32::try_from(op["k"].as_u64()?).ok()?;
+            // m == 0 is a construction trap (native-test-only); never a shared
+            // scenario — treat as malformed so the runner SKIPs, not panics.
+            if m == 0 {
+                return None;
+            }
+            params = Some((m, k));
+        }
+    }
+    let (m, k) = params?; // zero with_params => malformed
+    let mut b = Bloom::with_params(m, k);
+    for op in operations {
+        match op["op"].as_str().unwrap_or("") {
+            "with_params" => {} // already consumed
+            "add" => {
+                // value must be an exact i32 (a wider value would wrap).
+                let v = i32::try_from(op["value"].as_i64()?).ok()?;
+                b.add(v);
+            }
+            // Forward-compat: an unknown op makes the scenario un-runnable here.
+            _ => return None,
+        }
+    }
+    Some(b)
+}
+
+fn run_bloom(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    full: &Value,
+) {
+    let Some(b) = build_bloom(operations) else {
+        eprintln!("skip: malformed/unknown Bloom scenario (forward-compat): {scenario}");
+        return;
+    };
+
+    // Optional second filter for union scenarios (top-level "other" block).
+    let other: Option<Bloom> = full
+        .get("other")
+        .and_then(|o| o.get("operations"))
+        .and_then(|ops| ops.as_array())
+        .and_then(|ops| build_bloom(ops));
+    // Compute the union only when the partners' params actually match. A
+    // mismatched union is a native-test-only trap, never a shared scenario, so
+    // here a mismatch simply leaves `union` unavailable (any `union_*` assertion
+    // then SKIPs via UNKNOWN_ASSERTION) rather than panicking.
+    let union: Option<Bloom> = other.as_ref().and_then(|o| {
+        if o.m_bits() == b.m_bits() && o.k() == b.k() {
+            Some(b.union(o))
+        } else {
+            None
+        }
+    });
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_bloom(&b, union.as_ref(), key);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_bloom(b: &Bloom, union: Option<&Bloom>, key: &str) -> String {
+    match key {
+        "m_bits" => b.m_bits().to_string(),
+        "k" => b.k().to_string(),
+        "bit_count" => b.bit_count().to_string(),
+        "is_empty" => b.is_empty().to_string(),
+        "set_bits" => format_u32_array(&b.set_bits()),
+        "bytes" => bloom_bytes_hex(&b.to_bytes()),
+        // Union assertions: require the "other" block (union computed in caller).
+        "union_bit_count" => match union {
+            Some(u) => u.bit_count().to_string(),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        "union_set_bits" => match union {
+            Some(u) => format_u32_array(&u.set_bits()),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        "union_bytes" => match union {
+            Some(u) => bloom_bytes_hex(&u.to_bytes()),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        // contains_<v> / union_contains_<v>: signed i32 suffix.
+        _ if key.starts_with("union_contains_") => match union {
+            Some(u) => match key["union_contains_".len()..].parse::<i32>() {
+                Ok(v) => u.might_contain(v).to_string(),
+                Err(_) => format!("UNKNOWN_ASSERTION:{}", key),
+            },
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        _ if key.starts_with("contains_") => match key["contains_".len()..].parse::<i32>() {
+            Ok(v) => b.might_contain(v).to_string(),
+            Err(_) => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+fn format_u32_array(v: &[u32]) -> String {
+    let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
+    format!("[{}]", parts.join(","))
 }
 
 // ---- HashMap<i32, i32> ---------------------------------------------------

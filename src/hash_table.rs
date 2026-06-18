@@ -139,6 +139,26 @@ fn match_deleted(g: u64) -> BitMask {
     match_byte(g, DELETED)
 }
 
+/// Lanes whose control byte is FULL (a 7-bit tag, high bit clear). EMPTY (0xFF)
+/// and DELETED (0x80) both have the high bit set, so `!g & HIGHS` marks exactly
+/// the FULL lanes. Lets iterators skip empty/deleted runs a whole group at a
+/// time instead of testing one control byte per slot.
+#[inline]
+fn match_full(g: u64) -> BitMask {
+    BitMask(!g & HIGHS)
+}
+
+/// Full-lane bitmask of the first group, used to prime a group-skipping iterator.
+/// `cap` is the bucket count (`entries.len()`); always a multiple of GROUP_WIDTH.
+#[inline]
+fn first_group_full_mask(ctrl: &[u8], cap: usize) -> u64 {
+    if cap == 0 {
+        0
+    } else {
+        match_full(load_group(ctrl, 0)).0
+    }
+}
+
 /// Triangular group probe sequence. Yields the starting bucket index of each
 /// group; for power-of-two `cap` (a multiple of `GROUP_WIDTH`) it visits every
 /// group exactly once before repeating.
@@ -286,43 +306,36 @@ impl<K, V, S> OpenHashMap<K, V, S> {
 
     pub fn clear(&mut self) {
         let cap = self.entries.len();
-        // A guard recomputes accounting (len/growth_left) and the mirror suffix
-        // from the surviving control bytes whenever this scope exits — including
-        // through a panic in a user value `Drop` — so the table is left
-        // internally consistent either way. Each control byte is set EMPTY
-        // *before* its entry is dropped, so a panicking Drop never leaves a FULL
-        // byte pointing at dropped memory (no double-drop).
-        struct ClearGuard<'a, K, V, S>(&'a mut OpenHashMap<K, V, S>);
-        impl<K, V, S> Drop for ClearGuard<'_, K, V, S> {
-            fn drop(&mut self) {
-                let t = &mut *self.0;
-                let cap = t.entries.len();
-                let (mut full, mut deleted) = (0usize, 0usize);
-                for i in 0..cap {
-                    match t.ctrl[i] {
-                        c if c <= 0x7F => full += 1,
-                        DELETED => deleted += 1,
-                        _ => {}
-                    }
+        if self.len == 0 {
+            // No entries to drop; just reset any tombstones to a pristine state.
+            if self.growth_left != max_load(cap) {
+                for b in self.ctrl.iter_mut() {
+                    *b = EMPTY;
                 }
-                for i in 0..GROUP_WIDTH {
-                    t.ctrl[cap + i] = t.ctrl[i];
-                }
-                t.len = full;
-                t.growth_left = max_load(cap) - full - deleted;
+                self.growth_left = max_load(cap);
+            }
+            return;
+        }
+        // Reset the WHOLE table to a valid empty state *before* dropping any
+        // entry, so a panic in a user value `Drop` leaves a sound, valid (empty)
+        // map. Dropped slots are already EMPTY (no double-drop); on a Drop panic
+        // the not-yet-dropped entries simply leak, which is acceptable for a
+        // panicking `Drop` and matches `std`'s contract.
+        let mut full: Vec<usize> = Vec::with_capacity(self.len);
+        for i in 0..cap {
+            if self.ctrl[i] <= 0x7F {
+                full.push(i);
             }
         }
-        let guard = ClearGuard(self);
-        for i in 0..cap {
-            if guard.0.ctrl[i] <= 0x7F {
-                guard.0.ctrl[i] = EMPTY;
-                // SAFETY: was FULL ⇒ initialized; marked EMPTY first ⇒ never
-                // double-dropped even if this drop or a later one panics.
-                unsafe {
-                    std::ptr::drop_in_place(guard.0.entries[i].as_mut_ptr());
-                }
-            } else {
-                guard.0.ctrl[i] = EMPTY;
+        for b in self.ctrl.iter_mut() {
+            *b = EMPTY;
+        }
+        self.len = 0;
+        self.growth_left = max_load(cap);
+        for i in full {
+            // SAFETY: `i` was FULL ⇒ initialized; ctrl now EMPTY ⇒ never dropped again.
+            unsafe {
+                std::ptr::drop_in_place(self.entries[i].as_mut_ptr());
             }
         }
     }
@@ -331,7 +344,9 @@ impl<K, V, S> OpenHashMap<K, V, S> {
         OpenHashMapIter {
             ctrl: &self.ctrl,
             entries: &self.entries,
-            pos: 0,
+            group: 0,
+            mask: first_group_full_mask(&self.ctrl, self.entries.len()),
+            remaining: self.len,
         }
     }
 
@@ -712,24 +727,40 @@ impl<K: Clone, V: Clone, S: Clone> Clone for OpenHashMap<K, V, S> {
 pub struct OpenHashMapIter<'a, K, V> {
     ctrl: &'a [u8],
     entries: &'a [MaybeUninit<Entry<K, V>>],
-    pos: usize,
+    /// Aligned base index of the group whose remaining full lanes are in `mask`.
+    group: usize,
+    /// Full-lane bitmask of the current group, not yet yielded.
+    mask: u64,
+    remaining: usize,
 }
 
 impl<'a, K, V> Iterator for OpenHashMapIter<'a, K, V> {
     type Item = (&'a K, &'a V);
     fn next(&mut self) -> Option<Self::Item> {
-        while self.pos < self.entries.len() {
-            let i = self.pos;
-            self.pos += 1;
-            if self.ctrl[i] <= 0x7F {
+        loop {
+            if self.mask != 0 {
+                let lane = (self.mask.trailing_zeros() >> 3) as usize;
+                self.mask &= self.mask - 1; // clear lowest lane
+                let i = self.group + lane; // < cap: groups are aligned
+                self.remaining -= 1;
                 // SAFETY: FULL ⇒ initialized; bound to iterator lifetime.
                 let entry = unsafe { &*self.entries[i].as_ptr() };
                 return Some((&entry.key, &entry.value));
             }
+            self.group += GROUP_WIDTH;
+            if self.group >= self.entries.len() {
+                return None;
+            }
+            self.mask = match_full(load_group(self.ctrl, self.group)).0;
         }
-        None
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
     }
 }
+
+impl<K, V> ExactSizeIterator for OpenHashMapIter<'_, K, V> {}
 
 // ===========================================================================
 // OpenHashSet<K, S>
@@ -815,38 +846,32 @@ impl<K, S> OpenHashSet<K, S> {
 
     pub fn clear(&mut self) {
         let cap = self.entries.len();
-        // See OpenHashMap::clear: a guard keeps accounting/mirror consistent even
-        // if a user element `Drop` panics mid-clear.
-        struct ClearGuard<'a, K, S>(&'a mut OpenHashSet<K, S>);
-        impl<K, S> Drop for ClearGuard<'_, K, S> {
-            fn drop(&mut self) {
-                let t = &mut *self.0;
-                let cap = t.entries.len();
-                let (mut full, mut deleted) = (0usize, 0usize);
-                for i in 0..cap {
-                    match t.ctrl[i] {
-                        c if c <= 0x7F => full += 1,
-                        DELETED => deleted += 1,
-                        _ => {}
-                    }
+        // See OpenHashMap::clear: reset to a valid empty state before dropping so
+        // a panicking element `Drop` leaves a sound, valid (empty) set.
+        if self.len == 0 {
+            if self.growth_left != max_load(cap) {
+                for b in self.ctrl.iter_mut() {
+                    *b = EMPTY;
                 }
-                for i in 0..GROUP_WIDTH {
-                    t.ctrl[cap + i] = t.ctrl[i];
-                }
-                t.len = full;
-                t.growth_left = max_load(cap) - full - deleted;
+                self.growth_left = max_load(cap);
+            }
+            return;
+        }
+        let mut full: Vec<usize> = Vec::with_capacity(self.len);
+        for i in 0..cap {
+            if self.ctrl[i] <= 0x7F {
+                full.push(i);
             }
         }
-        let guard = ClearGuard(self);
-        for i in 0..cap {
-            if guard.0.ctrl[i] <= 0x7F {
-                guard.0.ctrl[i] = EMPTY;
-                // SAFETY: was FULL ⇒ initialized; marked EMPTY first ⇒ no double-drop.
-                unsafe {
-                    std::ptr::drop_in_place(guard.0.entries[i].as_mut_ptr());
-                }
-            } else {
-                guard.0.ctrl[i] = EMPTY;
+        for b in self.ctrl.iter_mut() {
+            *b = EMPTY;
+        }
+        self.len = 0;
+        self.growth_left = max_load(cap);
+        for i in full {
+            // SAFETY: `i` was FULL ⇒ initialized; ctrl now EMPTY ⇒ never dropped again.
+            unsafe {
+                std::ptr::drop_in_place(self.entries[i].as_mut_ptr());
             }
         }
     }
@@ -855,7 +880,9 @@ impl<K, S> OpenHashSet<K, S> {
         OpenHashSetIter {
             ctrl: &self.ctrl,
             entries: &self.entries,
-            pos: 0,
+            group: 0,
+            mask: first_group_full_mask(&self.ctrl, self.entries.len()),
+            remaining: self.len,
         }
     }
 }
@@ -1163,24 +1190,38 @@ impl<K: Clone, S: Clone> Clone for OpenHashSet<K, S> {
 pub struct OpenHashSetIter<'a, K> {
     ctrl: &'a [u8],
     entries: &'a [MaybeUninit<SetEntry<K>>],
-    pos: usize,
+    group: usize,
+    mask: u64,
+    remaining: usize,
 }
 
 impl<'a, K> Iterator for OpenHashSetIter<'a, K> {
     type Item = &'a K;
     fn next(&mut self) -> Option<Self::Item> {
-        while self.pos < self.entries.len() {
-            let i = self.pos;
-            self.pos += 1;
-            if self.ctrl[i] <= 0x7F {
+        loop {
+            if self.mask != 0 {
+                let lane = (self.mask.trailing_zeros() >> 3) as usize;
+                self.mask &= self.mask - 1;
+                let i = self.group + lane;
+                self.remaining -= 1;
                 // SAFETY: FULL ⇒ initialized.
                 let entry = unsafe { &*self.entries[i].as_ptr() };
                 return Some(&entry.key);
             }
+            self.group += GROUP_WIDTH;
+            if self.group >= self.entries.len() {
+                return None;
+            }
+            self.mask = match_full(load_group(self.ctrl, self.group)).0;
         }
-        None
+    }
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
     }
 }
+
+impl<K> ExactSizeIterator for OpenHashSetIter<'_, K> {}
 
 // ---------------------------------------------------------------------------
 // Debug

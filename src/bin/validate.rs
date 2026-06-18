@@ -20,6 +20,7 @@ use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::{natural_comparator, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::range::{BoundType, Range};
+use mapdb_collections::roaring::RoaringU32;
 use mapdb_collections::{
     HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet,
 };
@@ -252,6 +253,7 @@ fn main() {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
+        "RoaringU32" => run_roaring(name, operations, assertions, &scenario),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -459,6 +461,218 @@ fn eval_positions(p: &[u32], key: &str) -> String {
         "positions" => {
             let parts: Vec<String> = p.iter().map(|x| x.to_string()).collect();
             format!("[{}]", parts.join(","))
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+// ---- RoaringU32 (spec/features/roaring-u32.md) ---------------------------
+//
+// A mutable, sparse, compressed u32 set. Values are i32 in the JSON suite,
+// REINTERPRETED to u32 (not sign-extended). Ordering is UNSIGNED u32 ascending
+// throughout (to_sorted_array, min, max, serialized chunk order). The byte
+// oracle is serialized_hex (+ the four set-algebra hex keys); container_types /
+// chunk_count / to_sorted_array localize a failure.
+//
+// Ops: add / remove / clear / add_range / remove_range / deserialize. A
+// reversed range (from_u32 > to_u32 after reinterpret) is a MALFORMED scenario
+// -> SKIP the whole scenario. A `deserialize` op must be the ONLY op in its
+// scenario; mixing it with add/remove is malformed -> SKIP. Unknown ops SKIP
+// (forward-compat).
+
+/// Build a `RoaringU32` by applying the scenario's operation list. Returns
+/// `None` if the scenario is malformed (reversed range, deserialize mixed with
+/// other ops, bad deserialize hex) — the caller SKIPs.
+fn build_roaring(operations: &[Value]) -> Option<RoaringU32> {
+    // A single `deserialize` op builds the set from a literal hex image and
+    // must be the only op.
+    let has_deserialize = operations
+        .iter()
+        .any(|op| op["op"].as_str() == Some("deserialize"));
+    if has_deserialize {
+        if operations.len() != 1 {
+            eprintln!("skip: `deserialize` op must be the only op (malformed)");
+            return None;
+        }
+        let hex = operations[0]["bytes"]
+            .as_str()
+            .expect("deserialize op needs `bytes`");
+        // Syntactically bad hex is ALSO a malformed scenario -> SKIP (not a
+        // panic), matching the README "unparseable/non-canonical deserialize
+        // image is SKIP" rule.
+        let bytes = match parse_roaring_hex(hex) {
+            Some(b) => b,
+            None => {
+                eprintln!("skip: malformed deserialize hex: {:?}", hex);
+                return None;
+            }
+        };
+        return match RoaringU32::deserialize(&bytes) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                eprintln!("skip: deserialize failed (malformed image): {}", e);
+                None
+            }
+        };
+    }
+
+    let mut set = RoaringU32::new();
+    for op in operations {
+        match op["op"].as_str().unwrap_or("") {
+            "add" => {
+                let v = op["value"].as_i64().expect("add needs i32 value") as i32;
+                set.add(v as u32);
+            }
+            "remove" => {
+                let v = op["value"].as_i64().expect("remove needs i32 value") as i32;
+                set.remove(v as u32);
+            }
+            "clear" => set.clear(),
+            "add_range" | "remove_range" => {
+                let from = op["from"].as_i64().expect("range needs `from`") as i32 as u32;
+                let to = op["to"].as_i64().expect("range needs `to`") as i32 as u32;
+                // Reversed range (unsigned) is a malformed scenario -> SKIP.
+                if from > to {
+                    eprintln!(
+                        "skip: reversed range from={:#010x} > to={:#010x} (malformed)",
+                        from, to
+                    );
+                    return None;
+                }
+                let add = op["op"].as_str() == Some("add_range");
+                // Inclusive [from, to]; `to` may be u32::MAX so iterate carefully.
+                let mut v = from;
+                loop {
+                    if add {
+                        set.add(v);
+                    } else {
+                        set.remove(v);
+                    }
+                    if v == to {
+                        break;
+                    }
+                    v += 1;
+                }
+            }
+            // Forward-compat: an unknown op makes the scenario un-runnable here.
+            other => {
+                eprintln!("skip: unknown roaring op (forward-compat): {}", other);
+                return None;
+            }
+        }
+    }
+    Some(set)
+}
+
+/// Parse a `0x`-prefixed hex byte string for a `deserialize` op. Returns `None`
+/// for syntactically malformed hex (missing `0x`, odd digit count, bad digit) —
+/// a malformed scenario the caller SKIPs (never a panic).
+fn parse_roaring_hex(s: &str) -> Option<Vec<u8>> {
+    let body = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
+    if body.len() % 2 != 0 {
+        return None;
+    }
+    (0..body.len() / 2)
+        .map(|i| u8::from_str_radix(&body[2 * i..2 * i + 2], 16).ok())
+        .collect()
+}
+
+/// Lower-case `0x`-prefixed hex string of a byte image (the serialized oracle).
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(2 + bytes.len() * 2);
+    s.push_str("0x");
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// `to_sorted_array` in UNSIGNED u32 ascending order, emitted as i32 (explicit-
+/// order key — NOT re-sorted signed).
+fn roaring_sorted_array(set: &RoaringU32) -> String {
+    let parts: Vec<String> = set
+        .to_sorted_vec()
+        .iter()
+        .map(|v| (*v as i32).to_string())
+        .collect();
+    format!("[{}]", parts.join(","))
+}
+
+fn run_roaring(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let set = match build_roaring(operations) {
+        Some(s) => s,
+        None => return, // malformed / forward-compat skip
+    };
+
+    // The `other` collection (a second RoaringU32) drives set-algebra keys.
+    let other = scenario_obj
+        .get("other")
+        .and_then(|o| o["operations"].as_array())
+        .and_then(|ops| build_roaring(ops));
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_roaring_assertion(key, &set, other.as_ref());
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_roaring_assertion(key: &str, set: &RoaringU32, other: Option<&RoaringU32>) -> String {
+    match key {
+        "cardinality" => set.cardinality().to_string(),
+        "is_empty" => set.is_empty().to_string(),
+        "chunk_count" => set.chunk_count().to_string(),
+        "serialized_len" => set.serialize().len().to_string(),
+        "serialized_hex" => bytes_to_hex(&set.serialize()),
+        "to_sorted_array" => roaring_sorted_array(set),
+        "min" => set
+            .min()
+            .map(|v| (v as i32).to_string())
+            .unwrap_or_else(|| "null".into()),
+        "max" => set
+            .max()
+            .map(|v| (v as i32).to_string())
+            .unwrap_or_else(|| "null".into()),
+        "container_types" => {
+            let parts: Vec<String> = set
+                .container_types()
+                .iter()
+                .map(|t| format!("\"{}\"", t))
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        // Set-algebra byte oracle + cardinalities (require `other`).
+        "union_serialized_hex" if other.is_some() => {
+            bytes_to_hex(&set.or(other.unwrap()).serialize())
+        }
+        "intersect_serialized_hex" if other.is_some() => {
+            bytes_to_hex(&set.and(other.unwrap()).serialize())
+        }
+        "and_not_serialized_hex" if other.is_some() => {
+            bytes_to_hex(&set.and_not(other.unwrap()).serialize())
+        }
+        "xor_serialized_hex" if other.is_some() => {
+            bytes_to_hex(&set.xor(other.unwrap()).serialize())
+        }
+        "union_cardinality" if other.is_some() => set.or(other.unwrap()).cardinality().to_string(),
+        "intersect_cardinality" if other.is_some() => {
+            set.and(other.unwrap()).cardinality().to_string()
+        }
+        "and_not_cardinality" if other.is_some() => {
+            set.and_not(other.unwrap()).cardinality().to_string()
+        }
+        "xor_cardinality" if other.is_some() => set.xor(other.unwrap()).cardinality().to_string(),
+        _ if key.starts_with("contains_") => {
+            // Signed i32 suffix, reinterpreted to u32.
+            let v: i32 = key[9..].parse().unwrap();
+            set.contains(v as u32).to_string()
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }

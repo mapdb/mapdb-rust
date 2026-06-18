@@ -13,6 +13,7 @@
 //! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
 //! types but a single algorithm body.
 
+use mapdb_collections::fenwick::FenwickTree;
 use mapdb_collections::hash;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
@@ -127,8 +128,15 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
             let parts: Vec<String> = arr
                 .iter()
                 .map(|e| match mode {
+                    // Under None, an array element is rendered as its bare
+                    // scalar: a JSON number as-is, and a STRING unquoted (the
+                    // Fenwick `tree` canonical array encodes i64 elements as
+                    // decimal strings — see fenwick.md §"Scenario wire
+                    // encoding" — which must compare against the runner's bare
+                    // decimal output, not a quoted form).
                     FloatMode::None => match e {
                         Value::Number(n) => n.to_string(),
+                        Value::String(s) => s.clone(),
                         _ => e.to_string(),
                     },
                     FloatMode::F32Keyed => format!("\"{}\"", format_f32(element_to_f32(e))),
@@ -252,6 +260,7 @@ fn main() {
             run_immutable_sorted_set(name, operations, assertions, &scenario)
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
+        "FenwickTree" => run_fenwick(name, operations, assertions),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -459,6 +468,132 @@ fn eval_positions(p: &[u32], key: &str) -> String {
         "positions" => {
             let parts: Vec<String> = p.iter().map(|x| x.to_string()).collect();
             format!("[{}]", parts.join(","))
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+// ---- FenwickTree (spec/features/fenwick.md) -------------------------------
+//
+// A fixed-size i32-element / i64-accumulator Binary Indexed Tree. Construction
+// is EXACTLY ONE op (`with_size` or `from_values`) first, then any number of
+// `update`/`set` point ops (all indices in-range; out-of-range traps are
+// native-test-only). Sum-returning assertions (`total`, `get_<i>`,
+// `prefix_sum_<i>`, `range_sum_<lo>_<hi>`, and each `tree` element) are i64 and
+// wire-encoded as DECIMAL STRINGS (parsed straight to i64, never via f64); the
+// runner accepts a bare JSON number too. `tree` is the canonical 1-based BIT
+// array in 1-based index order — an explicit-order key, NOT sorted. Unknown
+// ops / kinds / assertion keys SKIP (forward-compat).
+
+// NOTE on i64 wire encoding: the runner emits every Fenwick i64 result via
+// `i64::to_string()` (a plain decimal). The JSON `assertions` carry the
+// authoritative i64 values as DECIMAL STRINGS (or bare numbers when small);
+// `emit`/`render_expected` compare them as strings under FloatMode::None, so a
+// decimal-string expected (`"total": "8589934588"`) and the runner's decimal
+// output match without any f64 round-trip. Element operands (`delta`/`value`)
+// stay plain JSON numbers (they are i32).
+
+fn run_fenwick(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
+    // Authoring rule: the FIRST op MUST be exactly one construction op
+    // (`with_size` OR `from_values`); a missing/late/duplicate construction op
+    // is a malformed scenario => SKIP (forward-compat), like the hash-pipeline
+    // single-op and sorted-table from_sorted rules.
+    if operations.is_empty() {
+        eprintln!("skip: fenwick scenario must begin with a construction op (forward-compat)");
+        return;
+    }
+    let first = operations[0]["op"].as_str().unwrap_or("");
+    let mut tree = match first {
+        "with_size" => {
+            let n = operations[0]["n"].as_i64().unwrap_or(-1);
+            if n < 0 {
+                eprintln!("skip: fenwick with_size negative n (malformed): {}", n);
+                return;
+            }
+            FenwickTree::with_size(n as usize)
+        }
+        "from_values" => {
+            let vals: Vec<i32> = operations[0]["values"]
+                .as_array()
+                .expect("from_values needs values array")
+                .iter()
+                .map(|v| v.as_i64().expect("from_values element must be i32") as i32)
+                .collect();
+            FenwickTree::from_values(&vals)
+        }
+        other => {
+            eprintln!(
+                "skip: fenwick first op must be with_size/from_values (forward-compat): {}",
+                other
+            );
+            return;
+        }
+    };
+    // Any subsequent construction op is malformed => SKIP.
+    for op in &operations[1..] {
+        match op["op"].as_str().unwrap_or("") {
+            "update" => {
+                let i = op["index"].as_u64().expect("update needs index") as usize;
+                let delta = op["delta"].as_i64().expect("update needs i32 delta") as i32;
+                tree.update(i, delta);
+            }
+            "set" => {
+                let i = op["index"].as_u64().expect("set needs index") as usize;
+                let value = op["value"].as_i64().expect("set needs i32 value") as i32;
+                tree.set(i, value);
+            }
+            "with_size" | "from_values" => {
+                eprintln!("skip: fenwick has a non-first construction op (malformed)");
+                return;
+            }
+            other => {
+                eprintln!("skip: unknown fenwick op (forward-compat): {}", other);
+                return;
+            }
+        }
+    }
+
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_fenwick_assertion(key, &tree);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_fenwick_assertion(key: &str, tree: &FenwickTree) -> String {
+    match key {
+        "size" => tree.len().to_string(),
+        "is_empty" => tree.is_empty().to_string(),
+        "total" => tree.total().to_string(),
+        // Canonical 1-based BIT array, in 1-based index order (NOT sorted).
+        "tree" => {
+            let parts: Vec<String> = tree
+                .canonical_tree()
+                .iter()
+                .map(|v| v.to_string())
+                .collect();
+            format!("[{}]", parts.join(","))
+        }
+        _ if key.starts_with("get_") => match key[4..].parse::<usize>() {
+            Ok(i) => tree.get(i).to_string(),
+            Err(_) => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        _ if key.starts_with("prefix_sum_") => match key[11..].parse::<usize>() {
+            Ok(i) => tree.prefix_sum(i).to_string(),
+            Err(_) => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        _ if key.starts_with("range_sum_") => {
+            // ^range_sum_([0-9]+)_([0-9]+)$
+            let rest = &key[10..];
+            match rest.split_once('_') {
+                Some((lo_s, hi_s)) => match (lo_s.parse::<usize>(), hi_s.parse::<usize>()) {
+                    (Ok(lo), Ok(hi)) => tree.range_sum(lo, hi).to_string(),
+                    _ => format!("UNKNOWN_ASSERTION:{}", key),
+                },
+                None => format!("UNKNOWN_ASSERTION:{}", key),
+            }
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }

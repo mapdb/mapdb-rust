@@ -17,6 +17,12 @@ struct Node<K, V> {
     left: Option<Box<Node<K, V>>>,
     right: Option<Box<Node<K, V>>>,
     red: bool,
+    /// Number of nodes in the subtree rooted at this node (this node plus
+    /// both children's subtrees). Maintained in O(1) on every structural
+    /// change — insert, remove, and all rotations — so that order-statistic
+    /// `rank`/`select` run in O(log n). Invariant after any operation:
+    /// `size == 1 + size(left) + size(right)`.
+    size: usize,
 }
 
 impl<K, V> Node<K, V> {
@@ -27,8 +33,20 @@ impl<K, V> Node<K, V> {
             left: None,
             right: None,
             red,
+            size: 1,
         }
     }
+}
+
+/// Subtree size of an optional node link (`0` for an absent child).
+fn node_size<K, V>(node: &Option<Box<Node<K, V>>>) -> usize {
+    node.as_ref().map_or(0, |n| n.size)
+}
+
+/// Recompute a node's cached subtree size from its children. Called after
+/// any rotation or child relinking so the augmentation stays consistent.
+fn fix_size<K, V>(node: &mut Node<K, V>) {
+    node.size = 1 + node_size(&node.left) + node_size(&node.right);
 }
 
 /// Which side of `k` a point-navigation query selects, and whether the
@@ -260,6 +278,96 @@ impl<K, V> TreeMap<K, V> {
         best.map(|n| (&n.key, &n.value))
     }
 
+    // ── Order statistics (rank / select) ────────────────────────────
+    //
+    // Backed by the per-node subtree-size augmentation; both run in
+    // O(log n) on the balanced tree. Comparisons go through the tree
+    // comparator, so the order is exactly the in-order traversal order
+    // (the float total order carries through for `HashableF32`/`F64` keys).
+
+    /// Returns the number of keys strictly less than `key` under the tree's
+    /// comparator — the **0-based lower-bound index** the key occupies (if
+    /// present) or would occupy (if absent). Defined for present and absent
+    /// keys alike; the result is in `0..=len()` (`len()` for any key greater
+    /// than the maximum). Pure query; never mutates.
+    pub fn rank(&self, key: &K) -> usize {
+        let mut rank = 0;
+        let mut current = &self.root;
+        while let Some(ref n) = current {
+            match self.cmp.compare(key, &n.key) {
+                // key < n.key: everything in this node's right subtree (and
+                // n itself) is >= key; descend left without counting.
+                Ordering::Less => current = &n.left,
+                // key > n.key: n and its whole left subtree are strictly
+                // less than key; count them, then descend right.
+                Ordering::Greater => {
+                    rank += 1 + node_size(&n.left);
+                    current = &n.right;
+                }
+                // key == n.key: exactly the left subtree is strictly less.
+                Ordering::Equal => return rank + node_size(&n.left),
+            }
+        }
+        rank
+    }
+
+    /// Returns the `i`-th smallest key (0-based), or `None` if `i >= len()`.
+    /// `i == len()` (and any larger index, including on an empty map) is
+    /// absence, not a trap. Round-trips with [`rank`](Self::rank):
+    /// `select_key(rank(k)) == Some(k)` for any present `k`, and
+    /// `rank(select_key(i)) == i` for every `0 <= i < len()`.
+    pub fn select_key(&self, i: usize) -> Option<&K> {
+        self.select_node(i).map(|n| &n.key)
+    }
+
+    /// Returns the `i`-th smallest `(key, value)` entry (0-based), or `None`
+    /// if `i >= len()`. Same index domain as [`select_key`](Self::select_key).
+    pub fn select_entry(&self, i: usize) -> Option<(&K, &V)> {
+        self.select_node(i).map(|n| (&n.key, &n.value))
+    }
+
+    /// Test-only: verify the subtree-size invariant holds at every node,
+    /// returning the recomputed total. Asserts `size == 1 + left + right`
+    /// throughout and that the root total equals [`len`](Self::len).
+    #[cfg(test)]
+    fn assert_size_invariant(&self) {
+        fn check<K, V>(node: &Option<Box<Node<K, V>>>) -> usize {
+            match node {
+                None => 0,
+                Some(n) => {
+                    let l = check(&n.left);
+                    let r = check(&n.right);
+                    assert_eq!(n.size, 1 + l + r, "subtree-size invariant violated");
+                    n.size
+                }
+            }
+        }
+        assert_eq!(
+            check(&self.root),
+            self.size,
+            "root size mismatch with len()"
+        );
+    }
+
+    /// Walks to the node at 0-based sorted index `i`, or `None` if out of
+    /// range. The subtree-size augmentation makes this O(log n).
+    fn select_node(&self, mut i: usize) -> Option<&Node<K, V>> {
+        let mut current = self.root.as_deref();
+        while let Some(n) = current {
+            let left = node_size(&n.left);
+            match i.cmp(&left) {
+                Ordering::Less => current = n.left.as_deref(),
+                Ordering::Equal => return Some(n),
+                Ordering::Greater => {
+                    // Skip the left subtree and this node.
+                    i -= left + 1;
+                    current = n.right.as_deref();
+                }
+            }
+        }
+        None
+    }
+
     /// Returns an iterator over `(&K, &V)` pairs in sorted order.
     pub fn iter(&self) -> TreeMapIter<'_, K, V> {
         let mut stack = Vec::new();
@@ -480,7 +588,13 @@ fn rotate_left<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
     node.right = r.left.take();
     r.red = node.red;
     node.red = true;
+    // `node` keeps `r`'s old subtree size (it now occupies `r`'s former
+    // position); recompute both bottom-up: the demoted `node` first, then
+    // the promoted `r`.
+    let old_size = node.size;
+    fix_size(&mut node);
     r.left = Some(node);
+    r.size = old_size;
     r
 }
 
@@ -489,7 +603,10 @@ fn rotate_right<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
     node.left = l.right.take();
     l.red = node.red;
     node.red = true;
+    let old_size = node.size;
+    fix_size(&mut node);
     l.right = Some(node);
+    l.size = old_size;
     l
 }
 
@@ -504,6 +621,10 @@ fn flip_colors<K, V>(node: &mut Box<Node<K, V>>) {
 }
 
 fn fix_up<K, V>(mut node: Box<Node<K, V>>) -> Box<Node<K, V>> {
+    // A child subtree may have changed below us (insert/remove descended
+    // through one side); refresh this node's cached size before the
+    // rotations read it, then each rotation maintains its own sizes.
+    fix_size(&mut node);
     if is_red(&node.right) && !is_red(&node.left) {
         node = rotate_left(node);
     }
@@ -913,6 +1034,144 @@ mod tests {
         assert_eq!(m.remove_range(Range::closed_open(30, 70)), 0); // no-op
         let keys: Vec<i32> = m.keys().copied().collect();
         assert_eq!(keys, vec![10, 20, 70, 80, 90, 100]);
+    }
+
+    // ── Order statistics (rank / select) ────────────────────────────
+
+    #[test]
+    fn test_rank_present_and_absent() {
+        let m = map_of(&[10, 20, 30, 40, 50]);
+        // present keys → their 0-based index
+        assert_eq!(m.rank(&10), 0);
+        assert_eq!(m.rank(&30), 2);
+        assert_eq!(m.rank(&50), 4);
+        // absent keys → lower-bound index
+        assert_eq!(m.rank(&5), 0); // before min
+        assert_eq!(m.rank(&25), 2); // between 20 and 30
+        assert_eq!(m.rank(&55), 5); // past max → size
+    }
+
+    #[test]
+    fn test_select_key_and_entry() {
+        let m = map_of(&[10, 20, 30, 40, 50]);
+        assert_eq!(m.select_key(0), Some(&10));
+        assert_eq!(m.select_key(2), Some(&30));
+        assert_eq!(m.select_key(4), Some(&50));
+        assert_eq!(m.select_key(5), None); // == size, out of range
+        assert_eq!(m.select_key(999), None);
+        // entry form carries value = key*10
+        assert_eq!(m.select_entry(0), Some((&10, &100)));
+        assert_eq!(m.select_entry(2), Some((&30, &300)));
+        assert_eq!(m.select_entry(5), None);
+    }
+
+    #[test]
+    fn test_rank_select_empty_single() {
+        let empty: TreeMap<i32, i32> = map_of(&[]);
+        assert_eq!(empty.rank(&5), 0);
+        assert_eq!(empty.select_key(0), None);
+
+        let mut single = map_of(&[]);
+        single.insert(7, 70);
+        assert_eq!(single.rank(&6), 0);
+        assert_eq!(single.rank(&7), 0);
+        assert_eq!(single.rank(&8), 1);
+        assert_eq!(single.select_key(0), Some(&7));
+        assert_eq!(single.select_entry(0), Some((&7, &70)));
+        assert_eq!(single.select_key(1), None);
+    }
+
+    #[test]
+    fn test_rank_select_signed_extremes() {
+        let m = map_of(&[i32::MIN, -1, 0, 1, i32::MAX]);
+        assert_eq!(m.rank(&i32::MIN), 0);
+        assert_eq!(m.rank(&0), 2);
+        assert_eq!(m.rank(&i32::MAX), 4);
+        assert_eq!(m.select_key(0), Some(&i32::MIN));
+        assert_eq!(m.select_key(4), Some(&i32::MAX));
+        assert_eq!(m.select_key(5), None);
+    }
+
+    #[test]
+    fn test_rank_select_after_remove() {
+        let mut m = map_of(&[10, 20, 30, 40, 50]);
+        assert_eq!(m.remove(&30), Some(300));
+        let keys: Vec<i32> = m.keys().copied().collect();
+        assert_eq!(keys, vec![10, 20, 40, 50]);
+        // stale subtree sizes after a remove/transplant would corrupt these
+        assert_eq!(m.rank(&40), 2);
+        assert_eq!(m.rank(&35), 2);
+        assert_eq!(m.select_key(2), Some(&40));
+        assert_eq!(m.select_key(4), None);
+        m.assert_size_invariant();
+    }
+
+    #[test]
+    fn test_round_trip_select_rank() {
+        let m = map_of(&[10, 20, 30, 40, 50, -7, 0, 99]);
+        // select(rank(k)) == k for every present key
+        for k in m.keys().copied().collect::<Vec<_>>() {
+            assert_eq!(m.select_key(m.rank(&k)), Some(&k));
+        }
+        // rank(select(i)) == i for every 0 <= i < size
+        for i in 0..m.len() {
+            let k = m.select_key(i).copied().unwrap();
+            assert_eq!(m.rank(&k), i);
+        }
+        // select(size) is absence
+        assert_eq!(m.select_key(m.len()), None);
+    }
+
+    /// Deterministic xorshift so the randomized invariant test never relies
+    /// on external randomness (and stays reproducible across ports).
+    fn next_rand(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    #[test]
+    fn test_size_invariant_randomized_insert_remove() {
+        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut present = std::collections::BTreeSet::new();
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        for _ in 0..4000 {
+            let key = (next_rand(&mut state) % 200) as i32;
+            if next_rand(&mut state) & 1 == 0 {
+                m.insert(key, key.wrapping_mul(10));
+                present.insert(key);
+            } else {
+                m.remove(&key);
+                present.remove(&key);
+            }
+            m.assert_size_invariant();
+            assert_eq!(m.len(), present.len());
+        }
+        // After the churn, rank/select must agree with the oracle ordering.
+        let sorted: Vec<i32> = present.iter().copied().collect();
+        for (i, &k) in sorted.iter().enumerate() {
+            assert_eq!(m.rank(&k), i);
+            assert_eq!(m.select_key(i), Some(&k));
+        }
+        assert_eq!(m.select_key(sorted.len()), None);
+    }
+
+    #[test]
+    fn test_rank_select_reverse_comparator() {
+        // Order statistics follow the comparator: under reverse order the
+        // 0-th element is the largest natural key.
+        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        for k in [10, 20, 30, 40, 50] {
+            m.insert(k, k * 10);
+        }
+        assert_eq!(m.select_key(0), Some(&50));
+        assert_eq!(m.select_key(4), Some(&10));
+        assert_eq!(m.rank(&50), 0);
+        assert_eq!(m.rank(&10), 4);
+        m.assert_size_invariant();
     }
 
     #[test]

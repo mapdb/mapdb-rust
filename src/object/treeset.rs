@@ -90,6 +90,23 @@ impl<T> TreeSet<T> {
         self.max()
     }
 
+    // ── Order statistics (rank / select) ────────────────────────────
+
+    /// Returns the number of elements strictly less than `x` under the set's
+    /// comparator — the 0-based lower-bound index `x` occupies (if present)
+    /// or would occupy (if absent). Result is in `0..=len()`. Pure query.
+    pub fn rank(&self, x: &T) -> usize {
+        self.tree.rank(x)
+    }
+
+    /// Returns the `i`-th smallest element (0-based), or `None` if
+    /// `i >= len()` (no trap on an empty set). Round-trips with
+    /// [`rank`](Self::rank): `select(rank(x)) == Some(x)` for present `x`,
+    /// and `rank(select(i)) == i` for every `0 <= i < len()`.
+    pub fn select(&self, i: usize) -> Option<&T> {
+        self.tree.select_key(i)
+    }
+
     /// Returns the number of elements.
     pub fn len(&self) -> usize {
         self.tree.len()
@@ -121,7 +138,11 @@ impl<T> TreeSet<T> {
     }
 
     /// Returns elements matching the predicate as a `Vec` of references.
-    pub fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<&T> {
+    ///
+    /// Named `select_where` (not `select`) so the bare `select` name is
+    /// reserved for the order-statistic [`select`](Self::select) (i-th
+    /// smallest by 0-based rank), per `spec/features/rank-select.md`.
+    pub fn select_where(&self, predicate: impl Fn(&T) -> bool) -> Vec<&T> {
         self.iter().filter(|v| predicate(v)).collect()
     }
 
@@ -283,7 +304,7 @@ mod tests {
         for i in 1..=5 {
             s.insert(i);
         }
-        let evens = s.select(|v| *v % 2 == 0);
+        let evens = s.select_where(|v| *v % 2 == 0);
         assert_eq!(evens, vec![&2, &4]);
 
         let odds = s.reject(|v| *v % 2 == 0);
@@ -468,6 +489,66 @@ mod tests {
         assert_eq!(s.remove_range(Range::closed_open(30, 70)), 0);
         let v: Vec<i32> = s.iter().copied().collect();
         assert_eq!(v, vec![10, 20, 70, 80, 90, 100]);
+    }
+
+    // ── Order statistics (rank / select) ────────────────────────────
+
+    #[test]
+    fn test_rank_select_basic() {
+        let s = set_of(&[10, 20, 30, 40, 50]);
+        assert_eq!(s.rank(&10), 0);
+        assert_eq!(s.rank(&30), 2);
+        assert_eq!(s.rank(&50), 4);
+        assert_eq!(s.rank(&5), 0); // before min
+        assert_eq!(s.rank(&25), 2); // absent → lower bound
+        assert_eq!(s.rank(&55), 5); // past max → size
+        assert_eq!(s.select(0), Some(&10));
+        assert_eq!(s.select(2), Some(&30));
+        assert_eq!(s.select(4), Some(&50));
+        assert_eq!(s.select(5), None); // == size
+    }
+
+    #[test]
+    fn test_rank_select_empty_single() {
+        let empty = set_of(&[]);
+        assert_eq!(empty.rank(&5), 0);
+        assert_eq!(empty.select(0), None);
+
+        let s = set_of(&[7]);
+        assert_eq!(s.rank(&6), 0);
+        assert_eq!(s.rank(&7), 0);
+        assert_eq!(s.rank(&8), 1);
+        assert_eq!(s.select(0), Some(&7));
+        assert_eq!(s.select(1), None);
+    }
+
+    #[test]
+    fn test_rank_select_signed() {
+        let s = set_of(&[i32::MIN, -1, 0, 1, i32::MAX]);
+        assert_eq!(s.rank(&i32::MIN), 0);
+        assert_eq!(s.rank(&0), 2);
+        assert_eq!(s.rank(&i32::MAX), 4);
+        assert_eq!(s.select(0), Some(&i32::MIN));
+        assert_eq!(s.select(4), Some(&i32::MAX));
+        assert_eq!(s.select(5), None);
+    }
+
+    #[test]
+    fn test_rank_select_after_remove_round_trip() {
+        let mut s = set_of(&[10, 20, 30, 40, 50]);
+        assert!(s.remove(&30));
+        assert_eq!(s.rank(&40), 2);
+        assert_eq!(s.rank(&35), 2);
+        assert_eq!(s.select(2), Some(&40));
+        assert_eq!(s.select(4), None);
+        // round-trip identity over the live set
+        for x in s.iter().copied().collect::<Vec<_>>() {
+            assert_eq!(s.select(s.rank(&x)), Some(&x));
+        }
+        for i in 0..s.len() {
+            let x = s.select(i).copied().unwrap();
+            assert_eq!(s.rank(&x), i);
+        }
     }
 
     #[test]

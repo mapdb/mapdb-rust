@@ -949,6 +949,10 @@ fn run_treeset(
                 let (kind, n) = nav_key_prefix(key).unwrap();
                 opt_i32_str(set_nav(&set, kind, n))
             }
+            _ if rank_key(key).is_some() => set_rank(&set, rank_key(key).unwrap()).to_string(),
+            _ if select_index(key).is_some() => {
+                opt_i32_str(set_select(&set, select_index(key).unwrap()))
+            }
             _ if key.starts_with("contains_") => {
                 let k: i32 = key[9..].parse().unwrap();
                 set.contains(&k).to_string()
@@ -978,6 +982,33 @@ fn nav_key_prefix(key: &str) -> Option<(&'static str, i32)> {
         }
     }
     None
+}
+
+/// Recognise a `rank_<k>` order-statistic assertion: `<k>` is a SIGNED
+/// base-10 i32 (exact `^rank_(-?[0-9]+)$`, full i32 range incl. negatives).
+/// Returns the parsed key on a match.
+fn rank_key(key: &str) -> Option<i32> {
+    key.strip_prefix("rank_").and_then(|rest| rest.parse().ok())
+}
+
+/// Recognise a `select_<i>` order-statistic assertion: `<i>` is a
+/// NON-NEGATIVE base-10 index (exact `^select_([0-9]+)$`). Returns the
+/// parsed index on a match. This must NOT match the functional predicate
+/// keys (`select_gt_N`, `select_even`, …) — `parse::<usize>` rejects them
+/// since they are not all-digits.
+fn select_index(key: &str) -> Option<usize> {
+    key.strip_prefix("select_")
+        .and_then(|rest| rest.parse().ok())
+}
+
+/// `rank` over a sorted-int oracle: count of elements strictly less than `k`.
+fn set_rank(set: &BTreeSet<i32>, k: i32) -> usize {
+    set.range(..k).count()
+}
+
+/// `select(i)`: i-th smallest element (0-based), or `None` if `i >= len`.
+fn set_select(set: &BTreeSet<i32>, i: usize) -> Option<i32> {
+    set.iter().nth(i).copied()
 }
 
 fn set_nav(set: &BTreeSet<i32>, kind: &str, k: i32) -> Option<i32> {
@@ -1106,6 +1137,13 @@ fn run_treemap(
             _ if nav_key_prefix(key).is_some() => {
                 let (kind, n) = nav_key_prefix(key).unwrap();
                 opt_i32_str(map_nav(&map, kind, n))
+            }
+            _ if rank_key(key).is_some() => {
+                let k = rank_key(key).unwrap();
+                map.range(..k).count().to_string()
+            }
+            _ if select_index(key).is_some() => {
+                opt_i32_str(map.keys().nth(select_index(key).unwrap()).copied())
             }
             _ if key.starts_with("get_") => {
                 let k: i32 = key[4..].parse().unwrap();

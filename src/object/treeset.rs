@@ -140,7 +140,8 @@ impl<T> TreeSetSink<T> {
         Ok(())
     }
 
-    /// Finishes the build, returning the constructed `TreeSet`.
+    /// Finishes the build, returning the constructed `TreeSet`. A poisoned sink
+    /// panics in all build modes (see [`TreeMapSink::create`]).
     pub fn create(self) -> TreeSet<T> {
         TreeSet {
             tree: self.inner.create(),
@@ -148,7 +149,7 @@ impl<T> TreeSetSink<T> {
     }
 
     /// Like [`create`](TreeSetSink::create) but returns the poison error
-    /// instead of panicking in debug.
+    /// instead of panicking.
     pub fn try_create(self) -> Result<TreeSet<T>, BulkError> {
         Ok(TreeSet {
             tree: self.inner.try_create()?,

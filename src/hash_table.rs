@@ -455,7 +455,10 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         let mut map = Self::with_hasher(S::default());
         map.bulk_presize(n)?;
         for (index, (k, v)) in iter.into_iter().enumerate() {
-            if map.size >= n {
+            // Enforce the limit on *consumed* source length, not unique inserted
+            // cardinality: an overlong source whose extras are duplicates must
+            // still error under IgnoreDuplicates (it consumed > n items).
+            if index >= n {
                 return Err(BulkError::ExactSizeExceeded { expected: n });
             }
             map.bulk_insert(k, v, dup, index)?;
@@ -803,7 +806,10 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         let mut set = Self::with_hasher(S::default());
         set.bulk_presize(n)?;
         for (index, k) in iter.into_iter().enumerate() {
-            if set.size >= n {
+            // Enforce the limit on *consumed* source length, not unique inserted
+            // cardinality: an overlong source whose extras are duplicates must
+            // still error under IgnoreDuplicates (it consumed > n items).
+            if index >= n {
                 return Err(BulkError::ExactSizeExceeded { expected: n });
             }
             set.bulk_insert(k, dup, index)?;
@@ -1476,6 +1482,31 @@ mod tests {
         let data = vec![(1, 1), (2, 2), (3, 3)];
         let err =
             OpenHashMap::<i32, i32>::bulk_load_exact(data, 2, DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::ExactSizeExceeded { expected: 2 }));
+    }
+
+    #[test]
+    fn set_bulk_load_exact_overlong_duplicates_still_errors() {
+        // Consumed source length is 3 > n = 2, even though the duplicate `1`
+        // would be ignored and only 2 unique items inserted. The exact path must
+        // enforce *consumed* length, not unique cardinality.
+        let err = OpenHashSet::<i32>::bulk_load_exact(
+            vec![1, 1, 2],
+            2,
+            DuplicatePolicy::IgnoreDuplicates,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::ExactSizeExceeded { expected: 2 }));
+    }
+
+    #[test]
+    fn map_bulk_load_exact_overlong_duplicates_still_errors() {
+        let err = OpenHashMap::<i32, i32>::bulk_load_exact(
+            vec![(1, 10), (1, 20), (2, 30)],
+            2,
+            DuplicatePolicy::IgnoreDuplicates,
+        )
+        .unwrap_err();
         assert!(matches!(err, BulkError::ExactSizeExceeded { expected: 2 }));
     }
 

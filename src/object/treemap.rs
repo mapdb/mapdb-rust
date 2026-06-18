@@ -506,18 +506,22 @@ impl<K, V> TreeMapSink<K, V> {
     }
 
     /// Finishes the build, returning the constructed `TreeMap`. Consuming
-    /// `self` makes `create` once-only. A poisoned sink returns its error.
+    /// `self` makes `create` once-only.
+    ///
+    /// A poisoned sink (any prior `put` error) **panics in all build modes** —
+    /// never returns a half-built collection. The data-pump contract requires
+    /// that a failed pump never yields a partial result; use
+    /// [`try_create`](TreeMapSink::try_create) for the fallible form.
     pub fn create(self) -> TreeMap<K, V> {
-        debug_assert!(
-            self.poisoned.is_none(),
-            "create() called on a poisoned sink"
-        );
-        TreeMap::from_sorted_buffer(self.buf, self.cmp)
+        match self.try_create() {
+            Ok(map) => map,
+            Err(e) => panic!("create() called on a poisoned sink: {e:?}"),
+        }
     }
 
     /// Like [`create`](TreeMapSink::create) but returns the poison error
-    /// instead of panicking in debug, so a poisoned sink is observable in
-    /// release callers too.
+    /// instead of panicking, so a poisoned sink is observable to callers that
+    /// prefer a `Result`.
     pub fn try_create(self) -> Result<TreeMap<K, V>, BulkError> {
         if let Some(e) = self.poisoned {
             return Err(e);
@@ -1032,6 +1036,18 @@ mod tests {
             sink.try_create().unwrap_err(),
             BulkError::Duplicate { index: 1 }
         ));
+    }
+
+    #[test]
+    #[should_panic(expected = "poisoned sink")]
+    fn pump_sink_create_after_error_panics_in_all_modes() {
+        // The public `create()` must never return a half-built collection after
+        // an error — it must abort in release as well as debug. `#[should_panic]`
+        // is enforced in both profiles, unlike `debug_assert!`.
+        let mut sink = TreeMapSink::new(natural_comparator::<i32>(), DuplicatePolicy::Error);
+        sink.put(1, 0).unwrap();
+        assert!(sink.put(1, 0).is_err()); // duplicate -> poison
+        let _ = sink.create(); // must panic, not return the prefix
     }
 
     #[test]

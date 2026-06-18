@@ -29,6 +29,49 @@ impl<T: PartialEq> Collection<T> for ArrayStack<T> {
     fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
         Box::new(self.items.iter().rev())
     }
+
+    // ── slice-backed bulk overrides ──────────────────────────────────────────
+    //
+    // Same rationale as `ArrayList` (avoid the `Box<dyn Iterator>` path, which is
+    // bimodal — ~0 if devirtualized, up to ~50× if not — and blocks
+    // autovectorization). `ArrayStack` is `Vec`-backed and iterates **top-to-
+    // bottom**, so every override iterates `self.items` in **reverse** to
+    // preserve the documented encounter order. Behaviour is identical to the
+    // defaults; only the boxed iterator is removed.
+
+    fn for_each(&self, f: impl FnMut(&T)) {
+        self.items.iter().rev().for_each(f);
+    }
+    fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.items.iter().any(predicate) // order-independent
+    }
+    fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.items.iter().all(predicate)
+    }
+    fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        !self.items.iter().any(predicate)
+    }
+    fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize {
+        self.items.iter().filter(|v| predicate(v)).count()
+    }
+    fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T> {
+        self.items.iter().rev().find(|v| predicate(v)) // top-to-bottom
+    }
+    fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.items.iter().rev().filter(|v| predicate(v)).cloned().collect()
+    }
+    fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.items.iter().rev().filter(|v| !predicate(v)).cloned().collect()
+    }
+    fn inject_into<R>(&self, initial: R, f: impl FnMut(R, &T) -> R) -> R {
+        self.items.iter().rev().fold(initial, f) // top-to-bottom
+    }
 }
 
 impl<T: PartialEq> MutableCollection<T> for ArrayStack<T> {
@@ -142,6 +185,27 @@ mod tests {
         let s = ArrayStack::from_iter([1, 2, 3]);
         let v: Vec<_> = s.iter().copied().collect();
         assert_eq!(v, vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn slice_overrides_preserve_top_to_bottom_order() {
+        // The bulk overrides must match the boxed `iter()` (top-to-bottom).
+        let s = ArrayStack::from_iter([1, 2, 3, 4, 5]); // top is 5
+        // order-sensitive: select/reject/detect/for_each/inject_into
+        assert_eq!(s.select(|v| *v % 2 == 1), vec![5, 3, 1]);
+        assert_eq!(s.reject(|v| *v % 2 == 1), vec![4, 2]);
+        assert_eq!(s.detect(|v| *v < 4), Some(&3)); // first match top-to-bottom
+        let mut seen = Vec::new();
+        s.for_each(|v| seen.push(*v));
+        assert_eq!(seen, vec![5, 4, 3, 2, 1]);
+        // fold sees top-to-bottom: ((((0*10+5)*10+4)...)
+        let folded = s.inject_into(0, |acc, v| acc * 10 + *v);
+        assert_eq!(folded, 54321);
+        // order-independent
+        assert_eq!(s.count_where(|v| *v > 2), 3);
+        assert!(s.any_satisfy(|v| *v == 5));
+        assert!(s.all_satisfy(|v| *v > 0));
+        assert!(s.none_satisfy(|v| *v > 5));
     }
 
     #[test]

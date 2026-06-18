@@ -93,6 +93,51 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
         Ok(m)
     }
 
+    /// Bulk-loads from input sorted by **key then value** (`key_cmp` strictly
+    /// ascending across key runs; `val_cmp` non-decreasing within a run). List
+    /// semantics preserve equal adjacent values exactly; the value-order check
+    /// exists so callers can use the same source contract as set-valued
+    /// multimaps when their upstream data is sorted by `(key, value)`.
+    pub fn from_sorted_key_values<I: IntoIterator<Item = (K, V)>>(
+        key_cmp: Comparator<K>,
+        val_cmp: Comparator<V>,
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let mut m = Multimap::new();
+        let mut last_key: Option<K> = None;
+        let mut bucket: Vec<V> = Vec::new();
+        for (index, (k, v)) in iter.into_iter().enumerate() {
+            match last_key {
+                None => {
+                    last_key = Some(k);
+                    bucket.push(v);
+                }
+                Some(ref prev) => match key_cmp.compare(prev, &k) {
+                    Ordering::Equal => {
+                        let last_v = bucket.last().unwrap();
+                        if val_cmp.compare(last_v, &v) == Ordering::Greater {
+                            return Err(BulkError::OutOfOrder { index });
+                        }
+                        bucket.push(v);
+                    }
+                    Ordering::Less => {
+                        let prev_key = last_key.take().unwrap();
+                        m.size += bucket.len();
+                        m.data.insert(prev_key, std::mem::take(&mut bucket));
+                        last_key = Some(k);
+                        bucket.push(v);
+                    }
+                    Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
+                },
+            }
+        }
+        if let Some(prev_key) = last_key {
+            m.size += bucket.len();
+            m.data.insert(prev_key, bucket);
+        }
+        Ok(m)
+    }
+
     /// Returns the values for `key` as an immutable view.
     ///
     /// This is intentionally zero-copy: safe Rust cannot mutate the
@@ -341,6 +386,45 @@ mod tests {
         assert_eq!(m.get(&3), &["d", "e"]);
         assert_eq!(m.len(), 5);
         assert_eq!(m.distinct_len(), 3);
+    }
+
+    #[test]
+    fn from_sorted_key_values_preserves_adjacent_duplicates() {
+        let data = vec![(1, 10), (1, 10), (1, 20), (2, 5), (2, 5)];
+        let m = Multimap::from_sorted_key_values(
+            natural_comparator::<i32>(),
+            natural_comparator::<i32>(),
+            data,
+        )
+        .unwrap();
+        assert_eq!(m.get(&1), &[10, 10, 20]);
+        assert_eq!(m.get(&2), &[5, 5]);
+        assert_eq!(m.len(), 5);
+        assert_eq!(m.distinct_len(), 2);
+    }
+
+    #[test]
+    fn from_sorted_key_values_value_decrease_errors() {
+        let data = vec![(1, 10), (1, 9), (2, 20)];
+        let err = Multimap::from_sorted_key_values(
+            natural_comparator::<i32>(),
+            natural_comparator::<i32>(),
+            data,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+    }
+
+    #[test]
+    fn from_sorted_key_values_key_out_of_order_errors() {
+        let data = vec![(1, 10), (2, 20), (1, 30)];
+        let err = Multimap::from_sorted_key_values(
+            natural_comparator::<i32>(),
+            natural_comparator::<i32>(),
+            data,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 2 }));
     }
 
     #[test]

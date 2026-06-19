@@ -136,7 +136,7 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
                     // decimal output, not a quoted form).
                     FloatMode::None => match e {
                         Value::Number(n) => n.to_string(),
-                        Value::String(s) => s.clone(),
+                        Value::String(s) if key == "tree" => s.clone(),
                         _ => e.to_string(),
                     },
                     FloatMode::F32Keyed => format!("\"{}\"", format_f32(element_to_f32(e))),

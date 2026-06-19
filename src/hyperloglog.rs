@@ -237,7 +237,15 @@ impl HyperLogLog {
         // Large-range correction near the HASH-SPACE ceiling (2^64, NOT 2^32).
         let two64 = 18446744073709551616.0f64; // 2^64, exactly representable.
         if e > (1.0 / 30.0) * two64 {
-            return -two64 * (1.0 - e / two64).ln();
+            // Guard the log argument: for all reachable states E < 2^64 so
+            // (1 - E/2^64) > 0. A fully-saturated deserialized state (every
+            // register at the per-p ceiling, constructible via from_bytes but
+            // not via add) can push raw E >= 2^64, making (1 - E/2^64) <= 0 and
+            // ln(<= 0) = NaN. Skip the log correction there and return the raw
+            // (large, finite) E so estimate() stays finite as the spec mandates.
+            if e < two64 {
+                return -two64 * (1.0 - e / two64).ln();
+            }
         }
 
         e
@@ -697,26 +705,29 @@ mod tests {
 
     #[test]
     fn estimate_large_range_correction_is_finite() {
-        // Drive a high-register state (all registers NEAR the per-p max) via
-        // from_bytes so raw E exceeds (1/30)*2^64 while staying below 2^64;
-        // assert estimate() is finite (the 2^64 ceiling keeps ln(1 - E/2^64)'s
-        // argument positive; a 2^32 ceiling would return NaN here). At p=4 the
-        // per-p ceiling is 61; r=60 lands E in the large-range band but below
-        // 2^64. (r=61 — all registers at the absolute max — is a degenerate,
-        // add-unreachable state whose raw E exceeds 2^64; the spec's "near max"
-        // wording targets the reachable high-register regime tested here.)
+        // Drive a high-register state via from_bytes so raw E exceeds
+        // (1/30)*2^64; assert estimate() is finite. Two sub-cases:
+        //   r = ceiling - 1: E in the large-range band but below 2^64, the log
+        //     correction fires; the 2^64 ceiling keeps ln(1 - E/2^64) > 0 (a
+        //     2^32 ceiling would return NaN here).
+        //   r = ceiling (fully saturated): every register at the per-p max — a
+        //     degenerate, add-unreachable state constructible via from_bytes
+        //     whose raw E reaches/exceeds 2^64. The log-argument guard skips the
+        //     correction and returns the raw (large, finite) E. Without the
+        //     guard, ln(1 - E/2^64) = ln(<= 0) = NaN.
         let p = 4u8;
-        let near_max = HyperLogLog::rho_ceiling(p) - 1;
-        let mut bytes = HyperLogLog::with_precision(p).unwrap().to_bytes();
-        for b in bytes[5..].iter_mut() {
-            *b = near_max;
+        for r in [HyperLogLog::rho_ceiling(p) - 1, HyperLogLog::rho_ceiling(p)] {
+            let mut bytes = HyperLogLog::with_precision(p).unwrap().to_bytes();
+            for b in bytes[5..].iter_mut() {
+                *b = r;
+            }
+            let h = HyperLogLog::from_bytes(&bytes).unwrap();
+            let est = h.estimate();
+            assert!(
+                est.is_finite(),
+                "large-range estimate must be finite for all-{r} registers, got {est}"
+            );
         }
-        let h = HyperLogLog::from_bytes(&bytes).unwrap();
-        let est = h.estimate();
-        assert!(
-            est.is_finite(),
-            "large-range estimate must be finite, got {est}"
-        );
     }
 
     // ---- authoritative register_hex values for the scenarios ------------

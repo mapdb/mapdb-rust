@@ -14,6 +14,7 @@
 pub mod array_deque;
 pub mod bit_set;
 pub mod bloom;
+pub mod bounded_lru;
 pub mod count_min;
 pub mod fenwick;
 pub mod hash;
@@ -40,6 +41,7 @@ pub mod traits;
 pub use array_deque::ArrayDeque;
 pub use bit_set::BitSet;
 pub use bloom::Bloom;
+pub use bounded_lru::{BoundedLruMap, BoundedLruMapBuilder, EvictionCause};
 pub use count_min::CountMin;
 pub use fenwick::FenwickTree;
 pub use hash_table::{OpenHashMap, OpenHashSet};

@@ -15,6 +15,7 @@
 
 use mapdb_collections::bloom::Bloom;
 use mapdb_collections::hash;
+use mapdb_collections::hyperloglog::HyperLogLog;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
@@ -254,6 +255,7 @@ fn main() {
         }
         "HashPipeline" => run_hash_pipeline(name, operations, assertions),
         "Bloom" => run_bloom(name, operations, assertions, &scenario),
+        "HyperLogLog" => run_hyperloglog(name, operations, assertions, &scenario),
         other => {
             // Forward-compat (README "unknown collection kinds skip"): a runner
             // that does not understand a collection kind must SKIP, not fail, so
@@ -611,6 +613,121 @@ fn format_u32_array(v: &[u32]) -> String {
     let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
     format!("[{}]", parts.join(","))
 }
+
+// ---- HyperLogLog (spec/features/hyperloglog.md) --------------------------
+//
+// A stored cardinality sketch. The cross-language oracle is the INTEGER register
+// array (via `register_hex` / `nonzero_registers` / `max_register` /
+// `register_at_N`) — NEVER the float `estimate` (float-quarantine Rule Q1; there
+// is deliberately NO `estimate` assertion key here). Exactly one builder op,
+// first: either a `with_precision(p)` (then zero or more `add`/`merge`) OR a
+// single `from_bytes`. Zero/two builders or an `add` before the builder =>
+// malformed => SKIP. A `merge` consumes the scenario's `other` HyperLogLog.
+// Unknown ops/keys/kinds SKIP (forward-compat).
+
+/// Build a HyperLogLog from an op list (used for the primary and the `other`
+/// block). Returns `None` (=> caller SKIPs) when the op list is malformed for
+/// the harness: not starting with exactly one builder, an `add`/`merge` before
+/// the builder, an out-of-range `with_precision`, or a bad `from_bytes`.
+fn build_hll(operations: &[Value], other: Option<&Value>) -> Option<HyperLogLog> {
+    let first = operations.first()?;
+    let first_op = first["op"].as_str().unwrap_or("");
+    let mut hll = match first_op {
+        "with_precision" => {
+            let p = first["p"].as_u64()? as u8;
+            // Out-of-range p is a construction error -> SKIP (the harness cannot
+            // build the probe). The native tests pin the error path itself.
+            HyperLogLog::with_precision(p).ok()?
+        }
+        "from_bytes" => {
+            // `from_bytes` is the SOLE op when present (full state replacement,
+            // first op or malformed). Reject any trailing ops.
+            if operations.len() != 1 {
+                eprintln!("skip: from_bytes must be the only op (forward-compat)");
+                return None;
+            }
+            let bytes = parse_hex_bytes(&first["bytes"]);
+            HyperLogLog::from_bytes(&bytes).ok()?
+        }
+        _ => {
+            eprintln!("skip: HyperLogLog first op must be a builder (forward-compat)");
+            return None;
+        }
+    };
+    for op in &operations[1..] {
+        match op["op"].as_str().unwrap_or("") {
+            "add" => {
+                let v = op["value"].as_i64()? as i32;
+                hll.add(v);
+            }
+            "merge" => {
+                // Merge the scenario's `other` HyperLogLog (built by its own
+                // op list) by element-wise register max.
+                let other_spec = other?;
+                let other_ops = other_spec["operations"].as_array()?;
+                let other_hll = build_hll(other_ops, None)?;
+                hll.merge(&other_hll).ok()?;
+            }
+            other_op => {
+                eprintln!(
+                    "skip: unknown HyperLogLog op (forward-compat): {}",
+                    other_op
+                );
+                return None;
+            }
+        }
+    }
+    Some(hll)
+}
+
+fn run_hyperloglog(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+    scenario_obj: &Value,
+) {
+    let other = scenario_obj.get("other");
+    let hll = match build_hll(operations, other) {
+        Some(h) => h,
+        None => {
+            eprintln!("skip: malformed HyperLogLog scenario (forward-compat)");
+            return;
+        }
+    };
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_hll_assertion(key, &hll);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_hll_assertion(key: &str, hll: &HyperLogLog) -> String {
+    match key {
+        // The PRIMARY integer oracle: the full serialized form (HLL1 + p +
+        // register bytes) as a lower-case, 0x-prefixed hex string.
+        "register_hex" => {
+            let mut s = String::from("0x");
+            for b in hll.to_bytes() {
+                s.push_str(&format!("{:02x}", b));
+            }
+            s
+        }
+        "nonzero_registers" => hll.nonzero_registers().to_string(),
+        "max_register" => hll.max_register().to_string(),
+        // NOTE: there is deliberately NO `estimate` key (float-quarantine Q1).
+        _ if key.starts_with("register_at_") => {
+            // Spot-check a specific register index.
+            match key["register_at_".len()..].parse::<usize>() {
+                Ok(n) if n < hll.register_count() => hll.registers()[n].to_string(),
+                _ => format!("UNKNOWN_ASSERTION:{}", key),
+            }
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
 
 // ---- HashMap<i32, i32> ---------------------------------------------------
 

@@ -1420,10 +1420,11 @@ mod tests {
         }
     }
 
-    // Bulk-built table must be byte-identical to incremental inserts at the
-    // same final capacity (same slot layout, deterministic hasher).
+    // Bulk-built table must be byte-identical to a pre-sized incremental put
+    // loop at the same final capacity. Naturally grown insertion may have a
+    // different resize history and is not the byte-identity contract.
     #[test]
-    fn map_bulk_load_byte_identical_to_incremental() {
+    fn map_bulk_load_byte_identical_to_presized_incremental() {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::BuildHasherDefault;
         type Fixed = BuildHasherDefault<DefaultHasher>;

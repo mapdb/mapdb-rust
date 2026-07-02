@@ -18,10 +18,12 @@
 //! - **Streaming `Sink`** — only for ordered + multimap builders
 //!   ([`crate::object::TreeMapSink`], [`crate::object::TreeSetSink`]).
 //!
-//! Every entry point returns `Result<_, BulkError>`; data-shape problems
-//! (out-of-order, duplicate) are reported, never panicked. A failed pump
-//! leaks nothing (Rust `Drop` runs on the partially-built buffer) and never
-//! returns a half-built collection.
+//! Fallible constructors and `try_create` return `Result<_, BulkError>`;
+//! data-shape problems (out-of-order, duplicate) are reported through that
+//! result. Infallible sink `create()` methods panic if called after the sink
+//! has already been poisoned by an earlier error. A failed pump leaks nothing
+//! (Rust `Drop` runs on the partially-built buffer) and never returns a
+//! half-built collection.
 
 /// Policy for how a bulk builder treats a duplicate key/element.
 ///
@@ -42,8 +44,7 @@ pub enum DuplicatePolicy {
 /// `Duplicate` and `OutOfOrder` carry the **input index** (0-based position in
 /// the consumed iterator) of the offending element, mirroring the Kotlin 3.x
 /// `DBException.PumpSourceDuplicate` / `PumpSourceNotSorted`. `Alloc` wraps a
-/// `TryReserveError` so the no-panic guarantee holds even under allocation
-/// failure.
+/// `TryReserveError` for entry points that explicitly pre-reserve fallibly.
 #[derive(Debug)]
 pub enum BulkError {
     /// A duplicate key/element was found at input index `index` while the

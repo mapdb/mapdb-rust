@@ -105,8 +105,7 @@ mod tests {
     #[test]
     fn do_any_people_have_cats() {
         let people = setup_people();
-        let _ = &people; // TODO: replace false with people.any_satisfy(...)
-        let has_cats = false;
+        let has_cats = people.any_satisfy(|p| p.has_pet_type(&PetType::Cat));
         assert!(has_cats, "expected someone to have a cat");
     }
 
@@ -114,8 +113,7 @@ mod tests {
     #[test]
     fn do_all_people_have_pets() {
         let people = setup_people();
-        let _ = &people; // TODO: replace true with people.all_satisfy(...)
-        let all_have_pets = true;
+        let all_have_pets = people.all_satisfy(|p| !p.pets.is_empty());
         assert!(!all_have_pets, "Harry has no pets");
     }
 
@@ -123,8 +121,7 @@ mod tests {
     #[test]
     fn does_nobody_have_snakes() {
         let people = setup_people();
-        let _ = &people; // TODO: replace true with people.none_satisfy(...)
-        let no_snakes = true;
+        let no_snakes = people.none_satisfy(|p| p.has_pet_type(&PetType::Snake));
         assert!(!no_snakes, "Ted has a snake");
     }
 
@@ -132,8 +129,7 @@ mod tests {
     #[test]
     fn how_many_people_have_cats() {
         let people = setup_people();
-        let _ = &people; // TODO: replace 0 with people.count_where(...)
-        let count = 0;
+        let count = people.count_where(|p| p.has_pet_type(&PetType::Cat));
         assert_eq!(count, 3);
     }
 
@@ -141,8 +137,7 @@ mod tests {
     #[test]
     fn get_people_with_cats() {
         let people = setup_people();
-        let _ = &people; // TODO: replace with people.select(...)
-        let cat_people: Vec<Person> = vec![];
+        let cat_people = people.select(|p| p.has_pet_type(&PetType::Cat));
         assert_eq!(cat_people.len(), 3);
         let names: Vec<_> = cat_people.iter().map(|p| p.first_name.as_str()).collect();
         assert!(names.contains(&"Mary"));
@@ -154,8 +149,7 @@ mod tests {
     #[test]
     fn get_people_without_cats() {
         let people = setup_people();
-        let _ = &people; // TODO: replace with people.reject(...)
-        let no_cat_people: Vec<Person> = vec![];
+        let no_cat_people = people.reject(|p| p.has_pet_type(&PetType::Cat));
         assert_eq!(no_cat_people.len(), 4);
     }
 
@@ -163,8 +157,7 @@ mod tests {
     #[test]
     fn find_mary_smith() {
         let people = setup_people();
-        let _ = &people; // TODO: replace with people.detect(...)
-        let mary: Option<&Person> = None;
+        let mary = people.detect(|p| p.first_name == "Mary" && p.last_name == "Smith");
         assert!(mary.is_some(), "should find Mary Smith");
         let mary = mary.unwrap();
         assert_eq!(mary.full_name(), "Mary Smith");
@@ -176,7 +169,11 @@ mod tests {
     fn collect_all_pet_names() {
         let people = setup_people();
         let mut pet_names = ArrayList::<String>::new();
-        let _ = &people; // TODO: iterate people and their pets, push each name
+        for person in &people {
+            for pet in &person.pets {
+                pet_names.push(pet.name.clone());
+            }
+        }
 
         assert_eq!(pet_names.len(), 11);
         assert!(pet_names.contains(&"Tabby".to_string()));
@@ -188,7 +185,11 @@ mod tests {
     fn count_pet_types() {
         let people = setup_people();
         let mut bag = HashBag::<PetType>::new();
-        let _ = &people; // TODO: iterate all pets, bag.insert(pet_type)
+        for person in &people {
+            for pet in &person.pets {
+                bag.insert(pet.pet_type.clone());
+            }
+        }
 
         assert_eq!(bag.occurrences_of(&PetType::Cat), 3);
         assert_eq!(bag.occurrences_of(&PetType::Dog), 3);
@@ -203,7 +204,11 @@ mod tests {
     fn unique_pet_types() {
         let people = setup_people();
         let mut types = HashSet::<PetType>::new();
-        let _ = &people; // TODO: iterate all pets, types.insert(pet_type)
+        for person in &people {
+            for pet in &person.pets {
+                types.insert(pet.pet_type.clone());
+            }
+        }
 
         assert_eq!(types.len(), 6);
         assert!(types.contains(&PetType::Cat));
@@ -214,8 +219,7 @@ mod tests {
     #[test]
     fn total_pet_count() {
         let people = setup_people();
-        let _ = &people; // TODO: replace 0 with people.inject_into(...)
-        let total: usize = 0;
+        let total = people.inject_into(0usize, |sum, p| sum + p.pets.len());
         assert_eq!(total, 11);
     }
 
@@ -223,8 +227,7 @@ mod tests {
     #[test]
     fn detect_not_found() {
         let people = setup_people();
-        let _ = &people; // TODO: replace with people.detect(...)
-        let nobody: Option<&Person> = Some(&Person::new("x", "x", vec![]));
+        let nobody = people.detect(|p| p.first_name == "Nobody" && p.last_name == "Missing");
         assert!(nobody.is_none());
     }
 }

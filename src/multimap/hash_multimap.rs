@@ -54,9 +54,11 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
 
     /// Bulk-loads from input already **grouped by key** (all values of a key
     /// appear in one contiguous run). Key runs are validated to be strictly
-    /// ascending under `cmp`; a key that reappears after its run closed, or an
-    /// out-of-order key, is a [`BulkError::OutOfOrder`]. Value order within
-    /// each key run is preserved. One bucket allocation per key. O(n).
+    /// ascending under `cmp`; comparator-equal keys must also be `Eq`-equal.
+    /// A key that reappears after its run closed, a comparator/`Eq`
+    /// inconsistency, or an out-of-order key is a [`BulkError::OutOfOrder`].
+    /// Value order within each key run is preserved. One bucket allocation per
+    /// key. O(n).
     pub fn from_sorted_keys<I: IntoIterator<Item = (K, V)>>(
         cmp: Comparator<K>,
         iter: I,
@@ -71,8 +73,16 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
                     bucket.push(v);
                 }
                 Some(ref prev) => match cmp.compare(prev, &k) {
-                    Ordering::Equal => bucket.push(v),
+                    Ordering::Equal => {
+                        if prev != &k {
+                            return Err(BulkError::OutOfOrder { index });
+                        }
+                        bucket.push(v);
+                    }
                     Ordering::Less => {
+                        if prev == &k || m.data.contains_key(&k) {
+                            return Err(BulkError::OutOfOrder { index });
+                        }
                         // close previous run
                         let prev_key = last_key.take().unwrap();
                         m.size += bucket.len();
@@ -94,10 +104,11 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
     }
 
     /// Bulk-loads from input sorted by **key then value** (`key_cmp` strictly
-    /// ascending across key runs; `val_cmp` non-decreasing within a run). List
-    /// semantics preserve equal adjacent values exactly; the value-order check
-    /// exists so callers can use the same source contract as set-valued
-    /// multimaps when their upstream data is sorted by `(key, value)`.
+    /// ascending across key runs; `val_cmp` non-decreasing within a run).
+    /// Comparator-equal keys must also be `Eq`-equal. List semantics preserve
+    /// equal adjacent values exactly; the value-order check exists so callers
+    /// can use the same source contract as set-valued multimaps when their
+    /// upstream data is sorted by `(key, value)`.
     pub fn from_sorted_key_values<I: IntoIterator<Item = (K, V)>>(
         key_cmp: Comparator<K>,
         val_cmp: Comparator<V>,
@@ -114,6 +125,9 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
                 }
                 Some(ref prev) => match key_cmp.compare(prev, &k) {
                     Ordering::Equal => {
+                        if prev != &k {
+                            return Err(BulkError::OutOfOrder { index });
+                        }
                         let last_v = bucket.last().unwrap();
                         if val_cmp.compare(last_v, &v) == Ordering::Greater {
                             return Err(BulkError::OutOfOrder { index });
@@ -121,6 +135,9 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
                         bucket.push(v);
                     }
                     Ordering::Less => {
+                        if prev == &k || m.data.contains_key(&k) {
+                            return Err(BulkError::OutOfOrder { index });
+                        }
                         let prev_key = last_key.take().unwrap();
                         m.size += bucket.len();
                         m.data.insert(prev_key, std::mem::take(&mut bucket));
@@ -360,7 +377,7 @@ mod tests {
     }
 
     use crate::bulk::BulkError;
-    use crate::object::strategy::natural_comparator;
+    use crate::object::strategy::{natural_comparator, Comparator};
 
     #[test]
     fn bulk_load_equals_incremental() {
@@ -401,6 +418,21 @@ mod tests {
         assert_eq!(m.get(&2), &[5, 5]);
         assert_eq!(m.len(), 5);
         assert_eq!(m.distinct_len(), 2);
+    }
+
+    #[test]
+    fn sorted_builders_reject_comparator_equal_eq_distinct_keys() {
+        let abs_cmp = Comparator::new(Box::new(|a: &i32, b: &i32| a.abs().cmp(&b.abs())));
+        let err =
+            Multimap::from_sorted_keys(abs_cmp.clone(), vec![(1, "a"), (-1, "b")]).unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+        let err = Multimap::from_sorted_key_values(
+            abs_cmp,
+            natural_comparator::<i32>(),
+            vec![(1, 10), (-1, 20)],
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
     }
 
     #[test]

@@ -147,6 +147,41 @@ mod tests {
         }
     }
 
+    // Property: a pump-built TreeMap (from_sorted) is observably identical to
+    // the same keys inserted one-by-one in random order (same sorted iteration).
+    #[test]
+    fn prop_treemap_pump_equals_incremental() {
+        use crate::bulk::DuplicatePolicy;
+        use crate::object::strategy::natural_comparator;
+        let mut rng = Rng::new(99);
+        for _ in 0..TRIALS {
+            let n = rng.next_usize(300);
+            // distinct sorted keys
+            let keys: Vec<i32> = (0..n as i32).collect();
+            let data: Vec<(i32, i32)> = keys.iter().map(|&k| (k, k * 3)).collect();
+            let pump = TreeMap::from_sorted(
+                natural_comparator::<i32>(),
+                data.clone(),
+                DuplicatePolicy::Error,
+            )
+            .unwrap();
+            // insert in a shuffled-ish order
+            let mut inc = TreeMap::new(natural_comparator::<i32>());
+            let mut order: Vec<usize> = (0..n).collect();
+            for i in (1..n).rev() {
+                let j = rng.next_usize(i + 1);
+                order.swap(i, j);
+            }
+            for &idx in &order {
+                let (k, v) = data[idx];
+                inc.insert(k, v);
+            }
+            let p: Vec<(i32, i32)> = pump.iter().map(|(k, v)| (*k, *v)).collect();
+            let c: Vec<(i32, i32)> = inc.iter().map(|(k, v)| (*k, *v)).collect();
+            assert_eq!(p, c);
+        }
+    }
+
     // Property: BiMap bijection — values are unique
     #[test]
     fn prop_hashbimap_bijection() {

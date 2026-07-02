@@ -5,6 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
+use crate::bulk::BulkError;
 use std::collections::HashMap;
 use std::hash::Hash;
 
@@ -21,6 +22,50 @@ impl<T: Eq + Hash> HashBag<T> {
             counts: HashMap::new(),
             size: 0,
         }
+    }
+
+    /// Bulk-loads a fresh bag from a flat sequence of elements, pre-sizing the
+    /// backing `std::HashMap` to the source's size hint. Equal elements
+    /// increment the occurrence count (the bag's natural duplicate handling —
+    /// no [`DuplicatePolicy`](crate::DuplicatePolicy) is consulted). Count
+    /// addition is overflow-checked ([`BulkError::CountOverflow`]).
+    ///
+    /// Note: the backing is `std::HashMap`, so this uses `with_capacity` (a
+    /// hint) and does **not** claim the zero-rehash contract.
+    pub fn bulk_load<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, BulkError> {
+        let iter = iter.into_iter();
+        let hint = iter.size_hint().0;
+        let mut counts: HashMap<T, usize> = HashMap::with_capacity(hint);
+        let mut size = 0usize;
+        for (index, v) in iter.enumerate() {
+            let c = counts.entry(v).or_insert(0);
+            *c = c.checked_add(1).ok_or(BulkError::CountOverflow { index })?;
+            size += 1;
+        }
+        Ok(HashBag { counts, size })
+    }
+
+    /// Bulk-loads a fresh bag from `(value, count)` pairs — strictly better
+    /// than `n×insert` when the multiplicities are already known. Repeated
+    /// values sum their counts (overflow-checked); a `count` of 0 is a no-op.
+    pub fn bulk_load_counts<I: IntoIterator<Item = (T, usize)>>(
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let iter = iter.into_iter();
+        let hint = iter.size_hint().0;
+        let mut counts: HashMap<T, usize> = HashMap::with_capacity(hint);
+        let mut size = 0usize;
+        for (index, (v, n)) in iter.enumerate() {
+            if n == 0 {
+                continue;
+            }
+            let c = counts.entry(v).or_insert(0);
+            *c = c.checked_add(n).ok_or(BulkError::CountOverflow { index })?;
+            size = size
+                .checked_add(n)
+                .ok_or(BulkError::CountOverflow { index })?;
+        }
+        Ok(HashBag { counts, size })
     }
 }
 
@@ -256,5 +301,40 @@ mod tests {
         let c = HashBag::from_iter([1, 2, 2]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn bulk_load_counts_occurrences_equal_incremental() {
+        let data = ["a", "a", "a", "b", "c", "c"];
+        let bulk = HashBag::bulk_load(data).unwrap();
+        let mut inc = HashBag::new();
+        for v in data {
+            inc.insert(v);
+        }
+        assert_eq!(bulk, inc);
+        assert_eq!(bulk.occurrences_of(&"a"), 3);
+        assert_eq!(bulk.len(), 6);
+    }
+
+    #[test]
+    fn bulk_load_counts_pairs_sum() {
+        let bag = HashBag::bulk_load_counts([("a", 3usize), ("b", 1), ("a", 2), ("z", 0)]).unwrap();
+        assert_eq!(bag.occurrences_of(&"a"), 5);
+        assert_eq!(bag.occurrences_of(&"b"), 1);
+        assert_eq!(bag.occurrences_of(&"z"), 0); // zero count is a no-op
+        assert_eq!(bag.len(), 6);
+    }
+
+    #[test]
+    fn bulk_load_counts_overflow_errors() {
+        use crate::bulk::BulkError;
+        let err = HashBag::bulk_load_counts([("x", usize::MAX), ("x", 1)]).unwrap_err();
+        assert!(matches!(err, BulkError::CountOverflow { index: 1 }));
+    }
+
+    #[test]
+    fn bulk_load_empty() {
+        let bag: HashBag<i32> = HashBag::bulk_load(Vec::new()).unwrap();
+        assert!(bag.len() == 0);
     }
 }

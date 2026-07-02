@@ -5,6 +5,7 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use super::traits::*;
+use crate::bulk::{BulkError, DuplicatePolicy};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -30,6 +31,36 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> HashBiMap<K, V> {
             forward: HashMap::with_capacity(cap),
             inverse: HashMap::with_capacity(cap),
         }
+    }
+
+    /// Bulk-loads a fresh bijective map. A BiMap requires a bijection, so
+    /// [`DuplicatePolicy`] **does not apply**: a duplicate **key** OR a
+    /// duplicate **value** is *always* a [`BulkError::Duplicate`], even under
+    /// [`DuplicatePolicy::IgnoreDuplicates`] and even for an identical `(k, v)`
+    /// pair (an identical pair repeats the key, which breaks the single-pass
+    /// bijection build). The `dup` parameter is accepted only for API symmetry
+    /// with the other bulk loaders and is otherwise ignored.
+    ///
+    /// Backed by two `std::HashMap`s (`with_capacity`, a hint — no zero-rehash
+    /// claim).
+    pub fn bulk_load<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+        _dup: DuplicatePolicy,
+    ) -> Result<Self, BulkError> {
+        let iter = iter.into_iter();
+        let hint = iter.size_hint().0;
+        let mut forward: HashMap<K, V> = HashMap::with_capacity(hint);
+        let mut inverse: HashMap<V, K> = HashMap::with_capacity(hint);
+        for (index, (k, v)) in iter.enumerate() {
+            // BiMap ignores DuplicatePolicy: any duplicate key or value (incl.
+            // an identical pair) is always an error.
+            if forward.contains_key(&k) || inverse.contains_key(&v) {
+                return Err(BulkError::Duplicate { index });
+            }
+            forward.insert(k.clone(), v.clone());
+            inverse.insert(v, k);
+        }
+        Ok(HashBiMap { forward, inverse })
     }
 
     /// Insert a key-value pair. If the value already exists under a different key,
@@ -308,5 +339,51 @@ mod tests {
         bm.extend([("a", 1), ("b", 2)]);
         let other: HashBiMap<&str, i32> = [("b", 2), ("a", 1)].into_iter().collect();
         assert_eq!(bm, other);
+    }
+
+    #[test]
+    fn bulk_load_bijection_equal_incremental() {
+        let data = [("a", 1), ("b", 2), ("c", 3)];
+        let bulk = HashBiMap::bulk_load(data, DuplicatePolicy::Error).unwrap();
+        let mut inc = HashBiMap::new();
+        for (k, v) in data {
+            inc.insert(k, v);
+        }
+        assert_eq!(bulk, inc);
+        assert_eq!(bulk.get_inverse(&2), Some(&"b"));
+    }
+
+    #[test]
+    fn bulk_load_rejects_duplicate_key_and_value() {
+        // duplicate key at index 2
+        let err = HashBiMap::bulk_load([("a", 1), ("b", 2), ("a", 3)], DuplicatePolicy::Error)
+            .unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 2 }));
+        // duplicate value at index 1
+        let err = HashBiMap::bulk_load([("a", 1), ("b", 1)], DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 1 }));
+    }
+
+    #[test]
+    fn bulk_load_ignores_policy_every_duplicate_errors() {
+        // BiMap ignores DuplicatePolicy: an identical (k,v) pair is an error
+        // under IgnoreDuplicates too (the repeated key breaks the bijection
+        // build).
+        let err = HashBiMap::bulk_load(
+            [("a", 1), ("a", 1), ("b", 2)],
+            DuplicatePolicy::IgnoreDuplicates,
+        )
+        .unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 1 }));
+
+        // A partial collision (same key, new value) likewise errors.
+        let err = HashBiMap::bulk_load([("a", 1), ("a", 9)], DuplicatePolicy::IgnoreDuplicates)
+            .unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 1 }));
+
+        // A duplicate value under IgnoreDuplicates also errors.
+        let err = HashBiMap::bulk_load([("a", 1), ("b", 1)], DuplicatePolicy::IgnoreDuplicates)
+            .unwrap_err();
+        assert!(matches!(err, BulkError::Duplicate { index: 1 }));
     }
 }

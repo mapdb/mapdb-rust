@@ -69,7 +69,8 @@ so a breaking change is a **minor** version bump.
   only on a miss, evict-before-insert), `retain` (drop rejected entries,
   mutate survivors in place — not an eviction, so the observer is silent),
   `remove`, `evict`, `clear`,
-  `contains_key`, `iter`/`keys`/`values`, owned + borrowed `IntoIterator`, and an
+  `contains_key`, `iter`/`keys`/`values` + `iter_mut`/`values_mut` (edit resident
+  values in place, keys shared), owned + borrowed + `&mut` `IntoIterator`, and an
   optional `on_evict` **observer** (`&K, &V, cause`; fired
   for size and TTL-expiry evictions — `remove`/`evict`/`clear` are not evictions).
   Optional after-write **TTL** (`with_ttl(ticks)` + `put_at(k, v, now)` +

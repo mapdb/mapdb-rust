@@ -439,6 +439,20 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         self.iter().map(|(_, v)| v)
     }
 
+    /// Mutable-value iterator `(&K, &mut V)` over the resident entries
+    /// (unspecified order). Keys stay shared (a key mutation would desync the
+    /// index); this is a bulk value edit and does **not** refresh policy access.
+    pub fn iter_mut(&mut self) -> BoundedMapIterMut<'_, K, V> {
+        BoundedMapIterMut {
+            inner: self.slots.iter_mut().flatten(),
+        }
+    }
+
+    /// Mutable iterator over the resident values (unspecified order).
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
+        self.iter_mut().map(|(_, v)| v)
+    }
+
     /// Evict `slot` under `cause`, firing the observer (if any) after the map is
     /// already consistent, then dropping the value.
     fn evict_slot(&mut self, slot: usize, cause: EvictionCause) {
@@ -526,6 +540,30 @@ impl<'a, K, V> Iterator for BoundedMapIter<'a, K, V> {
 }
 
 impl<K, V> std::iter::FusedIterator for BoundedMapIter<'_, K, V> {}
+
+/// Mutable-value iterator over a [`BoundedMap`]'s resident `(&K, &mut V)` entries
+/// in unspecified (arena) order; keys stay shared.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct BoundedMapIterMut<'a, K, V> {
+    inner: std::iter::Flatten<std::slice::IterMut<'a, Option<(K, V)>>>,
+}
+
+impl<'a, K, V> Iterator for BoundedMapIterMut<'a, K, V> {
+    type Item = (&'a K, &'a mut V);
+    fn next(&mut self) -> Option<(&'a K, &'a mut V)> {
+        self.inner.next().map(|(k, v)| (&*k, v))
+    }
+}
+
+impl<K, V> std::iter::FusedIterator for BoundedMapIterMut<'_, K, V> {}
+
+impl<'a, K: Hash + Eq + Clone, V, P: EvictionPolicy> IntoIterator for &'a mut BoundedMap<K, V, P> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = BoundedMapIterMut<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
 
 /// [`put`](BoundedMap::put) each pair in iterator order — later inserts may evict
 /// earlier ones once the map is at capacity (there is no `FromIterator`: a
@@ -829,6 +867,26 @@ mod tests {
         );
         // Arena never grew beyond what capacity needs (+ at most transient slack).
         assert!(m.slots.len() <= 4, "arena bloated to {}", m.slots.len());
+    }
+
+    #[test]
+    fn iter_mut_mutates_values_via_mut_ref() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(8);
+        for i in 0..5 {
+            m.put(i, i);
+        }
+        for (_k, v) in &mut m {
+            *v += 100;
+        }
+        assert_eq!(
+            sorted_entries(&m),
+            vec![(0, 100), (1, 101), (2, 102), (3, 103), (4, 104)]
+        );
+        for v in m.values_mut() {
+            *v = 0;
+        }
+        assert!(m.values().all(|&v| v == 0));
+        assert_eq!(m.len(), 5);
     }
 
     #[test]

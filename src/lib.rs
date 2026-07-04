@@ -46,7 +46,9 @@ pub use array_deque::ArrayDeque;
 pub use bit_set::BitSet;
 pub use bloom::Bloom;
 pub use bounded_lru::{BoundedLruMap, BoundedLruMapBuilder, EvictionCause};
-pub use bounded_map::{BoundedMap, BoundedMapIntoIter, EvictionPolicy, Fifo, Lru};
+pub use bounded_map::{
+    BoundedMap, BoundedMapIntoIter, BoundedMapIter, BoundedMapIterMut, EvictionPolicy, Fifo, Lru,
+};
 pub use bulk::{BulkError, DuplicatePolicy};
 pub use count_min::CountMin;
 pub use fenwick::FenwickTree;

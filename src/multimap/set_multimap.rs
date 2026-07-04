@@ -236,6 +236,35 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
         self.size = 0;
     }
 
+    /// Retain only the `(key, value)` pairs for which `keep(&k, &v)` returns
+    /// `true`. Values a key loses are dropped from its set (unique-insertion
+    /// order preserved); a key left with no values is removed entirely. The
+    /// total-value count (`len`) stays exact. O(total values).
+    ///
+    /// # Panics
+    /// If `keep` panics, the panic propagates and `size` is recomputed from the
+    /// surviving values on the way out (via a drop guard), so a caught panic
+    /// still leaves `len()` consistent with the pairs actually present.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K, &V) -> bool,
+    {
+        // See `Multimap::retain`: recompute `size` via a guard so a `keep` panic
+        // (unwinding through the kernel's rebuild-in-place `retain`, which leaves
+        // `data` valid) cannot leave the side-state count stale.
+        struct FixSize<'a, K: Eq + Hash, V: Eq>(&'a mut SetMultimap<K, V>);
+        impl<K: Eq + Hash, V: Eq> Drop for FixSize<'_, K, V> {
+            fn drop(&mut self) {
+                self.0.size = self.0.data.iter().map(|(_, vs)| vs.len()).sum();
+            }
+        }
+        let guard = FixSize(self);
+        guard.0.data.retain(|k, vs| {
+            vs.retain(|v| keep(k, v));
+            !vs.is_empty()
+        });
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &K> + '_ {
         self.data.keys()
     }
@@ -445,6 +474,40 @@ mod tests {
         m.insert(2, 20);
         assert_eq!(m.len(), 2);
         assert_eq!((&m).into_iter().count(), 2);
+    }
+
+    #[test]
+    fn retain_filters_pairs_and_drops_empty_keys() {
+        let mut m: SetMultimap<i32, i32> = SetMultimap::new();
+        for (k, v) in [(1, 10), (1, 11), (1, 12), (2, 20), (3, 30), (3, 31)] {
+            m.insert(k, v);
+        }
+        assert_eq!(m.len(), 6);
+        m.retain(|_, v| v % 2 == 0); // keep evens
+        assert_eq!(m.get(&1), &[10, 12]);
+        assert_eq!(m.get(&2), &[20]);
+        assert_eq!(m.get(&3), &[30]);
+        assert_eq!(m.len(), 4);
+        assert_eq!(m.distinct_len(), 3);
+        // Emptying a key removes it.
+        m.retain(|&k, _| k != 2);
+        assert!(!m.contains_key(&2));
+        assert_eq!(m.len(), 3);
+        assert_eq!(m.distinct_len(), 2);
+    }
+
+    #[test]
+    fn retain_size_consistent_after_caught_panic() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let mut m: SetMultimap<i32, i32> = SetMultimap::new();
+        for (k, v) in [(1, 1), (1, 2), (2, 3)] {
+            m.insert(k, v);
+        }
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            m.retain(|_, _| panic!("boom"));
+        }));
+        assert!(r.is_err());
+        assert_eq!(m.len(), m.iter().count());
     }
 
     use crate::bulk::BulkError;

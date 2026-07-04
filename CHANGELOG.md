@@ -4,8 +4,14 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` on the object hash family
+## [Unreleased] — additive: `entry` + `retain` across the hash collections
 
+- **`Multimap::retain(|&k, &v| …)` / `SetMultimap::retain(|&k, &v| …)`** —
+  per-(key, value)-pair retain: drops rejected values from each key's bucket
+  (order preserved), removes a key whose bucket empties out, and keeps the
+  total-value `len()` accounting exact. Panic-consistent via the same drop-guard
+  as `HashBag::retain` (recomputes `size` from survivors even if the predicate
+  panics and the unwind is caught).
 - **`retain` across the rest of the object hash family** — `object::HashMap`,
   `object::HashSet` (thin delegations to the `OpenHashMap`/`OpenHashSet` kernel
   retain), and `HashBag::retain(|&elem, occurrences| …)` (multiset retain: drops

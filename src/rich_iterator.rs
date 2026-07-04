@@ -37,7 +37,7 @@
 //! equivalent for.
 
 use crate::hash_table::OpenHashMap;
-use crate::object::{HashBag, MutableBag};
+use crate::object::HashBag;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::fmt::Display;
@@ -363,7 +363,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::object::Bag;
 
     #[test]
     fn select_and_reject_are_complements() {

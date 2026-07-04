@@ -4,7 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::hash_table::OpenHashMap;
 use std::borrow::Borrow;
@@ -54,30 +53,43 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
     }
 }
 
-impl<K: Eq + Hash, V> MapIterable<K, V> for HashMap<K, V> {
-    fn len(&self) -> usize {
+// ---- core + functional API (formerly the trait tower) ----------------------
+
+impl<K: Eq + Hash, V> HashMap<K, V> {
+    /// The number of entries.
+    pub fn len(&self) -> usize {
         self.inner.len()
     }
-    fn contains_key(&self, key: &K) -> bool {
-        self.inner.contains_key(key)
+    /// Whether the map is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
-    fn get(&self, key: &K) -> Option<&V> {
-        self.inner.get(key)
-    }
-    fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
-        Box::new(self.inner.iter())
-    }
-}
-
-impl<K: Eq + Hash, V> MutableMap<K, V> for HashMap<K, V> {
-    fn insert(&mut self, key: K, value: V) -> Option<V> {
+    /// Insert `key`→`value`, returning the previous value if the key existed.
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.inner.insert(key, value)
     }
-    fn remove(&mut self, key: &K) -> Option<V> {
-        self.inner.remove(key)
-    }
-    fn clear(&mut self) {
+    /// Remove all entries.
+    pub fn clear(&mut self) {
         self.inner.clear();
+    }
+
+    /// Apply `f` to each entry.
+    pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
+        for (k, v) in self.inner.iter() {
+            f(k, v);
+        }
+    }
+    /// Whether any entry satisfies `predicate`.
+    pub fn any_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        self.inner.iter().any(|(k, v)| predicate(k, v))
+    }
+    /// Whether every entry satisfies `predicate`.
+    pub fn all_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        self.inner.iter().all(|(k, v)| predicate(k, v))
+    }
+    /// Whether no entry satisfies `predicate`.
+    pub fn none_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        !self.inner.iter().any(|(k, v)| predicate(k, v))
     }
 }
 
@@ -126,8 +138,8 @@ impl<K: Eq + Hash, V> Default for HashMap<K, V> {
 // ---- idiomatic std-style additions ----------------------------------------
 
 impl<K: Eq + Hash, V> HashMap<K, V> {
-    /// Borrowed `(&K, &V)` iterator (alias of [`MapIterable::iter`] without the
-    /// boxing), so `for (k, v) in &map` and `map.iter()` both work.
+    /// Borrowed `(&K, &V)` iterator, so `for (k, v) in &map` and `map.iter()`
+    /// both work.
     pub fn iter(&self) -> crate::hash_table::OpenHashMapIter<'_, K, V> {
         self.inner.iter()
     }

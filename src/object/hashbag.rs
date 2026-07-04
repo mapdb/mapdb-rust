@@ -4,7 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
 use crate::bulk::BulkError;
 use std::collections::HashMap;
 use std::hash::Hash;
@@ -69,44 +68,49 @@ impl<T: Eq + Hash> HashBag<T> {
     }
 }
 
-impl<T: Eq + Hash> Collection<T> for HashBag<T> {
-    fn len(&self) -> usize {
+// ---- core bag API (formerly the trait tower) -------------------------------
+
+impl<T: Eq + Hash> HashBag<T> {
+    /// The total number of elements (counting occurrences).
+    pub fn len(&self) -> usize {
         self.size
     }
-    fn contains(&self, value: &T) -> bool {
+    /// Whether the bag is empty.
+    pub fn is_empty(&self) -> bool {
+        self.size == 0
+    }
+    /// Whether at least one occurrence of `value` is present.
+    pub fn contains(&self, value: &T) -> bool {
         self.counts.get(value).copied().unwrap_or(0) > 0
     }
-    fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
-        Box::new(
-            self.counts
-                .iter()
-                .flat_map(|(v, &c)| std::iter::repeat_n(v, c)),
-        )
+    /// Iterate elements, yielding each once per occurrence.
+    pub fn iter(&self) -> HashBagIter<'_, T> {
+        HashBagIter {
+            inner: self.counts.iter(),
+            current: None,
+        }
     }
-}
-
-impl<T: Eq + Hash> MutableCollection<T> for HashBag<T> {
-    fn clear(&mut self) {
+    /// The occurrence count of `value` (0 if absent).
+    pub fn occurrences_of(&self, value: &T) -> usize {
+        self.counts.get(value).copied().unwrap_or(0)
+    }
+    /// The number of *distinct* elements (ignoring occurrence counts).
+    pub fn distinct_len(&self) -> usize {
+        self.counts.len()
+    }
+    /// Remove all elements.
+    pub fn clear(&mut self) {
         self.counts.clear();
         self.size = 0;
     }
-}
 
-impl<T: Eq + Hash> Bag<T> for HashBag<T> {
-    fn occurrences_of(&self, value: &T) -> usize {
-        self.counts.get(value).copied().unwrap_or(0)
-    }
-    fn distinct_len(&self) -> usize {
-        self.counts.len()
-    }
-}
-
-impl<T: Eq + Hash> MutableBag<T> for HashBag<T> {
+    /// Add one occurrence of `value`.
+    ///
     /// # Panics
     /// Panics if the per-value occurrence count or the total size would
     /// overflow `usize` (mirrors the overflow-checked `bulk_load_counts` path;
     /// Guava's `HashMultiset` throws in the same situation).
-    fn insert(&mut self, value: T) {
+    pub fn insert(&mut self, value: T) {
         // Check `size` first (it is >= any per-value count, so it overflows
         // first): computing it before mutating `counts` keeps the bag
         // consistent even if the panic is caught — a bumped count with a stale
@@ -189,7 +193,7 @@ impl<T: Eq + Hash> Default for HashBag<T> {
 // ---- idiomatic std-style additions ----------------------------------------
 
 /// Borrowed iterator yielding each element once per occurrence (matching
-/// [`Collection::iter`]).
+/// [`HashBag::iter`]).
 pub struct HashBagIter<'a, T> {
     inner: std::collections::hash_map::Iter<'a, T, usize>,
     current: Option<(&'a T, usize)>,
@@ -374,6 +378,6 @@ mod tests {
     #[test]
     fn bulk_load_empty() {
         let bag: HashBag<i32> = HashBag::bulk_load(Vec::new()).unwrap();
-        assert!(bag.len() == 0);
+        assert!(bag.is_empty());
     }
 }

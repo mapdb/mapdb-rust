@@ -4,8 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
-
 /// Generic ordered list backed by a `Vec<T>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArrayList<T> {
@@ -44,39 +42,102 @@ impl<T> ArrayList<T> {
     }
 }
 
-impl<T: PartialEq> Collection<T> for ArrayList<T> {
-    fn len(&self) -> usize {
+// ---- core + functional API (formerly the trait tower) ----------------------
+
+impl<T: PartialEq> ArrayList<T> {
+    /// The number of elements.
+    pub fn len(&self) -> usize {
         self.items.len()
     }
-    fn contains(&self, value: &T) -> bool {
+    /// Whether the list is empty.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    /// Whether `value` is present.
+    pub fn contains(&self, value: &T) -> bool {
         self.items.contains(value)
     }
-    fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
-        Box::new(self.items.iter())
+    /// Iterate elements in order.
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.items.iter()
     }
-}
-
-impl<T: PartialEq> MutableCollection<T> for ArrayList<T> {
-    fn clear(&mut self) {
-        self.items.clear();
-    }
-}
-
-impl<T: PartialEq> List<T> for ArrayList<T> {
-    fn get(&self, index: usize) -> Option<&T> {
+    /// The element at `index`, if any.
+    pub fn get(&self, index: usize) -> Option<&T> {
         self.items.get(index)
     }
-    fn index_of(&self, value: &T) -> Option<usize> {
+    /// The index of the first occurrence of `value`, if any.
+    pub fn index_of(&self, value: &T) -> Option<usize> {
         self.items.iter().position(|v| v == value)
+    }
+    /// Append `value` to the end.
+    pub fn push(&mut self, value: T) {
+        self.items.push(value);
+    }
+    /// Replace the element at `index`, returning the old value.
+    pub fn set(&mut self, index: usize, value: T) -> T {
+        std::mem::replace(&mut self.items[index], value)
+    }
+    /// Remove all elements.
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// Apply `f` to each element.
+    pub fn for_each(&self, mut f: impl FnMut(&T)) {
+        for v in &self.items {
+            f(v);
+        }
+    }
+    /// Whether any element satisfies `predicate`.
+    pub fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.items.iter().any(predicate)
+    }
+    /// Whether every element satisfies `predicate`.
+    pub fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.items.iter().all(predicate)
+    }
+    /// Whether no element satisfies `predicate`.
+    pub fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        !self.items.iter().any(predicate)
+    }
+    /// Count elements matching `predicate`.
+    pub fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize {
+        self.items.iter().filter(|v| predicate(v)).count()
+    }
+    /// The first element matching `predicate`, if any.
+    pub fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T> {
+        self.items.iter().find(|v| predicate(v))
+    }
+    /// Fold `f` over the elements starting from `initial`.
+    pub fn inject_into<R>(&self, initial: R, mut f: impl FnMut(R, &T) -> R) -> R {
+        let mut acc = initial;
+        for v in &self.items {
+            acc = f(acc, v);
+        }
+        acc
     }
 }
 
-impl<T: PartialEq> MutableList<T> for ArrayList<T> {
-    fn push(&mut self, value: T) {
-        self.items.push(value);
+impl<T: PartialEq + Clone> ArrayList<T> {
+    /// A `Vec` copy of the elements.
+    pub fn to_vec(&self) -> Vec<T> {
+        self.items.clone()
     }
-    fn set(&mut self, index: usize, value: T) -> T {
-        std::mem::replace(&mut self.items[index], value)
+    /// A `Vec` of the elements matching `predicate`.
+    pub fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.items
+            .iter()
+            .filter(|v| predicate(v))
+            .cloned()
+            .collect()
+    }
+    /// A `Vec` of the elements *not* matching `predicate`.
+    pub fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.items
+            .iter()
+            .filter(|v| !predicate(v))
+            .cloned()
+            .collect()
     }
 }
 

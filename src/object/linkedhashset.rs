@@ -14,7 +14,6 @@
 //! lookups. Iteration follows insertion order; duplicate adds are no-ops.
 
 use super::linkedhashmap;
-use super::traits::*;
 use super::LinkedHashMap;
 use std::borrow::Borrow;
 use std::collections::hash_map::RandomState;
@@ -157,37 +156,51 @@ impl<T: Eq + Hash + Clone, S: BuildHasher + Default> LinkedHashSet<T, S> {
     }
 }
 
-// ---- trait-tower impls (Stage-C deletion targets; kept working for now) ----
+// ---- functional API (formerly the trait tower) -----------------------------
 
-impl<T: Eq + Hash, S: BuildHasher> Collection<T> for LinkedHashSet<T, S> {
-    fn len(&self) -> usize {
-        self.len()
+impl<T: Eq + Hash, S: BuildHasher> LinkedHashSet<T, S> {
+    /// Whether any element satisfies `predicate`.
+    pub fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.iter().any(predicate)
     }
-
-    fn contains(&self, value: &T) -> bool {
-        self.contains(value)
+    /// Whether every element satisfies `predicate`.
+    pub fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.iter().all(predicate)
     }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
-        Box::new(self.iter())
+    /// Whether no element satisfies `predicate`.
+    pub fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        !self.iter().any(predicate)
+    }
+    /// Count elements matching `predicate`.
+    pub fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize {
+        self.iter().filter(|v| predicate(v)).count()
+    }
+    /// The first element matching `predicate` (insertion order), if any.
+    pub fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T> {
+        self.iter().find(|v| predicate(v))
+    }
+    /// Fold `f` over the elements (insertion order) starting from `initial`.
+    pub fn inject_into<R>(&self, initial: R, mut f: impl FnMut(R, &T) -> R) -> R {
+        let mut acc = initial;
+        for v in self.iter() {
+            acc = f(acc, v);
+        }
+        acc
     }
 }
 
-impl<T: Eq + Hash, S: BuildHasher> MutableCollection<T> for LinkedHashSet<T, S> {
-    fn clear(&mut self) {
-        self.clear()
+impl<T: Eq + Hash + Clone, S: BuildHasher> LinkedHashSet<T, S> {
+    /// A `Vec` copy of the elements in insertion order.
+    pub fn to_vec(&self) -> Vec<T> {
+        self.iter().cloned().collect()
     }
-}
-
-impl<T: Eq + Hash, S: BuildHasher> Set<T> for LinkedHashSet<T, S> {}
-
-impl<T: Eq + Hash, S: BuildHasher> MutableSet<T> for LinkedHashSet<T, S> {
-    fn insert(&mut self, value: T) -> bool {
-        self.insert(value)
+    /// A `Vec` of the elements matching `predicate` (insertion order).
+    pub fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.iter().filter(|v| predicate(v)).cloned().collect()
     }
-
-    fn remove(&mut self, value: &T) -> bool {
-        self.remove(value)
+    /// A `Vec` of the elements *not* matching `predicate` (insertion order).
+    pub fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.iter().filter(|v| !predicate(v)).cloned().collect()
     }
 }
 

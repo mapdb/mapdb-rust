@@ -4,7 +4,7 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-//! Generic (object-typed) collection types and traits.
+//! Generic (object-typed) collection types.
 //!
 //! These complement the primitive-specialized collections (e.g., `I32ArrayList`)
 //! with generic versions that work with any type (`ArrayList<T>`, `HashSet<T>`, etc.).
@@ -20,7 +20,6 @@ mod linkedhashset;
 pub mod strategy;
 mod strategy_hashmap;
 mod strategy_hashset;
-mod traits;
 pub mod treemap;
 mod treeset;
 
@@ -44,7 +43,6 @@ pub use strategy::{
 };
 pub use strategy_hashmap::HashMapWithStrategy;
 pub use strategy_hashset::HashSetWithStrategy;
-pub use traits::*;
 pub use treemap::{DynTreeMap, RangeIter, TreeMap, TreeMapIntoIter, TreeMapSink};
 pub use treeset::{DynTreeSet, TreeSet, TreeSetIntoIter, TreeSetSink};
 

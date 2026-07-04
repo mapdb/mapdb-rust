@@ -4,7 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
 use crate::bulk::{BulkError, DuplicatePolicy};
 use std::borrow::Borrow;
 use std::collections::HashMap;
@@ -181,21 +180,6 @@ impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> HashBiMap<K, V> {
         for (k, v) in &self.forward {
             f(k, v);
         }
-    }
-}
-
-impl<K: Eq + Hash + Clone, V: Eq + Hash + Clone> MapIterable<K, V> for HashBiMap<K, V> {
-    fn len(&self) -> usize {
-        self.forward.len()
-    }
-    fn contains_key(&self, key: &K) -> bool {
-        self.forward.contains_key(key)
-    }
-    fn get(&self, key: &K) -> Option<&V> {
-        self.forward.get(key)
-    }
-    fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
-        Box::new(self.forward.iter())
     }
 }
 

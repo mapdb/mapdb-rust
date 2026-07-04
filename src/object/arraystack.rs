@@ -4,8 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
-
 /// Generic LIFO stack backed by a `Vec<T>`.
 #[derive(Debug, Clone)]
 pub struct ArrayStack<T> {
@@ -18,37 +16,40 @@ impl<T> ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq> Collection<T> for ArrayStack<T> {
-    fn len(&self) -> usize {
+// ---- core stack API (formerly the trait tower) -----------------------------
+
+impl<T: PartialEq> ArrayStack<T> {
+    /// The number of elements.
+    pub fn len(&self) -> usize {
         self.items.len()
     }
-    fn contains(&self, value: &T) -> bool {
+    /// Whether the stack is empty.
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+    /// Whether `value` is present.
+    pub fn contains(&self, value: &T) -> bool {
         self.items.contains(value)
     }
-    /// Iterates top-to-bottom.
-    fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
-        Box::new(self.items.iter().rev())
+    /// Iterate top-to-bottom (most recently pushed first).
+    pub fn iter(&self) -> std::iter::Rev<std::slice::Iter<'_, T>> {
+        self.items.iter().rev()
     }
-}
-
-impl<T: PartialEq> MutableCollection<T> for ArrayStack<T> {
-    fn clear(&mut self) {
-        self.items.clear();
-    }
-}
-
-impl<T: PartialEq> Stack<T> for ArrayStack<T> {
-    fn peek(&self) -> Option<&T> {
+    /// The top element without removing it.
+    pub fn peek(&self) -> Option<&T> {
         self.items.last()
     }
-}
-
-impl<T: PartialEq> MutableStack<T> for ArrayStack<T> {
-    fn push(&mut self, value: T) {
+    /// Push `value` onto the top.
+    pub fn push(&mut self, value: T) {
         self.items.push(value);
     }
-    fn pop(&mut self) -> Option<T> {
+    /// Pop the top element.
+    pub fn pop(&mut self) -> Option<T> {
         self.items.pop()
+    }
+    /// Remove all elements.
+    pub fn clear(&mut self) {
+        self.items.clear();
     }
 }
 
@@ -69,7 +70,7 @@ impl<T: PartialEq> Default for ArrayStack<T> {
 
 // ---- idiomatic std-style additions ----------------------------------------
 //
-// Iteration order is top-to-bottom (matching `Collection::iter` and `peek`):
+// Iteration order is top-to-bottom (matching `iter` and `peek`):
 // the most recently pushed element comes first.
 
 impl<'a, T: PartialEq> IntoIterator for &'a ArrayStack<T> {

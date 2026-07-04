@@ -4,7 +4,6 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
-use super::traits::*;
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::hash_table::OpenHashSet;
 use std::borrow::Borrow;
@@ -49,36 +48,70 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
     }
 }
 
-impl<T: Eq + std::hash::Hash> Collection<T> for HashSet<T> {
-    fn len(&self) -> usize {
+// ---- core + functional API (formerly the trait tower) ----------------------
+
+impl<T: Eq + std::hash::Hash> HashSet<T> {
+    /// The number of elements.
+    pub fn len(&self) -> usize {
         self.inner.len()
     }
-    fn contains(&self, value: &T) -> bool {
-        self.inner.contains(value)
+    /// Whether the set is empty.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
-    fn iter(&self) -> Box<dyn Iterator<Item = &T> + '_> {
-        Box::new(self.inner.iter())
-    }
-}
-
-impl<T: Eq + std::hash::Hash> MutableCollection<T> for HashSet<T> {
-    fn clear(&mut self) {
-        self.inner.clear();
-    }
-}
-
-impl<T: Eq + std::hash::Hash> Set<T> for HashSet<T> {}
-
-impl<T: Eq + std::hash::Hash> MutableSet<T> for HashSet<T> {
-    fn insert(&mut self, value: T) -> bool {
+    /// Add `value`; returns `true` if it was newly inserted.
+    pub fn insert(&mut self, value: T) -> bool {
         self.inner.insert(value)
     }
-    fn remove(&mut self, value: &T) -> bool {
-        self.inner.remove(value)
+    /// Remove all elements.
+    pub fn clear(&mut self) {
+        self.inner.clear();
+    }
+
+    /// Whether any element satisfies `predicate`.
+    pub fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.inner.iter().any(predicate)
+    }
+    /// Whether every element satisfies `predicate`.
+    pub fn all_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        self.inner.iter().all(predicate)
+    }
+    /// Whether no element satisfies `predicate`.
+    pub fn none_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
+        !self.inner.iter().any(predicate)
+    }
+    /// Count elements matching `predicate`.
+    pub fn count_where(&self, predicate: impl Fn(&T) -> bool) -> usize {
+        self.inner.iter().filter(|v| predicate(v)).count()
+    }
+    /// The first element matching `predicate` (iteration order), if any.
+    pub fn detect(&self, predicate: impl Fn(&T) -> bool) -> Option<&T> {
+        self.inner.iter().find(|v| predicate(v))
     }
 }
 
 impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
+    /// A `Vec` copy of the elements.
+    pub fn to_vec(&self) -> Vec<T> {
+        self.inner.iter().cloned().collect()
+    }
+    /// A `Vec` of the elements matching `predicate`.
+    pub fn select(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.inner
+            .iter()
+            .filter(|v| predicate(v))
+            .cloned()
+            .collect()
+    }
+    /// A `Vec` of the elements *not* matching `predicate`.
+    pub fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T> {
+        self.inner
+            .iter()
+            .filter(|v| !predicate(v))
+            .cloned()
+            .collect()
+    }
+
     pub fn union(&self, other: &Self) -> Self {
         let mut out = self.clone();
         for v in other.inner.iter() {

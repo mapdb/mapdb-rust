@@ -24,7 +24,6 @@
 //! existing key preserves its position, only new keys are appended. Java's
 //! `LinkedHashMap` makes the same pointer-chasing-vs-dense-scan trade.
 
-use super::traits::*;
 use crate::index_table::{IndexTable, RawEntry};
 use crate::slot_list::{self, SlotList};
 use std::borrow::Borrow;
@@ -248,37 +247,26 @@ impl<K: Eq + Hash + Clone, V: Clone, S: BuildHasher + Default> LinkedHashMap<K, 
     }
 }
 
-// ---- trait-tower impls (Stage-C deletion targets; kept working for now) ----
+// ---- entry-wise functional API (formerly the trait tower) ------------------
 
-impl<K: Eq + Hash, V, S: BuildHasher> MapIterable<K, V> for LinkedHashMap<K, V, S> {
-    fn len(&self) -> usize {
-        self.len()
+impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
+    /// Apply `f` to each entry in insertion order.
+    pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
+        for (k, v) in self.iter() {
+            f(k, v);
+        }
     }
-
-    fn contains_key(&self, key: &K) -> bool {
-        self.contains_key(key)
+    /// Whether any entry satisfies `predicate`.
+    pub fn any_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        self.iter().any(|(k, v)| predicate(k, v))
     }
-
-    fn get(&self, key: &K) -> Option<&V> {
-        self.get(key)
+    /// Whether every entry satisfies `predicate`.
+    pub fn all_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        self.iter().all(|(k, v)| predicate(k, v))
     }
-
-    fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
-        Box::new(self.iter())
-    }
-}
-
-impl<K: Eq + Hash, V, S: BuildHasher> MutableMap<K, V> for LinkedHashMap<K, V, S> {
-    fn insert(&mut self, key: K, value: V) -> Option<V> {
-        self.insert(key, value)
-    }
-
-    fn remove(&mut self, key: &K) -> Option<V> {
-        self.remove(key)
-    }
-
-    fn clear(&mut self) {
-        self.clear()
+    /// Whether no entry satisfies `predicate`.
+    pub fn none_satisfy(&self, predicate: impl Fn(&K, &V) -> bool) -> bool {
+        !self.iter().any(|(k, v)| predicate(k, v))
     }
 }
 

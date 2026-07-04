@@ -39,7 +39,6 @@ pub mod roaring;
 mod slot_list;
 pub mod space_saving;
 pub mod synchronized;
-pub mod traits;
 
 pub use array_deque::ArrayDeque;
 pub use bit_set::BitSet;

@@ -40,7 +40,7 @@ pub use strategy::{
 pub use strategy_hashmap::HashMapWithStrategy;
 pub use strategy_hashset::HashSetWithStrategy;
 pub use traits::*;
-pub use treemap::{DynTreeMap, TreeMap, TreeMapSink};
+pub use treemap::{DynTreeMap, RangeIter, TreeMap, TreeMapSink};
 pub use treeset::{DynTreeSet, TreeSet, TreeSetSink};
 
 #[cfg(test)]

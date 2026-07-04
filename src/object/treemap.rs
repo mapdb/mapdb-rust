@@ -11,6 +11,7 @@ use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::range::Range;
 use std::cmp::Ordering;
 use std::fmt;
+use std::ops::{Bound as StdBound, RangeBounds};
 
 struct Node<K, V> {
     key: K,
@@ -347,6 +348,63 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
             }
         }
         rank
+    }
+
+    /// Number of keys `<= key` under the tree's comparator (the upper-bound
+    /// count; `rank` is the strict lower-bound count `<`). O(log n) via the
+    /// subtree-size augmentation.
+    fn count_le(&self, key: &K) -> usize {
+        let mut count = 0;
+        let mut current = &self.root;
+        while let Some(ref n) = current {
+            match self.cmp.compare(key, &n.key) {
+                Ordering::Less => current = &n.left,
+                Ordering::Greater => {
+                    count += 1 + node_size(&n.left);
+                    current = &n.right;
+                }
+                Ordering::Equal => return count + node_size(&n.left) + 1,
+            }
+        }
+        count
+    }
+
+    /// A lazy, **double-ended** iterator over the `(&K, &V)` entries whose key
+    /// falls in `range`, in ascending comparator order (`.rev()` for
+    /// descending).
+    ///
+    /// Bounds are any [`RangeBounds<K>`] — `map.range(a..=b)`, `map.range(..)`,
+    /// `map.range(a..)`, `map.range((Excluded(a), Unbounded))` — and are
+    /// compared through the map's **own comparator** `C`, so range selection can
+    /// never disagree with the tree's order (this is what designs away the
+    /// natural-order-only divergence of the legacy `Range<K>` methods).
+    ///
+    /// The iterator is [`ExactSizeIterator`]: the element count is precomputed
+    /// from the subtree-size augmentation at seek time, so iteration performs no
+    /// per-item bound comparison and the two ends can never cross.
+    ///
+    /// # Inverted / empty bounds
+    /// An inverted or empty range (`b..a` with `a < b`, or `a..a` exclusive)
+    /// yields **nothing** — it is treated as empty rather than a panic
+    /// (deliberately diverging from `std::collections::BTreeMap::range`, and
+    /// consistent with this crate's `Range<T>` "cut-empty is valid" model).
+    pub fn range<R: RangeBounds<K>>(&self, range: R) -> RangeIter<'_, K, V> {
+        let lo = match range.start_bound() {
+            StdBound::Unbounded => 0,
+            StdBound::Included(q) => self.rank(q),   // # keys strictly < q
+            StdBound::Excluded(q) => self.count_le(q), // # keys <= q
+        };
+        let hi = match range.end_bound() {
+            StdBound::Unbounded => self.size,
+            StdBound::Included(q) => self.count_le(q), // # keys <= q
+            StdBound::Excluded(q) => self.rank(q),     // # keys strictly < q
+        };
+        let remaining = hi.saturating_sub(lo); // inverted/empty -> 0
+        RangeIter {
+            front: seed_forward(&self.root, lo),
+            back: seed_backward(&self.root, hi.saturating_sub(1)),
+            remaining,
+        }
     }
 
     /// Returns the `i`-th smallest key (0-based), or `None` if `i >= len()`.
@@ -1100,8 +1158,113 @@ impl<'a, K, V> Iterator for TreeMapIter<'a, K, V> {
     }
 }
 
-/// Borrowing iteration in sorted order: `for (k, v) in &map`.
-///
+// ── Range iterator (double-ended, exact-size via the size augmentation) ──
+
+/// Seeds an ascending in-order stack whose top is the node at 0-based sorted
+/// index `i` (empty if `i >= len`). Ancestors visited later sit below it.
+fn seed_forward<K, V>(root: &Option<Box<Node<K, V>>>, mut i: usize) -> Vec<&Node<K, V>> {
+    let mut stack = Vec::new();
+    let mut current = root.as_deref();
+    while let Some(n) = current {
+        let l = node_size(&n.left);
+        match i.cmp(&l) {
+            Ordering::Less => {
+                stack.push(n);
+                current = n.left.as_deref();
+            }
+            Ordering::Equal => {
+                stack.push(n);
+                break;
+            }
+            Ordering::Greater => {
+                i -= l + 1;
+                current = n.right.as_deref();
+            }
+        }
+    }
+    stack
+}
+
+/// Seeds a descending (reverse in-order) stack whose top is the node at 0-based
+/// sorted index `j` (empty if the tree is empty; a too-large `j` clamps to the
+/// max element's path — harmless because `remaining` gates emission).
+fn seed_backward<K, V>(root: &Option<Box<Node<K, V>>>, mut j: usize) -> Vec<&Node<K, V>> {
+    let mut stack = Vec::new();
+    let mut current = root.as_deref();
+    while let Some(n) = current {
+        let l = node_size(&n.left);
+        match j.cmp(&l) {
+            Ordering::Greater => {
+                stack.push(n);
+                j -= l + 1;
+                current = n.right.as_deref();
+            }
+            Ordering::Equal => {
+                stack.push(n);
+                break;
+            }
+            Ordering::Less => {
+                current = n.left.as_deref();
+            }
+        }
+    }
+    stack
+}
+
+/// A lazy, double-ended, exact-size iterator over a key range of a [`TreeMap`],
+/// returned by [`TreeMap::range`]. Front and back share a `remaining` count
+/// (from the subtree-size augmentation), so the ends cannot cross and no
+/// per-item bound comparison is needed.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct RangeIter<'a, K, V> {
+    front: Vec<&'a Node<K, V>>,
+    back: Vec<&'a Node<K, V>>,
+    remaining: usize,
+}
+
+impl<'a, K, V> Iterator for RangeIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let n = self.front.pop()?;
+        // Push the left spine of the right child (in-order successor path).
+        let mut current = n.right.as_deref();
+        while let Some(x) = current {
+            self.front.push(x);
+            current = x.left.as_deref();
+        }
+        self.remaining -= 1;
+        Some((&n.key, &n.value))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<'a, K, V> DoubleEndedIterator for RangeIter<'a, K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let n = self.back.pop()?;
+        // Push the right spine of the left child (reverse in-order path).
+        let mut current = n.left.as_deref();
+        while let Some(x) = current {
+            self.back.push(x);
+            current = x.right.as_deref();
+        }
+        self.remaining -= 1;
+        Some((&n.key, &n.value))
+    }
+}
+
+impl<K, V> ExactSizeIterator for RangeIter<'_, K, V> {}
+impl<K, V> std::iter::FusedIterator for RangeIter<'_, K, V> {}
+
 /// Borrowing iteration in sorted order: `for (k, v) in &map`.
 impl<'a, K, V, C: Compare<K>> IntoIterator for &'a TreeMap<K, V, C> {
     type Item = (&'a K, &'a V);
@@ -1221,6 +1384,73 @@ mod tests {
 
         let keys: Vec<&i32> = m.keys().collect();
         assert_eq!(keys, vec![&3, &2, &1]);
+    }
+
+    #[test]
+    fn range_bounds_all_shapes() {
+        let m: TreeMap<i32, i32, Natural> = (0..10).map(|i| (i, i * 10)).collect();
+        let keys = |it: RangeIter<'_, i32, i32>| it.map(|(k, _)| *k).collect::<Vec<_>>();
+        assert_eq!(keys(m.range(3..7)), vec![3, 4, 5, 6]);
+        assert_eq!(keys(m.range(3..=7)), vec![3, 4, 5, 6, 7]);
+        assert_eq!(keys(m.range(..3)), vec![0, 1, 2]);
+        assert_eq!(keys(m.range(7..)), vec![7, 8, 9]);
+        assert_eq!(keys(m.range(..)), (0..10).collect::<Vec<_>>());
+        use std::ops::Bound::{Excluded, Unbounded};
+        assert_eq!(keys(m.range((Excluded(3), Unbounded))), vec![4, 5, 6, 7, 8, 9]);
+        // exact-size + double-ended.
+        let mut it = m.range(2..8);
+        assert_eq!(it.len(), 6);
+        assert_eq!(it.next().map(|(k, _)| *k), Some(2));
+        assert_eq!(it.next_back().map(|(k, _)| *k), Some(7));
+        assert_eq!(it.len(), 4);
+        // descending via .rev()
+        let desc: Vec<i32> = m.range(2..8).rev().map(|(k, _)| *k).collect();
+        assert_eq!(desc, vec![7, 6, 5, 4, 3, 2]);
+    }
+
+    #[test]
+    fn range_empty_and_inverted_are_empty_not_panic() {
+        let m: TreeMap<i32, i32, Natural> = (0..10).map(|i| (i, i)).collect();
+        assert_eq!(m.range(5..5).count(), 0); // empty
+        assert_eq!(m.range(8..2).count(), 0); // inverted -> empty, no panic
+        use std::ops::Bound::Excluded;
+        assert_eq!(m.range((Excluded(3), Excluded(4))).count(), 0); // (3,4) over ints
+        let empty: TreeMap<i32, i32, Natural> = TreeMap::natural();
+        assert_eq!(empty.range(..).count(), 0);
+    }
+
+    #[test]
+    fn range_is_comparator_correct_under_reverse() {
+        // The headline T4 win: range() compares bounds through the map's OWN
+        // comparator, so a reverse-ordered map ranges in reverse order — the
+        // exact case the legacy natural-order-only range_keys got wrong.
+        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        for k in 0..10 {
+            m.insert(k, k);
+        }
+        // Under reverse order the keys descend 9,8,..,0. range(7..=3) means
+        // "from 7 down to 3" in the map's order.
+        let got: Vec<i32> = m.range(7..=3).map(|(k, _)| *k).collect();
+        assert_eq!(got, vec![7, 6, 5, 4, 3]);
+        // Cross-check every element is exactly those the comparator places in
+        // [7,3] descending — and count matches ExactSize.
+        assert_eq!(m.range(7..=3).len(), 5);
+    }
+
+    #[test]
+    fn range_matches_naive_filter_randomized() {
+        // Differential check against a brute-force scan across many bounds.
+        let m: TreeMap<i32, i32, Natural> = (0..50).map(|i| (i * 2, i)).collect();
+        for lo in [-1i32, 0, 1, 10, 49, 98, 99] {
+            for hi in [-1i32, 0, 11, 50, 98, 100] {
+                let via_range: Vec<i32> = m.range(lo..hi).map(|(k, _)| *k).collect();
+                let naive: Vec<i32> = (0..50)
+                    .map(|i| i * 2)
+                    .filter(|k| *k >= lo && *k < hi)
+                    .collect();
+                assert_eq!(via_range, naive, "half-open [{lo},{hi})");
+            }
+        }
     }
 
     #[test]

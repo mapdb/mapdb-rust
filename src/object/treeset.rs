@@ -152,6 +152,18 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
         self.tree.keys()
     }
 
+    /// A lazy, double-ended, exact-size iterator over the elements in `range`,
+    /// ascending (`.rev()` for descending). Bounds are compared through the
+    /// set's **own comparator**, so selection can never disagree with the set
+    /// order (unlike the natural-order-only [`range_elements`](TreeSet::range_elements)).
+    /// See [`TreeMap::range`] for the inverted-bounds policy.
+    pub fn range<R: std::ops::RangeBounds<T>>(
+        &self,
+        range: R,
+    ) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator + '_ {
+        self.tree.range(range).map(|(k, _)| k)
+    }
+
     /// Collects all elements into a `Vec` in sorted order.
     pub fn to_vec(&self) -> Vec<&T> {
         self.iter().collect()
@@ -354,6 +366,18 @@ impl<T: Ord> Extend<T> for TreeSet<T, Natural> {
 mod tests {
     use super::*;
     use crate::object::strategy::*;
+
+    #[test]
+    fn range_bounds_double_ended() {
+        let s: TreeSet<i32, Natural> = (0..10).collect();
+        assert_eq!(s.range(3..7).copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
+        assert_eq!(s.range(3..=7).copied().collect::<Vec<_>>(), vec![3, 4, 5, 6, 7]);
+        assert_eq!(s.range(..).len(), 10);
+        assert_eq!(
+            s.range(2..8).rev().copied().collect::<Vec<_>>(),
+            vec![7, 6, 5, 4, 3, 2]
+        );
+    }
 
     #[test]
     fn natural_and_reverse_type_params() {

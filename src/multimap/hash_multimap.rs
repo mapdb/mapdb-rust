@@ -31,11 +31,8 @@ impl<K: Eq + Hash, V> Multimap<K, V> {
     }
 
     pub fn insert(&mut self, key: K, value: V) {
-        if let Some(bucket) = self.data.get_mut(&key) {
-            bucket.push(value);
-        } else {
-            self.data.insert(key, vec![value]);
-        }
+        // Single probe via the entry API (was contains+insert double-probe).
+        self.data.entry(key).or_default().push(value);
         self.size += 1;
     }
 

@@ -166,14 +166,14 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
     /// `value` for the same `key` is silently dropped. Dedupe is a
     /// linear scan of the existing bucket.
     pub fn insert(&mut self, key: K, value: V) {
-        if let Some(bucket) = self.data.get_mut(&key) {
-            if bucket.iter().any(|v| v == &value) {
-                return;
-            }
-            bucket.push(value);
-        } else {
-            self.data.insert(key, vec![value]);
+        // Single probe via the entry API; dedupe within the bucket (set
+        // semantics). A vacant key yields an empty bucket, so the first value is
+        // always pushed.
+        let bucket = self.data.entry(key).or_default();
+        if bucket.iter().any(|v| v == &value) {
+            return;
         }
+        bucket.push(value);
         self.size += 1;
     }
 

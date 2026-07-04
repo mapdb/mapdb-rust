@@ -197,6 +197,55 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         }
     }
 
+    /// Gets the [`Entry`] for `key` for in-place insert-or-update in a single
+    /// probe.
+    ///
+    /// ```
+    /// use mapdb_collections::OpenHashMap;
+    /// let mut counts: OpenHashMap<&str, i32> = OpenHashMap::new();
+    /// for w in ["a", "b", "a"] {
+    ///     *counts.entry(w).or_insert(0) += 1;
+    /// }
+    /// assert_eq!(counts.get(&"a"), Some(&2));
+    /// ```
+    ///
+    /// # Growth
+    /// Like [`insert`](OpenHashMap::insert), `entry` resolves a pending resize
+    /// **before** probing (so the returned slot index stays valid for the
+    /// entry's lifetime). A consequence — matching `std` and this map's own
+    /// `insert` — is that calling `entry` at the load-factor threshold grows the
+    /// table **even if the key already exists and you only read it**. An
+    /// `and_modify`-only use may therefore reallocate.
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S> {
+        // Resolve resize BEFORE computing the index (same order as `insert`), so
+        // the slot the entry captures cannot be invalidated by a later grow and
+        // the resulting table is byte-identical to the `insert`-built one.
+        if self.needs_resize() {
+            self.resize();
+        }
+        let mask = self.mask();
+        let mut idx = (self.hash(&key) as usize) & mask;
+        // Probe to either the matching key or the first empty slot, recording
+        // which. `idx` is a plain `usize`, so the transient borrow of `entries`
+        // ends before we move `self` into the entry.
+        let occupied = loop {
+            match &self.entries[idx] {
+                MapSlot::Empty => break false,
+                MapSlot::Occupied { key: k, .. } if *k == key => break true,
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
+            }
+        };
+        if occupied {
+            Entry::Occupied(OccupiedEntry { map: self, idx })
+        } else {
+            Entry::Vacant(VacantEntry {
+                map: self,
+                key,
+                idx,
+            })
+        }
+    }
+
     /// Borrows the value for `key`.
     ///
     /// Accepts any borrowed form `&Q` of the key (`K: Borrow<Q>`), so a
@@ -464,6 +513,181 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             map.bulk_insert(k, v, dup, index)?;
         }
         Ok(map)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entry API
+// ---------------------------------------------------------------------------
+
+/// A view into a single map slot, obtained from [`OpenHashMap::entry`].
+///
+/// This is safe on the backward-shift kernel without generation counters: the
+/// entry borrows the map `&mut`, so the borrow checker makes any intervening
+/// mutation (the only thing that could invalidate the captured slot index)
+/// unrepresentable — a resize was already resolved by `entry`, and the one
+/// operation that shifts slots, [`OccupiedEntry::remove`], consumes the entry.
+#[must_use]
+pub enum Entry<'a, K, V, S> {
+    /// The key is present.
+    Occupied(OccupiedEntry<'a, K, V, S>),
+    /// The key is absent; the captured slot is empty and ready to receive it.
+    Vacant(VacantEntry<'a, K, V, S>),
+}
+
+/// An occupied [`Entry`].
+pub struct OccupiedEntry<'a, K, V, S> {
+    map: &'a mut OpenHashMap<K, V, S>,
+    idx: usize,
+}
+
+/// A vacant [`Entry`].
+pub struct VacantEntry<'a, K, V, S> {
+    map: &'a mut OpenHashMap<K, V, S>,
+    key: K,
+    idx: usize,
+}
+
+impl<'a, K: Hash + Eq, V, S: BuildHasher> OccupiedEntry<'a, K, V, S> {
+    #[inline]
+    fn slot(&self) -> (&K, &V) {
+        match &self.map.entries[self.idx] {
+            MapSlot::Occupied { key, value } => (key, value),
+            MapSlot::Empty => unreachable!("OccupiedEntry over an empty slot"),
+        }
+    }
+
+    /// The key in this entry.
+    pub fn key(&self) -> &K {
+        self.slot().0
+    }
+
+    /// Borrows the value.
+    pub fn get(&self) -> &V {
+        self.slot().1
+    }
+
+    /// Mutably borrows the value.
+    pub fn get_mut(&mut self) -> &mut V {
+        match &mut self.map.entries[self.idx] {
+            MapSlot::Occupied { value, .. } => value,
+            MapSlot::Empty => unreachable!("OccupiedEntry over an empty slot"),
+        }
+    }
+
+    /// Converts into a mutable reference to the value with the map's lifetime.
+    pub fn into_mut(self) -> &'a mut V {
+        match &mut self.map.entries[self.idx] {
+            MapSlot::Occupied { value, .. } => value,
+            MapSlot::Empty => unreachable!("OccupiedEntry over an empty slot"),
+        }
+    }
+
+    /// Replaces the value, returning the old one.
+    pub fn insert(&mut self, value: V) -> V {
+        std::mem::replace(self.get_mut(), value)
+    }
+
+    /// Removes the entry and returns its `(key, value)`. Runs the same
+    /// backward-shift as [`OpenHashMap::remove`], keeping the table
+    /// tombstone-free.
+    pub fn remove_entry(self) -> (K, V) {
+        let taken = std::mem::replace(&mut self.map.entries[self.idx], MapSlot::Empty);
+        self.map.size -= 1;
+        self.map.rehash_from(self.idx);
+        match taken {
+            MapSlot::Occupied { key, value } => (key, value),
+            MapSlot::Empty => unreachable!("OccupiedEntry over an empty slot"),
+        }
+    }
+
+    /// Removes the entry and returns its value.
+    pub fn remove(self) -> V {
+        self.remove_entry().1
+    }
+}
+
+impl<'a, K: Hash + Eq, V, S: BuildHasher> VacantEntry<'a, K, V, S> {
+    /// The key that would be inserted.
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+
+    /// Takes back ownership of the key.
+    pub fn into_key(self) -> K {
+        self.key
+    }
+
+    /// Inserts `value` into the captured empty slot and returns a mutable
+    /// reference to it. No re-probe or resize: `entry` already resolved growth
+    /// and located the empty slot, and the `&mut` borrow guaranteed nothing
+    /// changed since.
+    pub fn insert(self, value: V) -> &'a mut V {
+        debug_assert!(matches!(self.map.entries[self.idx], MapSlot::Empty));
+        self.map.entries[self.idx] = MapSlot::Occupied {
+            key: self.key,
+            value,
+        };
+        self.map.size += 1;
+        match &mut self.map.entries[self.idx] {
+            MapSlot::Occupied { value, .. } => value,
+            MapSlot::Empty => unreachable!(),
+        }
+    }
+}
+
+impl<'a, K: Hash + Eq, V, S: BuildHasher> Entry<'a, K, V, S> {
+    /// The key for this entry (present or to-be-inserted).
+    pub fn key(&self) -> &K {
+        match self {
+            Entry::Occupied(e) => e.key(),
+            Entry::Vacant(e) => e.key(),
+        }
+    }
+
+    /// Ensures a value is present, inserting `default` if vacant; returns a
+    /// mutable reference to the value.
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default),
+        }
+    }
+
+    /// Like [`or_insert`](Entry::or_insert) but computes the default lazily.
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default()),
+        }
+    }
+
+    /// Like [`or_insert_with`](Entry::or_insert_with) but the closure receives
+    /// the key.
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let value = default(&e.key);
+                e.insert(value)
+            }
+        }
+    }
+
+    /// Runs `f` on the value if the entry is occupied, then returns the entry
+    /// for chaining (e.g. `.and_modify(|v| *v += 1).or_insert(1)`).
+    pub fn and_modify<F: FnOnce(&mut V)>(mut self, f: F) -> Self {
+        if let Entry::Occupied(e) = &mut self {
+            f(e.get_mut());
+        }
+        self
+    }
+}
+
+impl<'a, K: Hash + Eq, V: Default, S: BuildHasher> Entry<'a, K, V, S> {
+    /// Ensures a value is present, inserting `V::default()` if vacant.
+    pub fn or_default(self) -> &'a mut V {
+        self.or_insert_with(V::default)
     }
 }
 
@@ -1454,6 +1678,95 @@ mod tests {
                 _ => panic!("slot layout differs between bulk and incremental"),
             }
         }
+    }
+
+    #[test]
+    fn entry_built_byte_identical_to_insert_built() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::BuildHasherDefault;
+        type Fixed = BuildHasherDefault<DefaultHasher>;
+        let data: Vec<(i32, i32)> = (0..200i32).map(|i| (i * 7 + 1, i)).collect();
+
+        let mut via_insert: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        for (k, v) in &data {
+            via_insert.insert(*k, *v);
+        }
+        let mut via_entry: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        for (k, v) in &data {
+            via_entry.entry(*k).or_insert(*v);
+        }
+
+        assert_eq!(via_insert.len(), via_entry.len());
+        assert_eq!(via_insert.entries.len(), via_entry.entries.len());
+        for (a, b) in via_insert.entries.iter().zip(via_entry.entries.iter()) {
+            match (a, b) {
+                (MapSlot::Empty, MapSlot::Empty) => {}
+                (
+                    MapSlot::Occupied { key: ka, value: va },
+                    MapSlot::Occupied { key: kb, value: vb },
+                ) => assert_eq!((ka, va), (kb, vb)),
+                _ => panic!("entry-built and insert-built slot layouts differ"),
+            }
+        }
+    }
+
+    #[test]
+    fn entry_or_insert_and_and_modify() {
+        let mut m: OpenHashMap<&str, i32> = OpenHashMap::new();
+        for w in ["a", "b", "a", "a", "b", "c"] {
+            m.entry(w).and_modify(|c| *c += 1).or_insert(1);
+        }
+        assert_eq!(m.get(&"a"), Some(&3));
+        assert_eq!(m.get(&"b"), Some(&2));
+        assert_eq!(m.get(&"c"), Some(&1));
+        // or_insert on an existing key does not overwrite.
+        assert_eq!(*m.entry("a").or_insert(999), 3);
+        // or_default.
+        *m.entry("d").or_default() += 5;
+        assert_eq!(m.get(&"d"), Some(&5));
+    }
+
+    #[test]
+    fn entry_remove_matches_remove() {
+        // An OccupiedEntry::remove must backward-shift exactly like remove(),
+        // leaving the table probe-consistent for the displaced keys.
+        let mut via_entry: OpenHashMap<i32, i32> = (0..50).map(|i| (i, i * 2)).collect();
+        let mut via_remove: OpenHashMap<i32, i32> = (0..50).map(|i| (i, i * 2)).collect();
+        for k in [7, 13, 0, 49, 25] {
+            let removed = match via_entry.entry(k) {
+                Entry::Occupied(e) => Some(e.remove()),
+                Entry::Vacant(_) => None,
+            };
+            assert_eq!(removed, via_remove.remove(&k));
+        }
+        // Both maps must still answer every surviving key correctly.
+        for k in 0..50 {
+            assert_eq!(via_entry.get(&k), via_remove.get(&k), "mismatch at {k}");
+        }
+        assert_eq!(via_entry.len(), via_remove.len());
+    }
+
+    #[test]
+    fn entry_at_load_threshold_grows_even_for_existing_key() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::BuildHasherDefault;
+        type Fixed = BuildHasherDefault<DefaultHasher>;
+        let mut m: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        let mut k = 0;
+        while !m.needs_resize() {
+            m.insert(k, k);
+            k += 1;
+        }
+        let existing = k - 1; // last inserted key is present
+        let cap_before = m.entries.len();
+        // Reading an existing key through `entry` at the threshold still grows,
+        // matching insert()'s resolve-resize-first contract (documented).
+        let v = *m.entry(existing).or_insert(-1);
+        assert!(
+            m.entries.len() > cap_before,
+            "entry at the load threshold must grow the table like insert"
+        );
+        assert_eq!(v, existing, "or_insert must not overwrite an existing value");
     }
 
     #[test]

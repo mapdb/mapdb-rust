@@ -47,7 +47,7 @@ pub use bounded_lru::{BoundedLruMap, BoundedLruMapBuilder, EvictionCause};
 pub use bulk::{BulkError, DuplicatePolicy};
 pub use count_min::CountMin;
 pub use fenwick::FenwickTree;
-pub use hash_table::{OpenHashMap, OpenHashSet};
+pub use hash_table::{Entry, OccupiedEntry, OpenHashMap, OpenHashSet, VacantEntry};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use hyperloglog::{HllError, HyperLogLog};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};

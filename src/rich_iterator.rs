@@ -82,12 +82,7 @@ pub trait RichIterator: Iterator + Sized {
         let mut map: OpenHashMap<K, Vec<Self::Item>> = OpenHashMap::new();
         for item in self {
             let k = key_fn(&item);
-            match map.get_mut(&k) {
-                Some(bucket) => bucket.push(item),
-                None => {
-                    map.insert(k, vec![item]);
-                }
-            }
+            map.entry(k).or_default().push(item);
         }
         map
     }
@@ -104,12 +99,7 @@ pub trait RichIterator: Iterator + Sized {
         let mut map: OpenHashMap<K, Vec<Self::Item>> = OpenHashMap::new();
         for item in self {
             for k in key_fn(&item) {
-                match map.get_mut(&k) {
-                    Some(bucket) => bucket.push(item.clone()),
-                    None => {
-                        map.insert(k, vec![item.clone()]);
-                    }
-                }
+                map.entry(k).or_default().push(item.clone());
             }
         }
         map

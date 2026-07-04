@@ -147,6 +147,45 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
         }
     }
 
+    /// Get the [`Entry`] for `key` for in-place insert-or-update in a single
+    /// probe, without a `contains`-then-`insert` double lookup.
+    ///
+    /// ```
+    /// use mapdb_collections::object::LinkedHashMap;
+    /// let mut counts: LinkedHashMap<&str, i32> = LinkedHashMap::new();
+    /// for w in ["a", "b", "a"] {
+    ///     *counts.entry(w).or_insert(0) += 1;
+    /// }
+    /// assert_eq!(counts.get(&"a"), Some(&2));
+    /// ```
+    ///
+    /// # Ordering and growth
+    /// A vacant entry that is filled appends the key (insertion order), exactly
+    /// like [`insert`](Self::insert). Like `insert`, `entry` resolves a pending
+    /// index resize **before** probing, so the captured cell/slot stays valid for
+    /// the entry's `&mut` lifetime; an `and_modify`-only use on a key already
+    /// present may therefore still grow the index.
+    pub fn entry(&mut self, key: K) -> Entry<'_, K, V, S> {
+        let hash = self.index.hash(&key);
+        let slots = &self.slots;
+        // Disjoint-field borrow: the `eq` closure reads `slots` while `probe`
+        // mutates `index`; the transient `slots` borrow ends when `probe`
+        // returns, before `self` moves into the entry (same shape as `insert`).
+        match self.index.probe(hash, |s| slots.get(s).0 == key) {
+            RawEntry::Occupied(slot) => Entry::Occupied(OccupiedEntry {
+                map: self,
+                slot,
+                hash,
+            }),
+            RawEntry::Vacant(cell) => Entry::Vacant(VacantEntry {
+                map: self,
+                key,
+                hash,
+                cell,
+            }),
+        }
+    }
+
     /// Remove `key`, returning its value. O(1): unlink the slot and recycle it;
     /// the positions of all other entries are unchanged. Accepts any borrowed
     /// form of the key.
@@ -328,6 +367,163 @@ impl<K: Eq + Hash, V: PartialEq, S: BuildHasher> PartialEq for LinkedHashMap<K, 
 }
 
 impl<K: Eq + Hash, V: Eq, S: BuildHasher> Eq for LinkedHashMap<K, V, S> {}
+
+// ---- Entry API -------------------------------------------------------------
+
+/// A view into a single entry, obtained from [`LinkedHashMap::entry`].
+///
+/// The entry borrows the map `&mut`, so the borrow checker forbids any
+/// intervening mutation between obtaining it and using it. Because arena slot
+/// indices are **stable** (they never shift, unlike open-addressing cells), an
+/// [`OccupiedEntry`] can hold its slot directly; the only index resize was
+/// already resolved by [`entry`](LinkedHashMap::entry), and [`OccupiedEntry`]'s
+/// removal — the one operation that reshuffles the index — consumes the entry.
+#[must_use]
+pub enum Entry<'a, K, V, S> {
+    /// The key is present.
+    Occupied(OccupiedEntry<'a, K, V, S>),
+    /// The key is absent; the captured index cell is empty and ready to receive
+    /// a freshly appended arena slot.
+    Vacant(VacantEntry<'a, K, V, S>),
+}
+
+/// An occupied [`Entry`]. Holds the entry's stable arena `slot` and its key
+/// `hash` (so removal can locate the index cell without re-running user code).
+pub struct OccupiedEntry<'a, K, V, S> {
+    map: &'a mut LinkedHashMap<K, V, S>,
+    slot: usize,
+    hash: u64,
+}
+
+/// A vacant [`Entry`]. Owns the `key` to be inserted, its `hash`, and the empty
+/// index `cell` located by the probe.
+pub struct VacantEntry<'a, K, V, S> {
+    map: &'a mut LinkedHashMap<K, V, S>,
+    key: K,
+    hash: u64,
+    cell: usize,
+}
+
+impl<'a, K: Eq + Hash, V, S: BuildHasher> OccupiedEntry<'a, K, V, S> {
+    /// The key in this entry.
+    pub fn key(&self) -> &K {
+        &self.map.slots.get(self.slot).0
+    }
+
+    /// Borrows the value.
+    pub fn get(&self) -> &V {
+        &self.map.slots.get(self.slot).1
+    }
+
+    /// Mutably borrows the value.
+    pub fn get_mut(&mut self) -> &mut V {
+        &mut self.map.slots.get_mut(self.slot).1
+    }
+
+    /// Converts into a mutable reference to the value with the map's lifetime.
+    pub fn into_mut(self) -> &'a mut V {
+        &mut self.map.slots.get_mut(self.slot).1
+    }
+
+    /// Replaces the value, returning the old one.
+    pub fn insert(&mut self, value: V) -> V {
+        std::mem::replace(self.get_mut(), value)
+    }
+
+    /// Removes the entry and returns its `(key, value)`. O(1): the stored `hash`
+    /// plus an exact-slot match locate the index cell, then the arena slot is
+    /// unlinked and recycled — the positions of all other entries are unchanged.
+    pub fn remove_entry(self) -> (K, V) {
+        let slot = self.slot;
+        // The stored hash is the key's hash (fill_vacant recorded it), and the
+        // slot uniquely identifies the cell, so `eq` need not touch the key.
+        let removed = self.map.index.remove(self.hash, |s| s == slot);
+        debug_assert_eq!(removed, Some(slot));
+        self.map.slots.unlink_free(slot)
+    }
+
+    /// Removes the entry and returns its value.
+    pub fn remove(self) -> V {
+        self.remove_entry().1
+    }
+}
+
+impl<'a, K: Eq + Hash, V, S: BuildHasher> VacantEntry<'a, K, V, S> {
+    /// The key that would be inserted.
+    pub fn key(&self) -> &K {
+        &self.key
+    }
+
+    /// Takes back ownership of the key.
+    pub fn into_key(self) -> K {
+        self.key
+    }
+
+    /// Appends `(key, value)` to the arena and points the captured index cell at
+    /// it, returning a mutable reference to the value. No re-probe or resize:
+    /// `entry` already resolved growth and located the empty cell, and the `&mut`
+    /// borrow guaranteed nothing changed since.
+    pub fn insert(self, value: V) -> &'a mut V {
+        let slot = self.map.slots.push_back((self.key, value));
+        self.map.index.fill_vacant(self.cell, self.hash, slot);
+        &mut self.map.slots.get_mut(slot).1
+    }
+}
+
+impl<'a, K: Eq + Hash, V, S: BuildHasher> Entry<'a, K, V, S> {
+    /// The key for this entry (present or to-be-inserted).
+    pub fn key(&self) -> &K {
+        match self {
+            Entry::Occupied(e) => e.key(),
+            Entry::Vacant(e) => e.key(),
+        }
+    }
+
+    /// Ensures a value is present, inserting `default` if vacant; returns a
+    /// mutable reference to the value.
+    pub fn or_insert(self, default: V) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default),
+        }
+    }
+
+    /// Like [`or_insert`](Entry::or_insert) but computes the default lazily.
+    pub fn or_insert_with<F: FnOnce() -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => e.insert(default()),
+        }
+    }
+
+    /// Like [`or_insert_with`](Entry::or_insert_with) but the closure receives
+    /// the key.
+    pub fn or_insert_with_key<F: FnOnce(&K) -> V>(self, default: F) -> &'a mut V {
+        match self {
+            Entry::Occupied(e) => e.into_mut(),
+            Entry::Vacant(e) => {
+                let value = default(&e.key);
+                e.insert(value)
+            }
+        }
+    }
+
+    /// Runs `f` on the value if the entry is occupied, then returns the entry
+    /// for chaining (e.g. `.and_modify(|v| *v += 1).or_insert(1)`).
+    pub fn and_modify<F: FnOnce(&mut V)>(mut self, f: F) -> Self {
+        if let Entry::Occupied(e) = &mut self {
+            f(e.get_mut());
+        }
+        self
+    }
+}
+
+impl<'a, K: Eq + Hash, V: Default, S: BuildHasher> Entry<'a, K, V, S> {
+    /// Ensures a value is present, inserting `V::default()` if vacant.
+    pub fn or_default(self) -> &'a mut V {
+        self.or_insert_with(V::default)
+    }
+}
 
 // ---- iterators -------------------------------------------------------------
 
@@ -658,5 +854,108 @@ mod tests {
         // Full order + content agreement at the end.
         let map_pairs: Vec<(i32, i32)> = map.iter().map(|(k, v)| (*k, *v)).collect();
         assert_eq!(map_pairs, model);
+    }
+
+    // ---- entry API -----------------------------------------------------
+
+    #[test]
+    fn entry_or_insert_and_and_modify() {
+        let mut m: LinkedHashMap<&str, i32> = LinkedHashMap::new();
+        for w in ["a", "b", "a", "c", "b", "a"] {
+            m.entry(w).and_modify(|c| *c += 1).or_insert(1);
+        }
+        assert_eq!(m.get(&"a"), Some(&3));
+        assert_eq!(m.get(&"b"), Some(&2));
+        assert_eq!(m.get(&"c"), Some(&1));
+        // or_insert on an existing key does not overwrite.
+        assert_eq!(*m.entry("a").or_insert(999), 3);
+        // or_default appends with the default.
+        *m.entry("d").or_default() += 5;
+        assert_eq!(m.get(&"d"), Some(&5));
+    }
+
+    #[test]
+    fn entry_appends_in_insertion_order() {
+        // A vacant entry that is filled must append (same as insert); an
+        // occupied entry must keep the key's original position.
+        let mut m: LinkedHashMap<&str, i32> = LinkedHashMap::new();
+        m.entry("a").or_insert(1);
+        m.entry("b").or_insert(2);
+        m.entry("c").or_insert(3);
+        *m.entry("a").or_insert(0) += 100; // occupied: position unchanged
+        m.entry("d").or_insert(4); // vacant: appended
+        assert_eq!(
+            m.keys().copied().collect::<Vec<_>>(),
+            vec!["a", "b", "c", "d"]
+        );
+        assert_eq!(m.get(&"a"), Some(&101));
+    }
+
+    #[test]
+    fn entry_or_insert_with_key() {
+        let mut m: LinkedHashMap<String, usize> = LinkedHashMap::new();
+        let v = m.entry("hello".to_string()).or_insert_with_key(|k| k.len());
+        assert_eq!(*v, 5);
+        // Occupied path ignores the closure.
+        let v = m.entry("hello".to_string()).or_insert_with_key(|_| 999);
+        assert_eq!(*v, 5);
+    }
+
+    #[test]
+    fn occupied_entry_remove_preserves_order_and_recycles() {
+        let mut m: LinkedHashMap<i32, i32> = LinkedHashMap::new();
+        for k in 0..6 {
+            m.insert(k, k * 10);
+        }
+        match m.entry(2) {
+            Entry::Occupied(e) => {
+                assert_eq!(e.key(), &2);
+                assert_eq!(e.get(), &20);
+                assert_eq!(e.remove_entry(), (2, 20));
+            }
+            Entry::Vacant(_) => panic!("expected occupied"),
+        }
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![0, 1, 3, 4, 5]);
+        assert_eq!(m.len(), 5);
+        // The freed slot must be reusable and the index still consistent.
+        m.insert(2, 222);
+        assert_eq!(m.get(&2), Some(&222));
+        assert_eq!(
+            m.keys().copied().collect::<Vec<_>>(),
+            vec![0, 1, 3, 4, 5, 2]
+        );
+    }
+
+    #[test]
+    fn vacant_entry_into_key_returns_ownership() {
+        let mut m: LinkedHashMap<String, i32> = LinkedHashMap::new();
+        match m.entry("gone".to_string()) {
+            Entry::Vacant(e) => {
+                assert_eq!(e.key(), "gone");
+                assert_eq!(e.into_key(), "gone".to_string());
+            }
+            Entry::Occupied(_) => panic!("expected vacant"),
+        }
+        // Nothing was inserted.
+        assert!(m.is_empty());
+    }
+
+    /// `entry(k).or_insert(v)` must build the exact same map (content + order)
+    /// as `insert(k, v)` over an identical op stream, including churn/resize.
+    #[test]
+    fn entry_built_matches_insert_built() {
+        let mut via_insert: LinkedHashMap<i32, i32> = LinkedHashMap::new();
+        let mut via_entry: LinkedHashMap<i32, i32> = LinkedHashMap::new();
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        for _ in 0..5_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let k = ((state >> 33) % 128) as i32;
+            let v = ((state >> 20) & 0xFFFF) as i32;
+            via_insert.insert(k, v);
+            *via_entry.entry(k).or_insert(0) = v; // overwrite to match insert
+        }
+        let a: Vec<(i32, i32)> = via_insert.iter().map(|(k, v)| (*k, *v)).collect();
+        let b: Vec<(i32, i32)> = via_entry.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(a, b);
     }
 }

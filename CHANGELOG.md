@@ -4,6 +4,19 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
+## [Unreleased] — additive: `entry` on `LinkedHashMap`
+
+- **`LinkedHashMap::entry(key)`** — the standard `Entry` API (`or_insert`,
+  `or_insert_with`, `or_insert_with_key`, `or_default`, `and_modify`, plus
+  `Occupied`/`Vacant` with `key` / `get` / `get_mut` / `into_mut` / `insert` /
+  `remove` / `remove_entry` / `into_key`), matching `OpenHashMap::entry`. Does
+  the insert-or-update in a **single probe** instead of `contains_key` +
+  `insert`. Filling a vacant entry appends in insertion order, exactly like
+  `insert`; mutating an occupied entry keeps the key's position. Built on the
+  `SlotList` + `IndexTable` kernel: an `OccupiedEntry` holds the entry's stable
+  arena slot and key hash, so `remove_entry` locates the index cell by an
+  exact-slot match without re-running user `Eq`. Purely additive.
+
 ## [Unreleased] — kernel consolidation (T9 / M4–M6 tails)
 
 Internal follow-ups on `feat/rust-v3-hashbag-kernel` that fold the remaining

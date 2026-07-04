@@ -1733,11 +1733,13 @@ mod tests {
         type Fixed = BuildHasherDefault<DefaultHasher>;
         let data: Vec<(i32, i32)> = (0..200i32).map(|i| (i * 7 + 1, i)).collect();
 
-        let mut via_insert: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        let mut via_insert: OpenHashMap<i32, i32, Fixed> =
+            OpenHashMap::with_hasher(Fixed::default());
         for (k, v) in &data {
             via_insert.insert(*k, *v);
         }
-        let mut via_entry: OpenHashMap<i32, i32, Fixed> = OpenHashMap::with_hasher(Fixed::default());
+        let mut via_entry: OpenHashMap<i32, i32, Fixed> =
+            OpenHashMap::with_hasher(Fixed::default());
         for (k, v) in &data {
             via_entry.entry(*k).or_insert(*v);
         }
@@ -1812,7 +1814,10 @@ mod tests {
             m.entries.len() > cap_before,
             "entry at the load threshold must grow the table like insert"
         );
-        assert_eq!(v, existing, "or_insert must not overwrite an existing value");
+        assert_eq!(
+            v, existing,
+            "or_insert must not overwrite an existing value"
+        );
     }
 
     #[test]

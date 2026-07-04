@@ -35,7 +35,7 @@ pub use linkedhashset::LinkedHashSet;
 pub use strategy::{
     by_field, case_insensitive_hashing_strategy, comparator_by_field, comparator_by_field_with,
     natural_comparator, reverse_comparator, reversed, string_hashing_strategy, then_comparing,
-    Compare, Comparator, FnCmp, HashingStrategy, Natural, Reverse,
+    Comparator, Compare, FnCmp, HashingStrategy, Natural, Reverse,
 };
 pub use strategy_hashmap::HashMapWithStrategy;
 pub use strategy_hashset::HashSetWithStrategy;

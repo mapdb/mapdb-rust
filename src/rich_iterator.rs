@@ -239,11 +239,11 @@ pub trait RichIterator: Iterator + Sized {
 
     /// `true` if no element satisfies `pred` (Eclipse `noneSatisfy`).
     #[inline]
-    fn none_satisfy<P>(&mut self, mut pred: P) -> bool
+    fn none_satisfy<P>(&mut self, pred: P) -> bool
     where
         P: FnMut(Self::Item) -> bool,
     {
-        !self.any(|x| pred(x))
+        !self.any(pred)
     }
 
     /// Folds `init` over the elements with `f` (Eclipse `injectInto`; alias of
@@ -285,12 +285,8 @@ where
     type Item = I::Item;
 
     fn next(&mut self) -> Option<I::Item> {
-        for item in self.it.by_ref() {
-            if (self.pred)(&item) {
-                return Some(item);
-            }
-        }
-        None
+        let pred = &mut self.pred;
+        self.it.by_ref().find(|item| pred(item))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -304,12 +300,8 @@ where
     P: FnMut(&I::Item) -> bool,
 {
     fn next_back(&mut self) -> Option<I::Item> {
-        while let Some(item) = self.it.next_back() {
-            if (self.pred)(&item) {
-                return Some(item);
-            }
-        }
-        None
+        let pred = &mut self.pred;
+        self.it.by_ref().rfind(|item| pred(item))
     }
 }
 
@@ -337,12 +329,8 @@ where
     type Item = I::Item;
 
     fn next(&mut self) -> Option<I::Item> {
-        for item in self.it.by_ref() {
-            if !(self.pred)(&item) {
-                return Some(item);
-            }
-        }
-        None
+        let pred = &mut self.pred;
+        self.it.by_ref().find(|item| !pred(item))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -356,12 +344,8 @@ where
     P: FnMut(&I::Item) -> bool,
 {
     fn next_back(&mut self) -> Option<I::Item> {
-        while let Some(item) = self.it.next_back() {
-            if !(self.pred)(&item) {
-                return Some(item);
-            }
-        }
-        None
+        let pred = &mut self.pred;
+        self.it.by_ref().rfind(|item| !pred(item))
     }
 }
 

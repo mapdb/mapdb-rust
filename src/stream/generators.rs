@@ -36,7 +36,10 @@ macro_rules! impl_step_one {
 impl_step_one!(u8, u16, u32, u64, u128, usize, i8, i16, i32, i64, i128, isize);
 
 /// Creates an iterator that yields values from start (inclusive) to end (exclusive).
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn range<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
     let one = T::one();
     let initial = if start < end { Some(start) } else { None };
@@ -51,7 +54,10 @@ pub fn range<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
 }
 
 /// Creates an iterator that yields values from start to end (both inclusive).
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn range_closed<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
     let one = T::one();
     let mut done = false;
@@ -75,31 +81,46 @@ pub fn range_closed<T: StepOne>(start: T, end: T) -> impl Iterator<Item = T> {
 }
 
 /// Creates an iterator that repeats a value n times.
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn repeat<T: Clone>(value: T, n: usize) -> impl Iterator<Item = T> {
     std::iter::repeat_n(value, n)
 }
 
 /// Creates an infinite iterator from a seed and a function.
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn iterate<T: Clone>(seed: T, f: impl Fn(&T) -> T) -> impl Iterator<Item = T> {
     std::iter::successors(Some(seed), move |prev| Some(f(prev)))
 }
 
 /// Creates an iterator from a supplier function that is called for each element.
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn generate<T>(mut supplier: impl FnMut() -> T) -> impl Iterator<Item = T> {
     std::iter::from_fn(move || Some(supplier()))
 }
 
 /// Creates an iterator from the given values.
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn of<T>(values: Vec<T>) -> impl Iterator<Item = T> {
     values.into_iter()
 }
 
 /// Creates an empty iterator.
-#[deprecated(since = "0.3.0", note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "use std iterator constructors (a..b, iter::successors/from_fn/repeat_n/empty); see the `stream` module docs"
+)]
 pub fn empty<T>() -> impl Iterator<Item = T> {
     std::iter::empty()
 }

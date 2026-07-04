@@ -16,7 +16,10 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 /// Groups elements by a key function, returning a HashMap of key -> Vec<V>.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn group_by<V, K: Eq + Hash>(
     iter: impl Iterator<Item = V>,
     key_fn: impl Fn(&V) -> K,
@@ -31,7 +34,10 @@ pub fn group_by<V, K: Eq + Hash>(
 
 /// Partitions elements into two Vecs based on a predicate.
 /// Returns (matching, non_matching).
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn partition<V>(
     iter: impl Iterator<Item = V>,
     predicate: impl Fn(&V) -> bool,
@@ -49,14 +55,20 @@ pub fn partition<V>(
 }
 
 /// Joins string elements with a separator.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn joining(iter: impl Iterator<Item = String>, separator: &str) -> String {
     let parts: Vec<String> = iter.collect();
     parts.join(separator)
 }
 
 /// Joins string elements with separator, prefix, and suffix.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn joining_with(
     iter: impl Iterator<Item = String>,
     separator: &str,
@@ -68,7 +80,10 @@ pub fn joining_with(
 }
 
 /// Collects into a HashMap using key and value extractor functions.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn to_map_by<V, K: Eq + Hash, MV>(
     iter: impl Iterator<Item = V>,
     key_fn: impl Fn(&V) -> K,
@@ -82,7 +97,10 @@ pub fn to_map_by<V, K: Eq + Hash, MV>(
 }
 
 /// Sums values extracted from elements.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn sum_by<V, N>(iter: impl Iterator<Item = V>, extract: impl Fn(&V) -> N) -> N
 where
     N: std::ops::Add<Output = N> + Default,
@@ -91,20 +109,29 @@ where
 }
 
 /// Returns the minimum element by a comparison function.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn min_by<V>(iter: impl Iterator<Item = V>, less: impl Fn(&V, &V) -> bool) -> Option<V> {
     iter.reduce(|a, b| if less(&b, &a) { b } else { a })
 }
 
 /// Returns the maximum element by a comparison function.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn max_by<V>(iter: impl Iterator<Item = V>, less: impl Fn(&V, &V) -> bool) -> Option<V> {
     iter.reduce(|a, b| if less(&a, &b) { b } else { a })
 }
 
 /// Collects elements into fixed-size chunks. The final chunk may be shorter
 /// than `size`. Panics if `size == 0`.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn chunked<V>(iter: impl Iterator<Item = V>, size: usize) -> Vec<Vec<V>> {
     assert!(size > 0, "chunked: size must be > 0");
     let mut result: Vec<Vec<V>> = Vec::new();
@@ -124,7 +151,10 @@ pub fn chunked<V>(iter: impl Iterator<Item = V>, size: usize) -> Vec<Vec<V>> {
 /// Partitions elements by a key function, returning a HashMap of
 /// key -> Vec<V>. Alias for `group_by` matching the Eclipse Collections
 /// naming. Retained for API symmetry with `partition`.
-#[deprecated(since = "0.3.0", note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs")]
+#[deprecated(
+    since = "0.3.0",
+    note = "superseded by the `RichIterator` extension trait (crate::rich_iterator); see the `stream` module docs"
+)]
 pub fn group_by_each<V, K: Eq + Hash>(
     iter: impl Iterator<Item = V>,
     key_fn: impl Fn(&V) -> Vec<K>,

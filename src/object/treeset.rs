@@ -6,7 +6,7 @@
 
 //! Sorted set backed by a [`TreeMap`] with pluggable [`Comparator`].
 
-use super::strategy::{Compare, Comparator, Natural};
+use super::strategy::{Comparator, Compare, Natural};
 use super::treemap::{TreeMap, TreeMapSink};
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::range::Range;
@@ -187,7 +187,6 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
     pub fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<&T> {
         self.iter().filter(|v| !predicate(v)).collect()
     }
-
 }
 
 impl<T> TreeSet<T, Comparator<T>> {
@@ -405,7 +404,10 @@ mod tests {
     fn range_bounds_double_ended() {
         let s: TreeSet<i32, Natural> = (0..10).collect();
         assert_eq!(s.range(3..7).copied().collect::<Vec<_>>(), vec![3, 4, 5, 6]);
-        assert_eq!(s.range(3..=7).copied().collect::<Vec<_>>(), vec![3, 4, 5, 6, 7]);
+        assert_eq!(
+            s.range(3..=7).copied().collect::<Vec<_>>(),
+            vec![3, 4, 5, 6, 7]
+        );
         assert_eq!(s.range(..).len(), 10);
         assert_eq!(
             s.range(2..8).rev().copied().collect::<Vec<_>>(),

@@ -75,9 +75,9 @@ impl BitSet {
         // out of bounds). Report it as a structured error instead.
         let bit_length = match bits.last() {
             None => 0,
-            Some(&b) => b
-                .checked_add(1)
-                .ok_or(BulkError::IndexOverflow { index: bits.len() - 1 })?,
+            Some(&b) => b.checked_add(1).ok_or(BulkError::IndexOverflow {
+                index: bits.len() - 1,
+            })?,
         };
         let n_words = bit_length.div_ceil(BITS_PER_WORD);
         let mut words = vec![0u64; n_words];

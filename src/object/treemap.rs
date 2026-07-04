@@ -6,7 +6,7 @@
 
 //! Sorted map backed by a red-black tree with pluggable [`Comparator`].
 
-use super::strategy::{Compare, Comparator, Natural};
+use super::strategy::{Comparator, Compare, Natural};
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::range::Range;
 use std::cmp::Ordering;
@@ -391,7 +391,7 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
     pub fn range<R: RangeBounds<K>>(&self, range: R) -> RangeIter<'_, K, V> {
         let lo = match range.start_bound() {
             StdBound::Unbounded => 0,
-            StdBound::Included(q) => self.rank(q),   // # keys strictly < q
+            StdBound::Included(q) => self.rank(q), // # keys strictly < q
             StdBound::Excluded(q) => self.count_le(q), // # keys <= q
         };
         let hi = match range.end_bound() {
@@ -1279,7 +1279,11 @@ impl<'a, K, V, C: Compare<K>> IntoIterator for &'a TreeMap<K, V, C> {
 fn consume_in_order<K, V>(node: Option<Box<Node<K, V>>>, out: &mut Vec<(K, V)>) {
     if let Some(n) = node {
         let Node {
-            key, value, left, right, ..
+            key,
+            value,
+            left,
+            right,
+            ..
         } = *n;
         consume_in_order(left, out);
         out.push((key, value));
@@ -1458,7 +1462,10 @@ mod tests {
         let m2: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * 10)).collect();
         assert_eq!(m2.into_keys().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
         let m3: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * 10)).collect();
-        assert_eq!(m3.into_values().rev().collect::<Vec<_>>(), vec![40, 30, 20, 10, 0]);
+        assert_eq!(
+            m3.into_values().rev().collect::<Vec<_>>(),
+            vec![40, 30, 20, 10, 0]
+        );
     }
 
     #[test]
@@ -1471,7 +1478,10 @@ mod tests {
         assert_eq!(keys(m.range(7..)), vec![7, 8, 9]);
         assert_eq!(keys(m.range(..)), (0..10).collect::<Vec<_>>());
         use std::ops::Bound::{Excluded, Unbounded};
-        assert_eq!(keys(m.range((Excluded(3), Unbounded))), vec![4, 5, 6, 7, 8, 9]);
+        assert_eq!(
+            keys(m.range((Excluded(3), Unbounded))),
+            vec![4, 5, 6, 7, 8, 9]
+        );
         // exact-size + double-ended.
         let mut it = m.range(2..8);
         assert_eq!(it.len(), 6);
@@ -1484,6 +1494,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // deliberately testing empty/inverted ranges
     fn range_empty_and_inverted_are_empty_not_panic() {
         let m: TreeMap<i32, i32, Natural> = (0..10).map(|i| (i, i)).collect();
         assert_eq!(m.range(5..5).count(), 0); // empty
@@ -1495,6 +1506,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)] // `7..=3` is meaningful under the reverse comparator
     fn range_is_comparator_correct_under_reverse() {
         // The headline T4 win: range() compares bounds through the map's OWN
         // comparator, so a reverse-ordered map ranges in reverse order — the

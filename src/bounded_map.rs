@@ -373,6 +373,27 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         self.take_slot(slot).map(|(_, v)| v)
     }
 
+    /// Drop every entry for which `keep(&k, &mut v)` returns `false`, allowing
+    /// in-place value mutation of the survivors (the key stays shared). Dropped
+    /// entries are removed like [`remove`](BoundedMap::remove) — **not** evicted,
+    /// so the observer is not fired and the policy simply forgets them. Two-phase
+    /// (decide over all live slots, then remove the rejects), so if `keep` panics
+    /// no entry has been removed yet — the map is left valid with whatever
+    /// survivors' values `keep` had already mutated.
+    pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, mut keep: F) {
+        let mut reject: Vec<usize> = Vec::new();
+        for slot in 0..self.slots.len() {
+            if let Some((k, v)) = self.slots[slot].as_mut() {
+                if !keep(k, v) {
+                    reject.push(slot);
+                }
+            }
+        }
+        for slot in reject {
+            self.take_slot(slot);
+        }
+    }
+
     /// Explicitly evict one entry (the policy's current victim) and **return** it
     /// to the caller (`Option<(K, V)>`) — ownership transfer, the observer is not
     /// fired. `None` if the map is empty.
@@ -808,6 +829,55 @@ mod tests {
         );
         // Arena never grew beyond what capacity needs (+ at most transient slack).
         assert!(m.slots.len() <= 4, "arena bloated to {}", m.slots.len());
+    }
+
+    #[test]
+    fn retain_drops_rejected_and_can_mutate_survivors() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(8);
+        for i in 0..6 {
+            m.put(i, i * 10);
+        }
+        // Keep evens, double the survivors' values in place.
+        m.retain(|&k, v| {
+            if k % 2 == 0 {
+                *v *= 2;
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(sorted_entries(&m), vec![(0, 0), (2, 40), (4, 80)]);
+        assert_eq!(m.len(), 3);
+        // Removed keys are gone and their slots reusable (policy forgot them).
+        assert_eq!(m.peek(&1), None);
+        m.put(100, 1);
+        assert!(m.slots.len() <= 8);
+    }
+
+    #[test]
+    fn retain_does_not_fire_observer() {
+        let evicted = Rc::new(RefCell::new(Vec::<i32>::new()));
+        let ev = evicted.clone();
+        let mut m: BoundedMap<i32, i32> =
+            BoundedMap::with_capacity(8).on_evict(move |&k, _v, _c| ev.borrow_mut().push(k));
+        for i in 0..4 {
+            m.put(i, i);
+        }
+        m.retain(|&k, _v| k >= 2);
+        assert_eq!(m.len(), 2);
+        assert!(evicted.borrow().is_empty()); // retain is not an eviction
+    }
+
+    #[test]
+    fn retain_all_and_none() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4);
+        m.put(1, 1);
+        m.put(2, 2);
+        m.retain(|_, _| true);
+        assert_eq!(m.len(), 2);
+        m.retain(|_, _| false);
+        assert!(m.is_empty());
+        assert!(m.evict().is_none()); // policy is consistent (empty) after clearing all
     }
 
     #[test]

@@ -66,7 +66,9 @@ so a breaking change is a **minor** version bump.
   (evict-before-insert, returns the previous value), `get`/`get_mut` (refresh
   recency — hence `&mut self`), `peek` (`&self`, no recency touch),
   `get_or_insert_with` (compute-if-absent returning `&mut V`; the closure runs
-  only on a miss, evict-before-insert), `remove`, `evict`, `clear`,
+  only on a miss, evict-before-insert), `retain` (drop rejected entries,
+  mutate survivors in place — not an eviction, so the observer is silent),
+  `remove`, `evict`, `clear`,
   `contains_key`, `iter`/`keys`/`values`, owned + borrowed `IntoIterator`, and an
   optional `on_evict` **observer** (`&K, &V, cause`; fired
   for size and TTL-expiry evictions — `remove`/`evict`/`clear` are not evictions).

@@ -67,15 +67,17 @@ enum Bound {
 }
 
 /// A sorted map backed by a left-leaning red-black tree with a pluggable
-/// comparator `C` (the [`Compare`] type parameter — `BuildHasher` for order).
+/// comparator `C` (the [`Compare`] type parameter).
 ///
-/// `C` defaults to [`Comparator<K>`] (the runtime `Arc<dyn Fn>` comparator) for
-/// full backward compatibility, so `TreeMap<K, V>` behaves exactly as before.
-/// Use [`with_comparator`](TreeMap::with_comparator) with a [`Natural`],
-/// [`Reverse`](super::strategy::Reverse), or custom zero-sized `C` for a
-/// statically-dispatched, inlined comparison. [`DynTreeMap`] names the runtime
-/// case explicitly.
-pub struct TreeMap<K, V, C = Comparator<K>> {
+/// `C` defaults to [`Natural`] (the zero-sized `Ord`-based comparator), so
+/// `TreeMap<K, V>` orders by the key's natural [`Ord`] with fully inlined,
+/// statically-dispatched comparisons and is built with the no-arg
+/// [`new`](TreeMap::new). For a runtime comparator chosen at load time use
+/// [`with_comparator`](TreeMap::with_comparator) (or the [`DynTreeMap`] alias,
+/// which names the `Arc<dyn Fn>` [`Comparator<K>`] case explicitly); for
+/// [`Reverse`](super::strategy::Reverse) or any custom zero-sized `C` use
+/// [`with_comparator`](TreeMap::with_comparator).
+pub struct TreeMap<K, V, C = Natural> {
     root: Option<Box<Node<K, V>>>,
     size: usize,
     cmp: C,
@@ -92,20 +94,9 @@ impl<K: fmt::Debug, V: fmt::Debug, C: Compare<K>> fmt::Debug for TreeMap<K, V, C
 }
 
 impl<K, V> TreeMap<K, V, Comparator<K>> {
-    /// Creates an empty `TreeMap` using the given runtime comparator. For a
-    /// static/zero-sized comparator use [`with_comparator`](TreeMap::with_comparator);
-    /// for the natural `Ord` order use [`natural`](TreeMap::natural).
-    pub fn new(cmp: Comparator<K>) -> Self {
-        TreeMap {
-            root: None,
-            size: 0,
-            cmp,
-        }
-    }
-
     /// Returns a clone of this map's runtime comparator (shares the underlying
     /// closure). Used to preserve ordering semantics when building a
-    /// materialized snapshot (`sub_map`).
+    /// materialized snapshot.
     pub fn comparator(&self) -> Comparator<K> {
         self.cmp.clone()
     }
@@ -113,7 +104,15 @@ impl<K, V> TreeMap<K, V, Comparator<K>> {
 
 impl<K: Ord, V> TreeMap<K, V, Natural> {
     /// Creates an empty `TreeMap` ordered by the key's natural [`Ord`]. The
-    /// comparator is a zero-sized [`Natural`], so comparisons inline.
+    /// comparator is a zero-sized [`Natural`], so comparisons inline. For a
+    /// runtime comparator use [`with_comparator`](TreeMap::with_comparator).
+    pub fn new() -> Self {
+        Self::natural()
+    }
+
+    /// Creates an empty `TreeMap` ordered by the key's natural [`Ord`]. The
+    /// comparator is a zero-sized [`Natural`], so comparisons inline. Alias of
+    /// the no-arg [`new`](TreeMap::new).
     pub fn natural() -> Self {
         TreeMap {
             root: None,
@@ -653,16 +652,15 @@ impl<K: Ord + Copy, V> TreeMap<K, V> {
     ///
     /// This is a **materialized copy, not a live write-through view** (unlike
     /// Guava/`java.util` `subMap`): mutating the snapshot never affects the
-    /// original and vice versa. The snapshot preserves the **source map's
-    /// comparator**, so reverse/custom/float-total-order keyed maps keep their
-    /// ordering semantics in the slice — but membership `∈ range` is selected by
-    /// natural `Ord` (see the natural-order-only caveat on this impl block).
+    /// original and vice versa. Both the source and the snapshot order by the
+    /// key's natural [`Ord`], and membership `∈ range` is likewise selected by
+    /// natural `Ord` (see the natural-order-only caveat on this impl block). For
+    /// comparator-correct slices use [`range`](TreeMap::range).
     pub fn sub_map(&self, range: Range<K>) -> TreeMap<K, V>
     where
-        K: 'static,
         V: Copy,
     {
-        let mut out = TreeMap::new(self.cmp.clone());
+        let mut out = TreeMap::new();
         for (k, v) in self.iter() {
             if range.contains(*k) {
                 out.insert(*k, *v);
@@ -689,8 +687,13 @@ impl<K: Ord + Copy, V> TreeMap<K, V> {
 }
 
 // ── Data pump: bottom-up bulk construction from sorted input ─────────
+//
+// The bulk builder validates order with a runtime [`Comparator`], so it is
+// anchored to the [`DynTreeMap`] form; the result names its comparator
+// explicitly. Use [`with_comparator`] on the result, or `collect`/`insert`
+// for a natural-order build.
 
-impl<K, V> TreeMap<K, V> {
+impl<K, V> TreeMap<K, V, Comparator<K>> {
     /// Builds a fresh `TreeMap` from already-sorted `(K, V)` input in a single
     /// O(n) pass, skipping per-element rebalancing.
     ///
@@ -976,7 +979,7 @@ impl<K, V> TreeMapSink<K, V> {
     /// never returns a half-built collection. The data-pump contract requires
     /// that a failed pump never yields a partial result; use
     /// [`try_create`](TreeMapSink::try_create) for the fallible form.
-    pub fn create(self) -> TreeMap<K, V> {
+    pub fn create(self) -> TreeMap<K, V, Comparator<K>> {
         match self.try_create() {
             Ok(map) => map,
             Err(e) => panic!("create() called on a poisoned sink: {e:?}"),
@@ -986,7 +989,7 @@ impl<K, V> TreeMapSink<K, V> {
     /// Like [`create`](TreeMapSink::create) but returns the poison error
     /// instead of panicking, so a poisoned sink is observable to callers that
     /// prefer a `Result`.
-    pub fn try_create(self) -> Result<TreeMap<K, V>, BulkError> {
+    pub fn try_create(self) -> Result<TreeMap<K, V, Comparator<K>>, BulkError> {
         if let Some(e) = self.poisoned {
             return Err(e);
         }
@@ -1377,7 +1380,7 @@ mod tests {
 
     #[test]
     fn test_basic_insert_get() {
-        let mut m = TreeMap::new(natural_comparator::<String>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<String>());
         m.insert("banana".to_string(), 2);
         m.insert("apple".to_string(), 1);
         m.insert("cherry".to_string(), 3);
@@ -1391,7 +1394,7 @@ mod tests {
 
     #[test]
     fn test_sorted_iteration() {
-        let mut m = TreeMap::new(natural_comparator::<String>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<String>());
         m.insert("banana".to_string(), 2);
         m.insert("apple".to_string(), 1);
         m.insert("cherry".to_string(), 3);
@@ -1409,7 +1412,7 @@ mod tests {
 
     #[test]
     fn test_overwrite() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(1, "one".to_string());
         let old = m.insert(1, "ONE".to_string());
         assert_eq!(old, Some("one".to_string()));
@@ -1419,7 +1422,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         for i in 0..100 {
             m.insert(i, i * 10);
         }
@@ -1434,7 +1437,7 @@ mod tests {
 
     #[test]
     fn test_min_max() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         assert!(m.min().is_none());
         m.insert(5, "five".to_string());
         m.insert(1, "one".to_string());
@@ -1448,7 +1451,7 @@ mod tests {
 
     #[test]
     fn test_reverse_comparator() {
-        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(reverse_comparator::<i32>());
         m.insert(1, 10);
         m.insert(3, 30);
         m.insert(2, 20);
@@ -1515,7 +1518,7 @@ mod tests {
         // The headline T4 win: range() compares bounds through the map's OWN
         // comparator, so a reverse-ordered map ranges in reverse order — the
         // exact case the legacy natural-order-only range_keys got wrong.
-        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(reverse_comparator::<i32>());
         for k in 0..10 {
             m.insert(k, k);
         }
@@ -1582,21 +1585,6 @@ mod tests {
         assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![-1, 2, 3, -5]);
     }
 
-    #[test]
-    fn range_keys_is_natural_order_only_under_custom_comparator() {
-        // Pins the documented NATURAL-ORDER-ONLY divergence of the legacy
-        // `Range<K>` methods: membership `∈ range` is selected by natural `Ord`
-        // (so the correct SET {1,2} is chosen), but the result order follows the
-        // tree's comparator (here reverse), NOT the "ascending" the method name
-        // implies. Comparator-correct queries are the job of `range()` (T4).
-        let mut m = TreeMap::new(reverse_comparator::<i32>());
-        m.insert(1, 10);
-        m.insert(2, 20);
-        m.insert(3, 30);
-        // natural membership picks {1,2}; iteration is tree (reverse) order.
-        assert_eq!(m.range_keys(Range::closed(1, 2)), vec![2, 1]);
-    }
-
     #[derive(Debug, Clone)]
     struct Person {
         name: String,
@@ -1605,7 +1593,7 @@ mod tests {
 
     #[test]
     fn test_by_field_comparator() {
-        let mut m = TreeMap::new(comparator_by_field(|p: &Person| p.name.clone()));
+        let mut m = TreeMap::with_comparator(comparator_by_field(|p: &Person| p.name.clone()));
         m.insert(
             Person {
                 name: "Charlie".into(),
@@ -1634,7 +1622,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(1, 1);
         m.insert(2, 2);
         m.clear();
@@ -1644,7 +1632,7 @@ mod tests {
 
     #[test]
     fn test_stress_insert_sorted_order() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         for i in (0..500).rev() {
             m.insert(i, i);
         }
@@ -1657,7 +1645,7 @@ mod tests {
 
     #[test]
     fn test_for_each() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(3, 30);
         m.insert(1, 10);
         m.insert(2, 20);
@@ -1668,7 +1656,7 @@ mod tests {
 
     #[test]
     fn test_contains_key() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(1, 10);
         assert!(m.contains_key(&1));
         assert!(!m.contains_key(&2));
@@ -1676,7 +1664,7 @@ mod tests {
 
     #[test]
     fn test_remove_nonexistent() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(1, 10);
         assert_eq!(m.remove(&2), None);
         assert_eq!(m.len(), 1);
@@ -1684,7 +1672,7 @@ mod tests {
 
     #[test]
     fn test_remove_all() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         for i in 0..50 {
             m.insert(i, i);
         }
@@ -1696,7 +1684,7 @@ mod tests {
 
     #[test]
     fn test_into_iter_borrowing_sorted() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         m.insert(3, 30);
         m.insert(1, 10);
         m.insert(2, 20);
@@ -1709,7 +1697,7 @@ mod tests {
     use crate::range::Range;
 
     fn map_of(keys: &[i32]) -> TreeMap<i32, i32> {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::new();
         for &k in keys {
             m.insert(k, k.wrapping_mul(10));
         }
@@ -1912,7 +1900,7 @@ mod tests {
 
     #[test]
     fn test_size_invariant_randomized_insert_remove() {
-        let mut m = TreeMap::new(natural_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
         let mut present = std::collections::BTreeSet::new();
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
         for _ in 0..4000 {
@@ -1940,7 +1928,7 @@ mod tests {
     fn test_rank_select_reverse_comparator() {
         // Order statistics follow the comparator: under reverse order the
         // 0-th element is the largest natural key.
-        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        let mut m = TreeMap::with_comparator(reverse_comparator::<i32>());
         for k in [10, 20, 30, 40, 50] {
             m.insert(k, k * 10);
         }
@@ -1971,7 +1959,7 @@ mod tests {
 
     use crate::bulk::{BulkError, DuplicatePolicy};
 
-    fn pumped(n: i32) -> TreeMap<i32, i32> {
+    fn pumped(n: i32) -> DynTreeMap<i32, i32> {
         let data: Vec<(i32, i32)> = (0..n).map(|i| (i, i * 10)).collect();
         TreeMap::from_sorted(natural_comparator::<i32>(), data, DuplicatePolicy::Error).unwrap()
     }
@@ -1981,7 +1969,7 @@ mod tests {
         for &n in &[0, 1, 2, 3, 7, 8, 16, 100, 500] {
             let m = pumped(n);
             let pumped_pairs: Vec<(i32, i32)> = m.iter().map(|(k, v)| (*k, *v)).collect();
-            let mut inc = TreeMap::new(natural_comparator::<i32>());
+            let mut inc = TreeMap::with_comparator(natural_comparator::<i32>());
             // insert shuffled-ish (reverse) to prove order-independence.
             for i in (0..n).rev() {
                 inc.insert(i, i * 10);

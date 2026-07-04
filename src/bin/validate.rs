@@ -2435,7 +2435,7 @@ fn run_f32_treeset(
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
 ) {
-    let mut set: TreeSet<HashableF32> = TreeSet::new(natural_comparator::<HashableF32>());
+    let mut set: TreeSet<HashableF32> = TreeSet::with_comparator(natural_comparator::<HashableF32>());
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {

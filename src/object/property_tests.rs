@@ -166,7 +166,7 @@ mod tests {
             )
             .unwrap();
             // insert in a shuffled-ish order
-            let mut inc = TreeMap::new(natural_comparator::<i32>());
+            let mut inc = TreeMap::with_comparator(natural_comparator::<i32>());
             let mut order: Vec<usize> = (0..n).collect();
             for i in (1..n).rev() {
                 let j = rng.next_usize(i + 1);

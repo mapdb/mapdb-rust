@@ -13,10 +13,11 @@ use crate::range::Range;
 use std::fmt;
 
 /// A sorted set backed by a [`TreeMap`] with a pluggable comparator `C` (the
-/// [`Compare`] type parameter). `C` defaults to [`Comparator<T>`] for backward
-/// compatibility; use [`with_comparator`](TreeSet::with_comparator) /
-/// [`natural`](TreeSet::natural) for a statically-dispatched comparator.
-pub struct TreeSet<T, C = Comparator<T>> {
+/// [`Compare`] type parameter). `C` defaults to [`Natural`], so `TreeSet<T>`
+/// orders by the element's natural [`Ord`] (built with the no-arg
+/// [`new`](TreeSet::new)); use [`with_comparator`](TreeSet::with_comparator) or
+/// the [`DynTreeSet`] alias for a runtime comparator.
+pub struct TreeSet<T, C = Natural> {
     tree: TreeMap<T, (), C>,
 }
 
@@ -29,18 +30,17 @@ impl<T: fmt::Debug, C: Compare<T>> fmt::Debug for TreeSet<T, C> {
     }
 }
 
-impl<T> TreeSet<T, Comparator<T>> {
-    /// Creates an empty `TreeSet` using the given runtime comparator.
-    pub fn new(cmp: Comparator<T>) -> Self {
-        TreeSet {
-            tree: TreeMap::new(cmp),
-        }
-    }
-}
-
 impl<T: Ord> TreeSet<T, Natural> {
     /// Creates an empty `TreeSet` ordered by the element's natural [`Ord`]
-    /// (zero-sized comparator; comparisons inline).
+    /// (zero-sized comparator; comparisons inline). For a runtime comparator
+    /// use [`with_comparator`](TreeSet::with_comparator).
+    pub fn new() -> Self {
+        Self::natural()
+    }
+
+    /// Creates an empty `TreeSet` ordered by the element's natural [`Ord`]
+    /// (zero-sized comparator; comparisons inline). Alias of the no-arg
+    /// [`new`](TreeSet::new).
     pub fn natural() -> Self {
         TreeSet {
             tree: TreeMap::natural(),
@@ -235,7 +235,7 @@ impl<T> TreeSetSink<T> {
 
     /// Finishes the build, returning the constructed `TreeSet`. A poisoned sink
     /// panics in all build modes (see [`TreeMapSink::create`]).
-    pub fn create(self) -> TreeSet<T> {
+    pub fn create(self) -> TreeSet<T, Comparator<T>> {
         TreeSet {
             tree: self.inner.create(),
         }
@@ -243,7 +243,7 @@ impl<T> TreeSetSink<T> {
 
     /// Like [`create`](TreeSetSink::create) but returns the poison error
     /// instead of panicking.
-    pub fn try_create(self) -> Result<TreeSet<T>, BulkError> {
+    pub fn try_create(self) -> Result<TreeSet<T, Comparator<T>>, BulkError> {
         Ok(TreeSet {
             tree: self.inner.try_create()?,
         })
@@ -293,16 +293,15 @@ impl<T: Ord + Copy> TreeSet<T> {
     }
 
     /// A **new independent** set of the elements ∈ `range` (materialized
-    /// snapshot; mutating it never affects the original and vice versa). The
-    /// snapshot preserves the **source set's comparator** so reverse/custom/
-    /// float-total-order ordering is retained.
-    pub fn sub_set(&self, range: Range<T>) -> TreeSet<T>
-    where
-        T: 'static,
-    {
-        let mut out = TreeSet::new(self.tree.comparator());
-        for x in self.range_elements(range) {
-            out.insert(x);
+    /// snapshot; mutating it never affects the original and vice versa). Both
+    /// the source and the snapshot order by the element's natural [`Ord`]; use
+    /// [`range`](TreeSet::range) for comparator-correct slices.
+    pub fn sub_set(&self, range: Range<T>) -> TreeSet<T> {
+        let mut out = TreeSet::new();
+        for x in self.iter() {
+            if range.contains(*x) {
+                out.insert(*x);
+            }
         }
         out
     }
@@ -434,17 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn test_sub_set_preserves_comparator() {
-        // sub_set must keep the source ordering (reverse), not reset to natural.
-        let mut s = TreeSet::new(reverse_comparator::<i32>());
+    fn test_sub_set_natural_snapshot_and_independence() {
+        // sub_set is a natural-order materialized snapshot (comparator-correct
+        // slices are `range`'s job). Membership ∈ range, ascending natural order.
+        let mut s = TreeSet::new();
         for k in [10, 20, 30, 40, 50] {
             s.insert(k);
         }
-        // Source iterates descending under the reverse comparator.
-        assert_eq!(s.to_vec(), vec![&50, &40, &30, &20, &10]);
+        assert_eq!(s.to_vec(), vec![&10, &20, &30, &40, &50]);
         let sub = s.sub_set(Range::closed_open(20, 50)); // {20,30,40}
-                                                         // The snapshot must also be reverse-ordered, proving comparator carried.
-        assert_eq!(sub.to_vec(), vec![&40, &30, &20]);
+        assert_eq!(sub.to_vec(), vec![&20, &30, &40]);
         // Independence: mutating the snapshot does not touch the original.
         let mut sub2 = sub;
         sub2.remove(&30);
@@ -453,7 +451,7 @@ mod tests {
 
     #[test]
     fn test_basic() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         assert!(s.insert(3));
         assert!(s.insert(1));
         assert!(s.insert(2));
@@ -466,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_min_max() {
-        let mut s = TreeSet::new(natural_comparator::<String>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<String>());
         s.insert("banana".to_string());
         s.insert("apple".to_string());
         s.insert("cherry".to_string());
@@ -477,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_remove() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         for i in 0..50 {
             s.insert(i);
         }
@@ -493,7 +491,7 @@ mod tests {
 
     #[test]
     fn test_select_reject() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         for i in 1..=5 {
             s.insert(i);
         }
@@ -506,7 +504,7 @@ mod tests {
 
     #[test]
     fn test_clear() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         s.insert(1);
         s.insert(2);
         s.clear();
@@ -516,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_stress() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         for i in (0..1000).rev() {
             s.insert(i);
         }
@@ -548,7 +546,7 @@ mod tests {
         let by_name = comparator_by_field(|p: &Person| p.name.clone());
         let cmp = then_comparing(by_age, by_name);
 
-        let mut s = TreeSet::new(cmp);
+        let mut s = TreeSet::with_comparator(cmp);
         s.insert(Person {
             name: "Charlie".into(),
             age: 30,
@@ -569,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_reverse_order() {
-        let mut s = TreeSet::new(reverse_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(reverse_comparator::<i32>());
         s.insert(1);
         s.insert(3);
         s.insert(2);
@@ -579,14 +577,14 @@ mod tests {
 
     #[test]
     fn test_empty_min_max() {
-        let s = TreeSet::new(natural_comparator::<i32>());
+        let s = TreeSet::with_comparator(natural_comparator::<i32>());
         assert_eq!(s.min(), None);
         assert_eq!(s.max(), None);
     }
 
     #[test]
     fn test_into_iter_borrowing_sorted() {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::with_comparator(natural_comparator::<i32>());
         s.insert(3);
         s.insert(1);
         s.insert(2);
@@ -599,7 +597,7 @@ mod tests {
     use crate::range::Range;
 
     fn set_of(elems: &[i32]) -> TreeSet<i32> {
-        let mut s = TreeSet::new(natural_comparator::<i32>());
+        let mut s = TreeSet::new();
         for &e in elems {
             s.insert(e);
         }
@@ -767,7 +765,7 @@ mod tests {
             DuplicatePolicy::Error,
         )
         .unwrap();
-        let mut inc = TreeSet::new(natural_comparator::<i32>());
+        let mut inc = TreeSet::with_comparator(natural_comparator::<i32>());
         for i in (0..200).rev() {
             inc.insert(i);
         }

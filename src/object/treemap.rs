@@ -487,8 +487,20 @@ impl<K: Ord + Copy, V> TreeMap<K, V> {
     // Range membership is EXACTLY `range.contains(key)`: e.g. `open(1, 2)`
     // over `i32` matches no key yet is a valid, non-cut-empty range. We
     // never infer discrete-domain emptiness from the cuts.
+    //
+    // ⚠️ NATURAL-ORDER-ONLY. These `Range<K>`-argument methods select
+    // membership by the key's natural `Ord` (via `Range::contains`), NOT by
+    // the map's `Comparator`. When the map is built with a non-natural
+    // comparator (e.g. `reverse_comparator`, a by-field comparator, or a
+    // float total-order), selection can disagree with the tree's own ordering:
+    // the ascending/descending labels follow natural order, and two keys that
+    // are comparator-equal but `Ord`-distinct select inconsistently. For
+    // comparator-correct range queries use [`TreeMap::range`] (the
+    // `RangeBounds` API), which compares bounds through the map's comparator
+    // and thus makes this divergence unrepresentable.
 
-    /// Keys in `range`, ascending. Snapshot taken at call time; read-only.
+    /// Keys in `range`, ascending under the key's **natural `Ord`** (see the
+    /// natural-order-only caveat on this impl block). Snapshot; read-only.
     pub fn range_keys(&self, range: Range<K>) -> Vec<K> {
         self.keys()
             .copied()
@@ -542,11 +554,14 @@ impl<K: Ord + Copy, V> TreeMap<K, V> {
         v
     }
 
-    /// A **new independent** map of the entries whose key ∈ `range`.
-    /// Mutating the snapshot never affects the original and vice versa
-    /// (it is a materialized copy, not a live view). The snapshot preserves the
-    /// **source map's comparator**, so reverse/custom/float-total-order keyed
-    /// maps keep their ordering semantics in the slice.
+    /// A **new independent SNAPSHOT** map of the entries whose key ∈ `range`.
+    ///
+    /// This is a **materialized copy, not a live write-through view** (unlike
+    /// Guava/`java.util` `subMap`): mutating the snapshot never affects the
+    /// original and vice versa. The snapshot preserves the **source map's
+    /// comparator**, so reverse/custom/float-total-order keyed maps keep their
+    /// ordering semantics in the slice — but membership `∈ range` is selected by
+    /// natural `Ord` (see the natural-order-only caveat on this impl block).
     pub fn sub_map(&self, range: Range<K>) -> TreeMap<K, V>
     where
         K: 'static,
@@ -896,6 +911,7 @@ fn clone_err(e: &BulkError) -> BulkError {
         BulkError::ExactSizeExceeded { expected } => BulkError::ExactSizeExceeded {
             expected: *expected,
         },
+        BulkError::IndexOverflow { index } => BulkError::IndexOverflow { index: *index },
         // A sink only ever poisons via `put`, which produces Duplicate or
         // OutOfOrder — never Alloc (the allocation happens in `create`). This
         // arm is unreachable.
@@ -1144,6 +1160,21 @@ mod tests {
 
         let keys: Vec<&i32> = m.keys().collect();
         assert_eq!(keys, vec![&3, &2, &1]);
+    }
+
+    #[test]
+    fn range_keys_is_natural_order_only_under_custom_comparator() {
+        // Pins the documented NATURAL-ORDER-ONLY divergence of the legacy
+        // `Range<K>` methods: membership `∈ range` is selected by natural `Ord`
+        // (so the correct SET {1,2} is chosen), but the result order follows the
+        // tree's comparator (here reverse), NOT the "ascending" the method name
+        // implies. Comparator-correct queries are the job of `range()` (T4).
+        let mut m = TreeMap::new(reverse_comparator::<i32>());
+        m.insert(1, 10);
+        m.insert(2, 20);
+        m.insert(3, 30);
+        // natural membership picks {1,2}; iteration is tree (reverse) order.
+        assert_eq!(m.range_keys(Range::closed(1, 2)), vec![2, 1]);
     }
 
     #[derive(Debug, Clone)]

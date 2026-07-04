@@ -192,6 +192,12 @@ impl<T: Ord> Extend<T> for PriorityQueue<T> {
     }
 }
 
+/// Renders the elements in **internal heap-array order**, which is *not* the
+/// priority (pop) order — only the first element is guaranteed to be the
+/// minimum. This ordering is an implementation detail and may change; do not
+/// parse it or rely on it for equality. (`PartialEq` is deliberately not
+/// implemented for the same reason: heap layout is non-canonical.) For a
+/// priority-ordered rendering, drain a clone into a sorted collection.
 impl<T: Ord + fmt::Display> fmt::Display for PriorityQueue<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "[")?;

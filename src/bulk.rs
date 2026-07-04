@@ -74,6 +74,13 @@ pub enum BulkError {
         /// The declared exact size `n`.
         expected: usize,
     },
+    /// An index-addressed builder (e.g. [`crate::BitSet::from_sorted_indices`])
+    /// saw an index at input position `index` too large to represent the
+    /// collection's length convention (`max_index + 1` would overflow `usize`).
+    IndexOverflow {
+        /// 0-based position in the consumed input of the oversized index.
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for BulkError {
@@ -93,6 +100,12 @@ impl std::fmt::Display for BulkError {
                 write!(
                     f,
                     "bulk_load_exact source exceeded declared size {expected}"
+                )
+            }
+            BulkError::IndexOverflow { index } => {
+                write!(
+                    f,
+                    "index at input position {index} too large to represent length"
                 )
             }
         }

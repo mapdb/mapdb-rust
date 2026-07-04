@@ -200,9 +200,14 @@ impl<T: Ord + Copy> RangeSet<T> {
         RangeSet { ranges: out }
     }
 
-    /// A **new** independent `RangeSet` = this set **intersected** with `view`
-    /// (the in-`view` slice, each stored range clipped to `view`).
+    /// A **new** independent **SNAPSHOT** `RangeSet` = this set **intersected**
+    /// with `view` (the in-`view` slice, each stored range clipped to `view`).
     /// `sub_range_set([3, 6))` of `{[1, 5), [8, 9]}` = `{[3, 5)}`.
+    ///
+    /// This is a **materialized copy, not a live write-through view** (unlike
+    /// Guava's `RangeSet.subRangeSet`): later mutations of the original are
+    /// **not** reflected here, and mutating this result does not affect the
+    /// original.
     pub fn sub_range_set(&self, view: &Range<T>) -> RangeSet<T> {
         let mut out: Vec<Range<T>> = Vec::new();
         for r in &self.ranges {

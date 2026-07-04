@@ -99,9 +99,17 @@ impl CountMin {
         );
         let w = (EULER_E / epsilon).ceil();
         let d = (1.0f64 / delta).ln().ceil();
+        // Range-check before the `f64 as u32` casts: `as` saturates to
+        // `u32::MAX` for out-of-range floats (Java's `(int)` would clamp to
+        // `2^31-1`), so an extreme `epsilon`/`delta` would silently produce a
+        // giant table. Mirror `Bloom::optimal`'s guard and reject instead.
         assert!(
             w.is_finite() && d.is_finite() && w >= 1.0 && d >= 1.0,
             "CountMin::optimal produced a non-finite (d, w)"
+        );
+        assert!(
+            w <= u32::MAX as f64 && d <= u32::MAX as f64,
+            "CountMin::optimal: derived (d, w) out of u32 range (d={d}, w={w})"
         );
         CountMin::with_params(d as u32, w as u32)
     }
@@ -186,6 +194,14 @@ mod tests {
     /// consumes (reinterpret, not sign-extend).
     fn encode(item: i32) -> [u8; 4] {
         (item as u32).to_le_bytes()
+    }
+
+    #[test]
+    #[should_panic(expected = "out of u32 range")]
+    fn optimal_rejects_saturating_epsilon() {
+        // Regression: `f64 as u32` saturates to `u32::MAX` for an extreme
+        // epsilon, silently sizing a giant table. Must trap (mirrors Bloom).
+        let _ = CountMin::optimal(1e-12, 0.01);
     }
 
     #[test]

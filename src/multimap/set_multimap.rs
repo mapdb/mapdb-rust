@@ -124,13 +124,21 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
                         // within a run: value must be >= last value.
                         let last_v = bucket.last().unwrap();
                         match val_cmp.compare(last_v, &v) {
-                            Ordering::Less => bucket.push(v),
-                            Ordering::Equal => {
-                                if last_v != &v {
+                            Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
+                            // Less or Equal: `v` is in val-order. Dedupe by
+                            // `Eq` against the WHOLE bucket, not just the last
+                            // value: comparator-equal-but-`Eq`-distinct values
+                            // are all retained, so an `Eq`-duplicate can sit
+                            // non-adjacent within the val_cmp-equal tail and
+                            // slip past a `bucket.last()`-only check — breaking
+                            // the set invariant and `size` (repro: abs-value
+                            // val_cmp, values `1, -1, 1`). Matches
+                            // `from_sorted_keys`.
+                            Ordering::Less | Ordering::Equal => {
+                                if !bucket.iter().any(|x| x == &v) {
                                     bucket.push(v);
                                 }
                             }
-                            Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
                         }
                     }
                     Ordering::Less => {
@@ -478,6 +486,19 @@ mod tests {
         let m = SetMultimap::from_sorted_key_values(natural_comparator::<i32>(), abs_cmp, data)
             .unwrap();
         assert_eq!(m.get(&1), &[1, -1]);
+        assert_eq!(m.len(), 3);
+    }
+
+    #[test]
+    fn from_sorted_key_values_dedupes_non_adjacent_eq_duplicate() {
+        // Regression: value dedup once only compared `bucket.last()`, so a
+        // comparator-equal-but-`Eq`-distinct value (`-1`) between two `Eq`-equal
+        // values (`1`, `1`) hid the duplicate — set invariant + `size` broke.
+        let abs_cmp = Comparator::new(Box::new(|a: &i32, b: &i32| a.abs().cmp(&b.abs())));
+        let data = vec![(1, 1), (1, -1), (1, 1), (2, 2)];
+        let m = SetMultimap::from_sorted_key_values(natural_comparator::<i32>(), abs_cmp, data)
+            .unwrap();
+        assert_eq!(m.get(&1), &[1, -1]); // second `1` dropped as an Eq-duplicate
         assert_eq!(m.len(), 3);
     }
 

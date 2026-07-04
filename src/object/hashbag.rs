@@ -102,19 +102,40 @@ impl<T: Eq + Hash> Bag<T> for HashBag<T> {
 }
 
 impl<T: Eq + Hash> MutableBag<T> for HashBag<T> {
+    /// # Panics
+    /// Panics if the per-value occurrence count or the total size would
+    /// overflow `usize` (mirrors the overflow-checked `bulk_load_counts` path;
+    /// Guava's `HashMultiset` throws in the same situation).
     fn insert(&mut self, value: T) {
-        *self.counts.entry(value).or_insert(0) += 1;
-        self.size += 1;
+        let c = self.counts.entry(value).or_insert(0);
+        *c = c
+            .checked_add(1)
+            .expect("HashBag occurrence count overflowed usize");
+        self.size = self
+            .size
+            .checked_add(1)
+            .expect("HashBag size overflowed usize");
     }
 }
 
 impl<T: Eq + Hash> HashBag<T> {
+    /// Adds `n` occurrences of `value`.
+    ///
+    /// # Panics
+    /// Panics if the per-value occurrence count or the total size would
+    /// overflow `usize` (mirrors `bulk_load_counts`).
     pub fn add_occurrences(&mut self, value: T, n: usize) {
         if n == 0 {
             return;
         }
-        *self.counts.entry(value).or_insert(0) += n;
-        self.size += n;
+        let c = self.counts.entry(value).or_insert(0);
+        *c = c
+            .checked_add(n)
+            .expect("HashBag occurrence count overflowed usize");
+        self.size = self
+            .size
+            .checked_add(n)
+            .expect("HashBag size overflowed usize");
     }
 
     pub fn remove_one(&mut self, value: &T) -> bool {
@@ -221,6 +242,15 @@ impl<T: Eq + Hash> Eq for HashBag<T> {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "occurrence count overflowed")]
+    fn insert_overflow_panics() {
+        // Regression: unchecked `+=` wrapped the count (and `size`) in release.
+        let mut bag = HashBag::new();
+        bag.add_occurrences("a", usize::MAX);
+        bag.insert("a"); // 1 more occurrence overflows usize
+    }
 
     #[test]
     fn test_basic() {

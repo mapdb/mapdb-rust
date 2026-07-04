@@ -70,7 +70,15 @@ impl BitSet {
                 Ordering::Greater => return Err(BulkError::OutOfOrder { index: i + 1 }),
             }
         }
-        let bit_length = bits.last().map(|&b| b + 1).unwrap_or(0);
+        // `max_index + 1` is the length convention; `usize::MAX` cannot be
+        // represented (debug: `b + 1` panics; release: wraps to 0 then indexes
+        // out of bounds). Report it as a structured error instead.
+        let bit_length = match bits.last() {
+            None => 0,
+            Some(&b) => b
+                .checked_add(1)
+                .ok_or(BulkError::IndexOverflow { index: bits.len() - 1 })?,
+        };
         let n_words = bit_length.div_ceil(BITS_PER_WORD);
         let mut words = vec![0u64; n_words];
         for &b in &bits {
@@ -243,19 +251,19 @@ impl BitSet {
 }
 
 impl PartialEq for BitSet {
+    /// Logical-bit equality, matching `java.util.BitSet.equals`: two bit sets
+    /// are equal iff they have exactly the same set bits. Capacity and history
+    /// are ignored — `BitSet::new()` equals `BitSet::with_bit_length(100)`, and
+    /// `set(10); clear_bit(10)` equals a never-touched empty set. (Words past a
+    /// set's populated range read as 0; bits above the highest set index are
+    /// never populated, so word-wise comparison is exactly logical equality.)
     fn eq(&self, other: &Self) -> bool {
-        if self.bit_length != other.bit_length {
-            return false;
-        }
         let n = self.words.len().max(other.words.len());
-        for i in 0..n {
+        (0..n).all(|i| {
             let a = self.words.get(i).copied().unwrap_or(0);
             let b = other.words.get(i).copied().unwrap_or(0);
-            if a != b {
-                return false;
-            }
-        }
-        true
+            a == b
+        })
     }
 }
 
@@ -326,6 +334,36 @@ mod tests {
         b.clear_bit(63);
         assert!(!b.get(63));
         b.clear_bit(10_000); // no-op, no panic
+    }
+
+    #[test]
+    fn from_sorted_indices_usize_max_is_structured_error() {
+        // Regression: `max_index + 1` overflows for `usize::MAX` (debug panic /
+        // release out-of-bounds). Must surface a structured error instead.
+        use crate::bulk::{BulkError, DuplicatePolicy};
+        let err = BitSet::from_sorted_indices([usize::MAX], DuplicatePolicy::Error).unwrap_err();
+        assert!(matches!(err, BulkError::IndexOverflow { index: 0 }));
+        // A large-but-representable index still works.
+        let b = BitSet::from_sorted_indices([10usize, 100], DuplicatePolicy::Error).unwrap();
+        assert!(b.get(10) && b.get(100));
+    }
+
+    #[test]
+    fn eq_is_logical_bits_only() {
+        // Regression: `PartialEq` was capacity/history sensitive. It must match
+        // `java.util.BitSet.equals` — only the set bits matter.
+        assert_eq!(BitSet::new(), BitSet::with_bit_length(100));
+        let mut b = BitSet::new();
+        b.set(10);
+        b.clear_bit(10);
+        assert_eq!(b, BitSet::new()); // history erased
+        let mut x = BitSet::with_bit_length(8);
+        x.set(3);
+        let mut y = BitSet::with_bit_length(500);
+        y.set(3);
+        assert_eq!(x, y); // same set bit, different capacity
+        y.set(4);
+        assert_ne!(x, y);
     }
 
     #[test]

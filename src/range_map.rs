@@ -77,6 +77,19 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
         for (r, v) in self.entries.drain(..) {
             if v == value && r.is_connected(&merged) {
                 merged = r.span(&merged);
+                // Growing `merged` rightward can bridge an equal-valued entry
+                // already emitted to `out` on the left (entries are sorted, so
+                // only the tail can newly connect). A single forward pass would
+                // otherwise leave `put([0,5),v); put([5,10),v);
+                // put_coalescing([10,15),v)` as two entries instead of one
+                // `[0,15)`. Pull back the connected-equal tail.
+                while out
+                    .last()
+                    .is_some_and(|(lr, lv)| *lv == value && lr.is_connected(&merged))
+                {
+                    let (lr, _) = out.pop().unwrap();
+                    merged = lr.span(&merged);
+                }
             } else {
                 out.push((r, v));
             }
@@ -120,8 +133,13 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
         ))
     }
 
-    /// A **new** independent `RangeMap` restricted to `view` (each entry range
-    /// clipped to `view`, values preserved).
+    /// A **new** independent **SNAPSHOT** `RangeMap` restricted to `view` (each
+    /// entry range clipped to `view`, values preserved).
+    ///
+    /// This is a **materialized copy, not a live write-through view** (unlike
+    /// Guava's `RangeMap.subRangeMap`): later mutations of the original are
+    /// **not** reflected here, and mutating this result does not affect the
+    /// original.
     pub fn sub_range_map(&self, view: &Range<T>) -> RangeMap<T, V> {
         let mut out: Vec<(Range<T>, V)> = Vec::new();
         for (r, v) in &self.entries {
@@ -306,6 +324,18 @@ mod tests {
         m.put(Range::closed_open(9, 12), 100);
         m.put_coalescing(Range::closed_open(5, 9), 100);
         assert_eq!(collected(&m), vec![(Range::closed_open(1, 12), 100)]);
+    }
+
+    #[test]
+    fn put_coalescing_bridges_already_emitted_left_entry() {
+        // Regression: a single forward drain emitted the left entry before a
+        // later entry grew `merged` enough to bridge it. `put`+`put`+
+        // `put_coalescing` on abutting equal values must yield ONE entry.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(0, 5), 7);
+        m.put(Range::closed_open(5, 10), 7);
+        m.put_coalescing(Range::closed_open(10, 15), 7);
+        assert_eq!(collected(&m), vec![(Range::closed_open(0, 15), 7)]);
     }
 
     #[test]

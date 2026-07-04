@@ -230,8 +230,15 @@ impl<T: Ord + Copy> TreeSet<T> {
     // ── Range slice & descending iteration (consume `Range<T>`) ──────
     //
     // Range membership is EXACTLY `range.contains(element)`.
+    //
+    // ⚠️ NATURAL-ORDER-ONLY (delegates to `TreeMap`'s `Range<K>` methods):
+    // membership is selected by the element's natural `Ord`, NOT by the set's
+    // `Comparator`. Under a non-natural comparator, selection can disagree with
+    // the tree's ordering. Use [`TreeSet::range`] for comparator-correct
+    // queries.
 
-    /// Elements in `range`, ascending. Snapshot at call time; read-only.
+    /// Elements in `range`, ascending under natural `Ord` (see the
+    /// natural-order-only caveat on this impl block). Snapshot; read-only.
     pub fn range_elements(&self, range: Range<T>) -> Vec<T> {
         self.tree.range_keys(range)
     }

@@ -92,6 +92,13 @@ impl<K, V> HashMapWithStrategy<K, V> {
         Some(&self.slots.get(slot).1)
     }
 
+    /// Returns a mutable reference to the value for `key`, or `None`. Only the
+    /// value is mutable — mutating a key would desync its strategy hash slot.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        let slot = self.find_slot(key)?;
+        Some(&mut self.slots.get_mut(slot).1)
+    }
+
     /// Removes the entry for the given key. Returns `Some(value)` if found.
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let hash = self.strategy.hash_code(key);
@@ -142,6 +149,17 @@ impl<K, V> HashMapWithStrategy<K, V> {
         self.slots.iter().map(|(_, v)| v)
     }
 
+    /// Mutable-value iterator `(&K, &mut V)` in insertion order. Keys stay shared
+    /// so a strategy-hash desync is impossible.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+        self.slots.iter_mut().map(|(k, v)| (&*k, v))
+    }
+
+    /// Mutable iterator over the values (insertion order).
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.slots.iter_mut().map(|(_, v)| v)
+    }
+
     /// Calls `f` for each key-value pair.
     pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
         for (k, v) in self.iter() {
@@ -178,6 +196,35 @@ mod tests {
         assert_eq!(old, Some(1));
         assert_eq!(m.len(), 1);
         assert_eq!(m.get(&"CONTENT-TYPE".to_string()), Some(&2));
+    }
+
+    #[test]
+    fn get_mut_and_iter_mut_mutate_in_place() {
+        let mut m = HashMapWithStrategy::new(case_insensitive_hashing_strategy());
+        m.insert("Accept".to_string(), 1);
+        m.insert("Host".to_string(), 2);
+        m.insert("Date".to_string(), 3);
+
+        // get_mut via any strategy-equal key form.
+        *m.get_mut(&"accept".to_string()).unwrap() += 100;
+        assert_eq!(m.get(&"ACCEPT".to_string()), Some(&101));
+        assert!(m.get_mut(&"missing".to_string()).is_none());
+
+        // iter_mut in insertion order; keys are shared (&K), values mutable.
+        let seen: Vec<(String, i32)> = m.iter_mut().map(|(k, v)| (k.clone(), *v)).collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("Accept".to_string(), 101),
+                ("Host".to_string(), 2),
+                ("Date".to_string(), 3),
+            ]
+        );
+        for v in m.values_mut() {
+            *v *= 2;
+        }
+        assert_eq!(m.get(&"host".to_string()), Some(&4));
+        assert_eq!(m.get(&"date".to_string()), Some(&6));
     }
 
     #[derive(Debug, Clone)]

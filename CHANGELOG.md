@@ -6,6 +6,12 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **Mutable-value access on `HashMapWithStrategy`** — `get_mut`, `iter_mut`
+  (`(&K, &mut V)`, insertion order), and `values_mut`, built on the existing
+  `SlotList::iter_mut`/`get_mut` arena primitives; keys stay shared so a
+  strategy-hash desync is impossible. With this, mutable iteration now exists on
+  every map type (`TreeMap`, `OpenHashMap`, `object::HashMap`, `LinkedHashMap`,
+  `HashMapWithStrategy`).
 - **Mutable iteration for the `OpenHashMap` kernel + `object::HashMap` parity** —
   `OpenHashMap` gained `iter_mut()` / `values_mut()` (and `IntoIterator for &mut`,
   i.e. `for (k, v) in &mut map`), which the whole hash family previously lacked;

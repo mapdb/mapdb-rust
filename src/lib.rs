@@ -66,6 +66,6 @@ pub use range::{BoundType, Cut, Range};
 pub use range_map::RangeMap;
 pub use range_set::RangeSet;
 pub use rich_iterator::RichIterator;
-pub use roaring::RoaringU32;
+pub use roaring::{RoaringError, RoaringU32};
 pub use space_saving::SpaceSaving;
 pub use synchronized::{synchronized, SyncGuard, Synchronized};

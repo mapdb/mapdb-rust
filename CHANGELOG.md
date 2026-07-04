@@ -6,6 +6,14 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **BREAKING: `RoaringU32::deserialize` now returns `Result<_, RoaringError>`**
+  (a typed enum) instead of `Result<_, String>`, mirroring the crate's other
+  typed decode error `HllError`. Each of the 13 variants names a specific
+  reader-MUST-reject rule (truncation, foreign/unsupported header, non-canonical
+  or corrupt container encoding) and carries the offending values as fields.
+  `RoaringError` is `Clone`/`PartialEq`/`Eq`/`Debug` + `Display` + `std::error::Error`;
+  its `Display` text is byte-for-byte the previous error strings, so
+  string-consuming callers are unaffected — only the `Err` *type* changed.
 - **`BoundedMap<K, V, P: EvictionPolicy>`** — a new capacity-bounded map, generic
   in its value type and in a pluggable **eviction policy**, the value-generic
   successor to the frozen, `i32`-specialised `BoundedLruMap` (which is untouched).

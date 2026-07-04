@@ -19,6 +19,118 @@
 //! (not sign-extended), so `i32 -1` is `0xFFFFFFFF` and sorts last.
 
 use std::cmp::Ordering;
+use std::fmt;
+
+/// Why [`RoaringU32::deserialize`] rejected a byte image. Every variant marks a
+/// specific reader-MUST-reject rule (truncation, foreign/unsupported header, or
+/// a non-canonical / corrupt container encoding); see `spec/features/
+/// roaring-u32.md`. Mirrors the crate's other typed decode error, `HllError`.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum RoaringError {
+    /// The image ended mid-field: `need` bytes were required at `offset` but only
+    /// `have` remained.
+    Truncated {
+        /// Bytes the field needed.
+        need: usize,
+        /// Byte offset the field started at.
+        offset: usize,
+        /// Bytes actually remaining from `offset`.
+        have: usize,
+    },
+    /// The 4-byte header magic did not match the expected `0x3252_3055`.
+    BadMagic(u32),
+    /// The header version is not the supported `1`.
+    UnsupportedVersion(u16),
+    /// The header's reserved field was not zero.
+    NonZeroReserved(u16),
+    /// `CHUNK_COUNT` exceeded the `65536` chunk maximum.
+    ChunkCountTooLarge(u32),
+    /// Chunk high keys were not strictly ascending: `high` came after `prev`.
+    NonAscendingHighKey {
+        /// The offending high key.
+        high: u16,
+        /// The previous high key it failed to exceed.
+        prev: u16,
+    },
+    /// A container record's pad byte was not zero.
+    NonZeroPad(u8),
+    /// An ARRAY container's cardinality `card` exceeded `max` (would be a BITMAP).
+    NonCanonicalArrayCardinality {
+        /// The stored cardinality.
+        card: u32,
+        /// The maximum ARRAY cardinality (`4096`).
+        max: usize,
+    },
+    /// ARRAY low keys were not strictly ascending: `low` came after `prev`.
+    NonAscendingArrayLowKey {
+        /// The offending low key.
+        low: u16,
+        /// The previous low key it failed to exceed.
+        prev: u16,
+    },
+    /// A BITMAP container's cardinality `card` was `<= max` (would be an ARRAY).
+    NonCanonicalBitmapCardinality {
+        /// The stored cardinality.
+        card: u32,
+        /// The maximum ARRAY cardinality (`4096`); a BITMAP must exceed it.
+        max: usize,
+    },
+    /// A BITMAP's actual set-bit count `popcount` disagreed with the `stored`
+    /// cardinality.
+    BitmapPopcountMismatch {
+        /// The counted set bits.
+        popcount: u32,
+        /// The cardinality the record claimed.
+        stored: u32,
+    },
+    /// A container-type tag byte was neither `ARRAY` (`0x01`) nor `BITMAP`
+    /// (`0x02`).
+    UnknownContainerTag(u8),
+    /// `count` bytes remained after the last chunk record.
+    TrailingBytes(usize),
+}
+
+impl fmt::Display for RoaringError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RoaringError::Truncated { need, offset, have } => write!(
+                f,
+                "truncated: need {need} bytes at offset {offset}, have {have}"
+            ),
+            RoaringError::BadMagic(m) => write!(f, "bad MAGIC: {m:#010x}"),
+            RoaringError::UnsupportedVersion(v) => write!(f, "unsupported VERSION: {v}"),
+            RoaringError::NonZeroReserved(r) => write!(f, "non-zero RESERVED: {r:#06x}"),
+            RoaringError::ChunkCountTooLarge(c) => write!(f, "CHUNK_COUNT > 65536: {c}"),
+            RoaringError::NonAscendingHighKey { high, prev } => write!(
+                f,
+                "non-ascending or duplicate high key: {high:#06x} after {prev:#06x}"
+            ),
+            RoaringError::NonZeroPad(p) => write!(f, "non-zero PAD: {p:#04x}"),
+            RoaringError::NonCanonicalArrayCardinality { card, max } => {
+                write!(f, "non-canonical ARRAY cardinality {card} (> {max})")
+            }
+            RoaringError::NonAscendingArrayLowKey { low, prev } => write!(
+                f,
+                "non-ascending or duplicate ARRAY low key: {low:#06x} after {prev:#06x}"
+            ),
+            RoaringError::NonCanonicalBitmapCardinality { card, max } => {
+                write!(f, "non-canonical BITMAP cardinality {card} (<= {max})")
+            }
+            RoaringError::BitmapPopcountMismatch { popcount, stored } => {
+                write!(
+                    f,
+                    "BITMAP popcount {popcount} != stored cardinality {stored}"
+                )
+            }
+            RoaringError::UnknownContainerTag(t) => {
+                write!(f, "unknown CONTAINER_TYPE tag: {t:#04x}")
+            }
+            RoaringError::TrailingBytes(n) => write!(f, "{n} trailing bytes after chunk records"),
+        }
+    }
+}
+
+impl std::error::Error for RoaringError {}
 
 /// Cardinality at and below which a chunk is an ARRAY; above which it is a
 /// BITMAP. `4096` is the classic Roaring break-even (`4096 × 2 bytes == 8192`,
@@ -485,64 +597,58 @@ impl RoaringU32 {
         out
     }
 
-    /// Deserialize a canonical v1 byte image. Returns an error string for any
+    /// Deserialize a canonical v1 byte image. Returns a [`RoaringError`] for any
     /// non-canonical / corrupt / foreign image (see spec reader-MUST-reject
     /// rules).
-    pub fn deserialize(bytes: &[u8]) -> Result<RoaringU32, String> {
+    pub fn deserialize(bytes: &[u8]) -> Result<RoaringU32, RoaringError> {
         let mut r = Reader::new(bytes);
         let magic = r.u32()?;
         if magic != MAGIC {
-            return Err(format!("bad MAGIC: {:#010x}", magic));
+            return Err(RoaringError::BadMagic(magic));
         }
         let version = r.u16()?;
         if version != VERSION {
-            return Err(format!("unsupported VERSION: {}", version));
+            return Err(RoaringError::UnsupportedVersion(version));
         }
         let reserved = r.u16()?;
         if reserved != 0 {
-            return Err(format!("non-zero RESERVED: {:#06x}", reserved));
+            return Err(RoaringError::NonZeroReserved(reserved));
         }
         let chunk_count = r.u32()?;
         if chunk_count > 65536 {
-            return Err(format!("CHUNK_COUNT > 65536: {}", chunk_count));
+            return Err(RoaringError::ChunkCountTooLarge(chunk_count));
         }
         let mut chunks: Vec<(u16, Container)> = Vec::with_capacity(chunk_count as usize);
         let mut prev_high: Option<u16> = None;
         for _ in 0..chunk_count {
             let high = r.u16()?;
-            if let Some(p) = prev_high {
-                if high <= p {
-                    return Err(format!(
-                        "non-ascending or duplicate high key: {:#06x} after {:#06x}",
-                        high, p
-                    ));
+            if let Some(prev) = prev_high {
+                if high <= prev {
+                    return Err(RoaringError::NonAscendingHighKey { high, prev });
                 }
             }
             prev_high = Some(high);
             let tag = r.u8()?;
             let pad = r.u8()?;
             if pad != 0 {
-                return Err(format!("non-zero PAD: {:#04x}", pad));
+                return Err(RoaringError::NonZeroPad(pad));
             }
             let card = r.u16()? as u32 + 1; // CARDINALITY_MINUS_1 + 1
             match tag {
                 TAG_ARRAY => {
                     if card as usize > ARRAY_MAX {
-                        return Err(format!(
-                            "non-canonical ARRAY cardinality {} (> {})",
-                            card, ARRAY_MAX
-                        ));
+                        return Err(RoaringError::NonCanonicalArrayCardinality {
+                            card,
+                            max: ARRAY_MAX,
+                        });
                     }
                     let mut lows = Vec::with_capacity(card as usize);
                     let mut prev: Option<u16> = None;
                     for _ in 0..card {
                         let low = r.u16()?;
-                        if let Some(p) = prev {
-                            if low <= p {
-                                return Err(format!(
-                                    "non-ascending or duplicate ARRAY low key: {:#06x} after {:#06x}",
-                                    low, p
-                                ));
+                        if let Some(prev) = prev {
+                            if low <= prev {
+                                return Err(RoaringError::NonAscendingArrayLowKey { low, prev });
                             }
                         }
                         prev = Some(low);
@@ -552,10 +658,10 @@ impl RoaringU32 {
                 }
                 TAG_BITMAP => {
                     if (card as usize) <= ARRAY_MAX {
-                        return Err(format!(
-                            "non-canonical BITMAP cardinality {} (<= {})",
-                            card, ARRAY_MAX
-                        ));
+                        return Err(RoaringError::NonCanonicalBitmapCardinality {
+                            card,
+                            max: ARRAY_MAX,
+                        });
                     }
                     let mut words = Box::new([0u64; BITMAP_WORDS]);
                     let mut popcount: u32 = 0;
@@ -565,21 +671,18 @@ impl RoaringU32 {
                         *w = word;
                     }
                     if popcount != card {
-                        return Err(format!(
-                            "BITMAP popcount {} != stored cardinality {}",
-                            popcount, card
-                        ));
+                        return Err(RoaringError::BitmapPopcountMismatch {
+                            popcount,
+                            stored: card,
+                        });
                     }
                     chunks.push((high, Container::Bitmap { words, count: card }));
                 }
-                other => return Err(format!("unknown CONTAINER_TYPE tag: {:#04x}", other)),
+                other => return Err(RoaringError::UnknownContainerTag(other)),
             }
         }
         if !r.at_end() {
-            return Err(format!(
-                "{} trailing bytes after chunk records",
-                r.remaining()
-            ));
+            return Err(RoaringError::TrailingBytes(r.remaining()));
         }
         Ok(RoaringU32 { chunks })
     }
@@ -660,29 +763,28 @@ impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8]) -> Self {
         Reader { bytes, pos: 0 }
     }
-    fn take(&mut self, n: usize) -> Result<&'a [u8], String> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], RoaringError> {
         if self.pos + n > self.bytes.len() {
-            return Err(format!(
-                "truncated: need {} bytes at offset {}, have {}",
-                n,
-                self.pos,
-                self.bytes.len() - self.pos
-            ));
+            return Err(RoaringError::Truncated {
+                need: n,
+                offset: self.pos,
+                have: self.bytes.len() - self.pos,
+            });
         }
         let s = &self.bytes[self.pos..self.pos + n];
         self.pos += n;
         Ok(s)
     }
-    fn u8(&mut self) -> Result<u8, String> {
+    fn u8(&mut self) -> Result<u8, RoaringError> {
         Ok(self.take(1)?[0])
     }
-    fn u16(&mut self) -> Result<u16, String> {
+    fn u16(&mut self) -> Result<u16, RoaringError> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().unwrap()))
     }
-    fn u32(&mut self) -> Result<u32, String> {
+    fn u32(&mut self) -> Result<u32, RoaringError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()))
     }
-    fn u64(&mut self) -> Result<u64, String> {
+    fn u64(&mut self) -> Result<u64, RoaringError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
     fn at_end(&self) -> bool {
@@ -1110,7 +1212,47 @@ mod tests {
     fn reject_bad_magic() {
         let mut b = valid_bytes();
         b[0] = 0x00;
-        assert!(RoaringU32::deserialize(&b).is_err());
+        assert!(matches!(
+            RoaringU32::deserialize(&b),
+            Err(RoaringError::BadMagic(_))
+        ));
+    }
+
+    #[test]
+    fn typed_error_variants_are_specific() {
+        // The typed error names the exact reader-reject rule.
+        let mut b = valid_bytes();
+        b[4] = 0x02;
+        assert_eq!(
+            RoaringU32::deserialize(&b),
+            Err(RoaringError::UnsupportedVersion(2))
+        );
+
+        let b = valid_bytes();
+        assert!(matches!(
+            RoaringU32::deserialize(&b[..5]),
+            Err(RoaringError::Truncated { .. })
+        ));
+
+        let mut b = valid_bytes();
+        b[14] = 0x03; // first chunk tag
+        assert_eq!(
+            RoaringU32::deserialize(&b),
+            Err(RoaringError::UnknownContainerTag(0x03))
+        );
+
+        let mut b = valid_bytes();
+        b.push(0xAB); // one trailing byte
+        assert_eq!(
+            RoaringU32::deserialize(&b),
+            Err(RoaringError::TrailingBytes(1))
+        );
+
+        // Display still renders a human-readable message.
+        assert_eq!(
+            RoaringError::UnsupportedVersion(2).to_string(),
+            "unsupported VERSION: 2"
+        );
     }
 
     #[test]

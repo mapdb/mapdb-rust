@@ -176,7 +176,8 @@ mod tests {
     fn example_leaderboard() {
         // Key: score, Value: player name.
         // Higher scores first → reverse comparator.
-        let mut board: DynTreeMap<i32, String> = TreeMap::with_comparator(reverse_comparator::<i32>());
+        let mut board: DynTreeMap<i32, String> =
+            TreeMap::with_comparator(reverse_comparator::<i32>());
 
         board.insert(100, String::from("Alice"));
         board.insert(250, String::from("Bob"));

@@ -8,8 +8,8 @@
 //! extension trait over [`Iterator`].
 //!
 //! This is the v3 replacement for the boxed-iterator "trait towers"
-//! (`traits.rs`, `object/traits.rs`) and the free functions in
-//! [`crate::stream`]. Because it is blanket-implemented for every `I: Iterator`,
+//! (`traits.rs`, `object/traits.rs`) and the former `stream` free functions.
+//! Because it is blanket-implemented for every `I: Iterator`,
 //! the vocabulary (`select`, `reject`, `detect`, `inject_into`, `group_by`, …)
 //! is available on **every** iterator — crate types, `std` types, and downstream
 //! types alike — lazily and unboxed.

@@ -155,8 +155,7 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
     /// A lazy, double-ended, exact-size iterator over the elements in `range`,
     /// ascending (`.rev()` for descending). Bounds are compared through the
     /// set's **own comparator**, so selection can never disagree with the set
-    /// order (unlike the natural-order-only [`range_elements`](TreeSet::range_elements)).
-    /// See [`TreeMap::range`] for the inverted-bounds policy.
+    /// order. See [`TreeMap::range`] for the inverted-bounds policy.
     pub fn range<R: std::ops::RangeBounds<T>>(
         &self,
         range: R,
@@ -266,31 +265,11 @@ impl<T: Clone, C: Compare<T>> TreeSet<T, C> {
 }
 
 impl<T: Ord + Copy> TreeSet<T> {
-    // ── Range slice & descending iteration (consume `Range<T>`) ──────
+    // ── Natural-order range snapshot & removal (consume `Range<T>`) ──
     //
-    // Range membership is EXACTLY `range.contains(element)`.
-    //
-    // ⚠️ NATURAL-ORDER-ONLY (delegates to `TreeMap`'s `Range<K>` methods):
-    // membership is selected by the element's natural `Ord`, NOT by the set's
-    // `Comparator`. Under a non-natural comparator, selection can disagree with
-    // the tree's ordering. Use [`TreeSet::range`] for comparator-correct
-    // queries.
-
-    /// Elements in `range`, ascending under natural `Ord` (see the
-    /// natural-order-only caveat on this impl block). Snapshot; read-only.
-    pub fn range_elements(&self, range: Range<T>) -> Vec<T> {
-        self.tree.range_keys(range)
-    }
-
-    /// Elements in `range`, descending.
-    pub fn descending_range_elements(&self, range: Range<T>) -> Vec<T> {
-        self.tree.descending_range_keys(range)
-    }
-
-    /// All elements, descending.
-    pub fn descending(&self) -> Vec<T> {
-        self.tree.descending_keys()
-    }
+    // Range membership is EXACTLY `range.contains(element)`, selected by the
+    // element's natural `Ord`. Use [`TreeSet::range`] for a lazy,
+    // comparator-correct range query.
 
     /// A **new independent** set of the elements ∈ `range` (materialized
     /// snapshot; mutating it never affects the original and vice versa). Both
@@ -636,7 +615,11 @@ mod tests {
         assert_eq!(s.higher(&-1), Some(&0));
         assert_eq!(s.ceiling(&i32::MAX), Some(&i32::MAX));
         assert_eq!(s.higher(&i32::MAX), None);
-        assert_eq!(s.descending(), vec![i32::MAX, 1, 0, -1, i32::MIN]);
+        // Descending order via the lazy `range` iterator (`.rev()`).
+        assert_eq!(
+            s.range(..).rev().copied().collect::<Vec<_>>(),
+            vec![i32::MAX, 1, 0, -1, i32::MIN]
+        );
     }
 
     #[test]
@@ -651,26 +634,38 @@ mod tests {
 
     #[test]
     fn test_range_and_descending() {
+        use std::ops::Bound;
         let s = set_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
         assert_eq!(
-            s.range_elements(Range::closed_open(30, 70)),
+            s.range(30..70).copied().collect::<Vec<_>>(),
             vec![30, 40, 50, 60]
         );
         assert_eq!(
-            s.descending_range_elements(Range::closed_open(30, 70)),
+            s.range(30..70).rev().copied().collect::<Vec<_>>(),
             vec![60, 50, 40, 30]
         );
         assert_eq!(
-            s.range_elements(Range::open_closed(30, 70)),
+            s.range((Bound::Excluded(30), Bound::Included(70)))
+                .copied()
+                .collect::<Vec<_>>(),
             vec![40, 50, 60, 70]
         );
-        assert_eq!(s.range_elements(Range::at_least(80)), vec![80, 90, 100]);
+        assert_eq!(
+            s.range(80..).copied().collect::<Vec<_>>(),
+            vec![80, 90, 100]
+        );
     }
 
     #[test]
     fn test_range_open_no_integer_is_empty() {
+        use std::ops::Bound;
         let s = set_of(&[1, 2]);
-        assert_eq!(s.range_elements(Range::open(1, 2)), Vec::<i32>::new());
+        assert_eq!(
+            s.range((Bound::Excluded(1), Bound::Excluded(2)))
+                .copied()
+                .collect::<Vec<i32>>(),
+            Vec::<i32>::new()
+        );
     }
 
     #[test]

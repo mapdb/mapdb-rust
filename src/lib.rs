@@ -38,7 +38,6 @@ pub mod rich_iterator;
 pub mod roaring;
 mod slot_list;
 pub mod space_saving;
-pub mod stream;
 pub mod synchronized;
 pub mod traits;
 

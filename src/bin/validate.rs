@@ -24,7 +24,7 @@ use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::Collection as ObjectCollection;
 use mapdb_collections::object::TreeMap as ObjectTreeMap;
-use mapdb_collections::object::{natural_comparator, TreeSet};
+use mapdb_collections::object::{natural_comparator, DynTreeSet, TreeSet};
 use mapdb_collections::object::{MutableCollection, MutableList};
 use mapdb_collections::range::{BoundType, Range};
 use mapdb_collections::roaring::RoaringU32;
@@ -2435,7 +2435,8 @@ fn run_f32_treeset(
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
 ) {
-    let mut set: TreeSet<HashableF32> = TreeSet::with_comparator(natural_comparator::<HashableF32>());
+    let mut set: DynTreeSet<HashableF32> =
+        TreeSet::with_comparator(natural_comparator::<HashableF32>());
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => {

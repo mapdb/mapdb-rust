@@ -82,12 +82,6 @@ impl<K: Eq + Hash, V> MutableMap<K, V> for HashMap<K, V> {
 }
 
 impl<K: Eq + Hash, V> HashMap<K, V> {
-    pub fn keys_to_vec(&self) -> Vec<&K> {
-        self.inner.iter().map(|(k, _)| k).collect()
-    }
-    pub fn values_to_vec(&self) -> Vec<&V> {
-        self.inner.iter().map(|(_, v)| v).collect()
-    }
     pub fn contains_value(&self, value: &V) -> bool
     where
         V: PartialEq,

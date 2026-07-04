@@ -203,16 +203,6 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
 // ---- borrow-free convenience/functional methods (no `K: Clone`) ------------
 
 impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
-    /// Keys in insertion order, as references.
-    pub fn keys_to_vec(&self) -> Vec<&K> {
-        self.iter().map(|(k, _)| k).collect()
-    }
-
-    /// Values in insertion order, as references.
-    pub fn values_to_vec(&self) -> Vec<&V> {
-        self.iter().map(|(_, v)| v).collect()
-    }
-
     /// Whether any value equals `value`.
     pub fn contains_value(&self, value: &V) -> bool
     where
@@ -459,7 +449,7 @@ mod tests {
         m.insert("c", 3);
         m.insert("a", 1);
         m.insert("b", 2);
-        let keys: Vec<&&str> = m.keys_to_vec();
+        let keys: Vec<&&str> = m.keys().collect();
         assert_eq!(keys, vec![&"c", &"a", &"b"]);
     }
 
@@ -470,7 +460,7 @@ mod tests {
         m.insert("b", 2);
         m.insert("c", 3);
         m.insert("b", 20);
-        let keys: Vec<&&str> = m.keys_to_vec();
+        let keys: Vec<&&str> = m.keys().collect();
         assert_eq!(keys, vec![&"a", &"b", &"c"]);
         assert_eq!(m.get(&"b"), Some(&20));
     }
@@ -482,7 +472,7 @@ mod tests {
         m.insert("b", 2);
         m.insert("c", 3);
         m.remove(&"b");
-        let keys: Vec<&&str> = m.keys_to_vec();
+        let keys: Vec<&&str> = m.keys().collect();
         assert_eq!(keys, vec![&"a", &"c"]);
     }
 
@@ -506,7 +496,7 @@ mod tests {
         m.insert(3, 30);
         let big = m.select(|_, v| *v > 15);
         assert_eq!(big.len(), 2);
-        let keys: Vec<&i32> = big.keys_to_vec();
+        let keys: Vec<&i32> = big.keys().collect();
         assert_eq!(keys, vec![&2, &3]);
         let small = m.reject(|_, v| *v > 15);
         assert_eq!(small.len(), 1);
@@ -539,7 +529,7 @@ mod tests {
         let mut m: LinkedHashMap<&str, i32> = [("a", 1), ("b", 2)].into_iter().collect();
         assert_eq!(m.len(), 2);
         m.extend([("c", 3)]);
-        let keys = m.keys_to_vec();
+        let keys: Vec<_> = m.keys().collect();
         assert_eq!(keys, vec![&"a", &"b", &"c"]);
     }
 
@@ -564,7 +554,7 @@ mod tests {
         *m.get_mut(&"b").unwrap() += 100;
         assert_eq!(m.get(&"b"), Some(&102));
         // order untouched
-        assert_eq!(m.keys_to_vec(), vec![&"a", &"b"]);
+        assert_eq!(m.keys().collect::<Vec<_>>(), vec![&"a", &"b"]);
     }
 
     #[test]

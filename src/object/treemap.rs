@@ -576,77 +576,16 @@ impl<K: Clone, V, C: Compare<K>> TreeMap<K, V, C> {
 }
 
 impl<K: Ord + Copy, V> TreeMap<K, V> {
-    // ── Range slice & descending iteration (consume `Range<K>`) ──────
+    // ── Natural-order range snapshot & removal (consume `Range<K>`) ──
     //
     // Range membership is EXACTLY `range.contains(key)`: e.g. `open(1, 2)`
     // over `i32` matches no key yet is a valid, non-cut-empty range. We
     // never infer discrete-domain emptiness from the cuts.
     //
     // ⚠️ NATURAL-ORDER-ONLY. These `Range<K>`-argument methods select
-    // membership by the key's natural `Ord` (via `Range::contains`), NOT by
-    // the map's `Comparator`. When the map is built with a non-natural
-    // comparator (e.g. `reverse_comparator`, a by-field comparator, or a
-    // float total-order), selection can disagree with the tree's own ordering:
-    // the ascending/descending labels follow natural order, and two keys that
-    // are comparator-equal but `Ord`-distinct select inconsistently. For
-    // comparator-correct range queries use [`TreeMap::range`] (the
-    // `RangeBounds` API), which compares bounds through the map's comparator
-    // and thus makes this divergence unrepresentable.
-
-    /// Keys in `range`, ascending under the key's **natural `Ord`** (see the
-    /// natural-order-only caveat on this impl block). Snapshot; read-only.
-    pub fn range_keys(&self, range: Range<K>) -> Vec<K> {
-        self.keys()
-            .copied()
-            .filter(|k| range.contains(*k))
-            .collect()
-    }
-
-    /// `(key, value)` pairs whose key ∈ `range`, ascending. Values are
-    /// copied so the result is an independent snapshot.
-    pub fn range_entries(&self, range: Range<K>) -> Vec<(K, V)>
-    where
-        V: Copy,
-    {
-        self.iter()
-            .filter(|(k, _)| range.contains(**k))
-            .map(|(k, v)| (*k, *v))
-            .collect()
-    }
-
-    /// Keys in `range`, descending.
-    pub fn descending_range_keys(&self, range: Range<K>) -> Vec<K> {
-        let mut v = self.range_keys(range);
-        v.reverse();
-        v
-    }
-
-    /// `(key, value)` pairs whose key ∈ `range`, descending.
-    pub fn descending_range_entries(&self, range: Range<K>) -> Vec<(K, V)>
-    where
-        V: Copy,
-    {
-        let mut v = self.range_entries(range);
-        v.reverse();
-        v
-    }
-
-    /// All keys, descending.
-    pub fn descending_keys(&self) -> Vec<K> {
-        let mut v: Vec<K> = self.keys().copied().collect();
-        v.reverse();
-        v
-    }
-
-    /// All `(key, value)` pairs, descending.
-    pub fn descending_entries(&self) -> Vec<(K, V)>
-    where
-        V: Copy,
-    {
-        let mut v: Vec<(K, V)> = self.iter().map(|(k, v)| (*k, *v)).collect();
-        v.reverse();
-        v
-    }
+    // membership by the key's natural `Ord` (via `Range::contains`). For a
+    // lazy, comparator-correct range query use [`TreeMap::range`] (the
+    // `RangeBounds` API), which compares bounds through the map's comparator.
 
     /// A **new independent SNAPSHOT** map of the entries whose key ∈ `range`.
     ///
@@ -1741,7 +1680,11 @@ mod tests {
         assert_eq!(m.higher_key(&-1), Some(&0));
         assert_eq!(m.ceiling_key(&i32::MAX), Some(&i32::MAX));
         assert_eq!(m.higher_key(&i32::MAX), None);
-        assert_eq!(m.descending_keys(), vec![i32::MAX, 1, 0, -1, i32::MIN]);
+        // Descending keys via the lazy `range` iterator (`.rev()`).
+        assert_eq!(
+            m.range(..).rev().map(|(k, _)| *k).collect::<Vec<_>>(),
+            vec![i32::MAX, 1, 0, -1, i32::MIN]
+        );
     }
 
     #[test]
@@ -1769,15 +1712,15 @@ mod tests {
     fn test_range_closed_open() {
         let m = map_of(&[10, 20, 30, 40, 50, 60, 70, 80, 90, 100]);
         assert_eq!(
-            m.range_keys(Range::closed_open(30, 70)),
+            m.range(30..70).map(|(k, _)| *k).collect::<Vec<_>>(),
             vec![30, 40, 50, 60]
         );
         assert_eq!(
-            m.descending_range_keys(Range::closed_open(30, 70)),
+            m.range(30..70).rev().map(|(k, _)| *k).collect::<Vec<_>>(),
             vec![60, 50, 40, 30]
         );
         assert_eq!(
-            m.range_entries(Range::closed_open(30, 50)),
+            m.range(30..50).map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
             vec![(30, 300), (40, 400)]
         );
     }
@@ -1785,9 +1728,15 @@ mod tests {
     #[test]
     fn test_range_open_no_integer_is_empty() {
         // open(1, 2) over i32 matches NOTHING (membership = contains), but
-        // is not cut-empty.
+        // is not cut-empty. `remove_range` still takes the crate `Range`.
+        use std::ops::Bound;
         let mut m = map_of(&[1, 2]);
-        assert_eq!(m.range_keys(Range::open(1, 2)), Vec::<i32>::new());
+        assert_eq!(
+            m.range((Bound::Excluded(1), Bound::Excluded(2)))
+                .map(|(k, _)| *k)
+                .collect::<Vec<i32>>(),
+            Vec::<i32>::new()
+        );
         assert_eq!(m.remove_range(Range::open(1, 2)), 0);
         assert_eq!(m.len(), 2);
     }

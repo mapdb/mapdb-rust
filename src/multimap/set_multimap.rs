@@ -342,6 +342,56 @@ impl<'a, K: Eq + Hash, V: Eq> IntoIterator for &'a SetMultimap<K, V> {
     }
 }
 
+/// Consuming iterator over flattened `(K, V)` pairs (one per stored value) —
+/// the owned counterpart to the borrowing `iter`. Because a key with `n`
+/// values yields `n` **owned** `(K, V)` pairs, `K: Clone` is required (the key
+/// is cloned for every value but the last of its bucket, which moves out).
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct SetMultimapIntoIter<K, V> {
+    inner: crate::hash_table::OpenHashMapIntoIter<K, Vec<V>>,
+    /// The key currently being flattened and its remaining values.
+    current: Option<(K, std::vec::IntoIter<V>)>,
+}
+
+impl<K: Clone, V> Iterator for SetMultimapIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        loop {
+            if let Some((key, mut values)) = self.current.take() {
+                if let Some(value) = values.next() {
+                    if values.len() > 0 {
+                        // More values in this bucket: clone the key, keep going.
+                        let pair = (key.clone(), value);
+                        self.current = Some((key, values));
+                        return Some(pair);
+                    }
+                    // Last value of the bucket: move the owned key out.
+                    return Some((key, value));
+                }
+                // Empty bucket (normal form forbids it, but stay robust): drop.
+            }
+            let (key, values) = self.inner.next()?;
+            if !values.is_empty() {
+                self.current = Some((key, values.into_iter()));
+            }
+        }
+    }
+}
+
+impl<K: Clone, V> std::iter::FusedIterator for SetMultimapIntoIter<K, V> {}
+
+/// Consumes the multimap, yielding one owned `(K, V)` pair per stored value.
+impl<K: Eq + Hash + Clone, V: Eq> IntoIterator for SetMultimap<K, V> {
+    type Item = (K, V);
+    type IntoIter = SetMultimapIntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        SetMultimapIntoIter {
+            inner: self.data.into_iter(),
+            current: None,
+        }
+    }
+}
+
 impl<K: Eq + Hash + fmt::Display, V: Eq + fmt::Display> fmt::Display for SetMultimap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
@@ -381,6 +431,28 @@ mod tests {
         assert_eq!(m.get(&1), &[10, 20]);
         assert_eq!(m.get(&2), &[30]);
         assert_eq!(m.get(&99), &[] as &[i32]);
+    }
+
+    #[test]
+    fn into_iter_flattens_deduped_pairs() {
+        let mut m: SetMultimap<i32, i32> = SetMultimap::new();
+        m.insert(1, 10);
+        m.insert(1, 20);
+        m.insert(1, 10); // duplicate, dropped
+        m.insert(2, 30);
+        let total = m.len();
+        let mut pairs: Vec<(i32, i32)> = m.into_iter().collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs.len(), total);
+        assert_eq!(pairs, vec![(1, 10), (1, 20), (2, 30)]);
+    }
+
+    #[test]
+    fn into_iter_empty_and_fused() {
+        let m: SetMultimap<i32, i32> = SetMultimap::new();
+        let mut it = m.into_iter();
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None); // FusedIterator
     }
 
     #[test]

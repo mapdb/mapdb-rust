@@ -260,6 +260,57 @@ impl<'a, T: Eq + Hash> IntoIterator for &'a HashBag<T> {
     }
 }
 
+/// Consuming iterator yielding each element once per occurrence — the owned
+/// counterpart to the borrowing [`HashBagIter`]. Because a single stored
+/// element is handed out `count` times as **owned** values, `T: Clone` is
+/// required (the element is cloned for every occurrence but the last, which
+/// moves out). Distinct-element order is the backing map's iteration order.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct HashBagIntoIter<T> {
+    inner: crate::hash_table::OpenHashMapIntoIter<T, usize>,
+    /// The element currently being replayed and its remaining occurrences
+    /// (always `>= 1` while `Some`).
+    current: Option<(T, usize)>,
+}
+
+impl<T: Clone> Iterator for HashBagIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        loop {
+            if let Some((v, remaining)) = self.current.take() {
+                if remaining > 1 {
+                    // More occurrences to come: clone for this yield, keep the
+                    // original so the *last* occurrence moves it out (matching
+                    // the flattening `Multimap`/`SetMultimap` owned iterators).
+                    let item = v.clone();
+                    self.current = Some((v, remaining - 1));
+                    return Some(item);
+                }
+                // Last occurrence: move the owned element out.
+                return Some(v);
+            }
+            let (v, count) = self.inner.next()?;
+            if count > 0 {
+                self.current = Some((v, count));
+            }
+        }
+    }
+}
+
+impl<T: Clone> std::iter::FusedIterator for HashBagIntoIter<T> {}
+
+/// Consumes the bag, yielding each element once per occurrence.
+impl<T: Eq + Hash + Clone> IntoIterator for HashBag<T> {
+    type Item = T;
+    type IntoIter = HashBagIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        HashBagIntoIter {
+            inner: self.counts.into_iter(),
+            current: None,
+        }
+    }
+}
+
 impl<T: Eq + Hash> FromIterator<T> for HashBag<T> {
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let mut bag = HashBag::new();
@@ -310,6 +361,91 @@ mod tests {
         assert_eq!(bag.occurrences_of(&"a"), 2);
         assert_eq!(bag.occurrences_of(&"b"), 1);
         assert_eq!(bag.occurrences_of(&"c"), 0);
+    }
+
+    #[test]
+    fn into_iter_yields_each_element_once_per_occurrence() {
+        let bag = HashBag::from_iter(["a", "a", "a", "b", "c", "c"]);
+        let total: usize = bag.len();
+        let mut owned: Vec<&str> = bag.into_iter().collect();
+        owned.sort_unstable();
+        assert_eq!(owned.len(), total); // one item per occurrence
+        assert_eq!(owned, vec!["a", "a", "a", "b", "c", "c"]);
+    }
+
+    #[test]
+    fn into_iter_round_trips_through_from_iter() {
+        // A bag rebuilt from its own consuming iterator equals the original.
+        let bag = HashBag::from_iter([1, 1, 2, 3, 3, 3]);
+        let rebuilt: HashBag<i32> = bag.clone().into_iter().collect();
+        assert_eq!(bag, rebuilt);
+    }
+
+    #[test]
+    fn into_iter_empty_is_empty() {
+        let bag: HashBag<i32> = HashBag::new();
+        assert_eq!(bag.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn into_iter_is_fused() {
+        let bag = HashBag::from_iter(["x", "x"]);
+        let mut it = bag.into_iter();
+        assert_eq!(it.next(), Some("x"));
+        assert_eq!(it.next(), Some("x"));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None); // stays None (FusedIterator)
+    }
+
+    #[test]
+    fn into_iter_clones_owned_values() {
+        // A Clone-only, non-Copy element must be replayed by cloning.
+        let bag = HashBag::from_iter([String::from("k"), String::from("k")]);
+        let owned: Vec<String> = bag.into_iter().collect();
+        assert_eq!(owned, vec![String::from("k"), String::from("k")]);
+    }
+
+    #[test]
+    fn into_iter_moves_original_on_last_occurrence() {
+        // A Clone type whose clones are distinguishable from the stored
+        // original; Eq/Hash group solely by `key`, so all occurrences live in
+        // one bag slot. The last occurrence must move the original out (the
+        // earlier ones are clones) — matching the multimap owned iterators.
+        #[derive(Debug)]
+        struct Marked {
+            key: u8,
+            is_clone: bool,
+        }
+        impl Clone for Marked {
+            fn clone(&self) -> Self {
+                Marked {
+                    key: self.key,
+                    is_clone: true,
+                }
+            }
+        }
+        impl PartialEq for Marked {
+            fn eq(&self, other: &Self) -> bool {
+                self.key == other.key
+            }
+        }
+        impl Eq for Marked {}
+        impl Hash for Marked {
+            fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+                self.key.hash(h);
+            }
+        }
+
+        let mut bag = HashBag::new();
+        bag.add_occurrences(
+            Marked {
+                key: 7,
+                is_clone: false,
+            },
+            3,
+        );
+        let flags: Vec<bool> = bag.into_iter().map(|m| m.is_clone).collect();
+        assert_eq!(flags, vec![true, true, false]);
     }
 
     #[test]

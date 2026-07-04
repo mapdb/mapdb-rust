@@ -214,6 +214,45 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
     }
 }
 
+/// Consuming iterator over a [`RangeMap`]'s canonical `(range, value)` entries,
+/// **ascending by lower cut** — the owned counterpart to
+/// [`RangeMap::as_map_of_ranges`] (which borrows the values).
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct RangeMapIntoIter<T, V> {
+    inner: std::vec::IntoIter<(Range<T>, V)>,
+}
+
+impl<T, V> Iterator for RangeMapIntoIter<T, V> {
+    type Item = (Range<T>, V);
+    fn next(&mut self) -> Option<(Range<T>, V)> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T, V> DoubleEndedIterator for RangeMapIntoIter<T, V> {
+    fn next_back(&mut self) -> Option<(Range<T>, V)> {
+        self.inner.next_back()
+    }
+}
+
+impl<T, V> ExactSizeIterator for RangeMapIntoIter<T, V> {}
+impl<T, V> std::iter::FusedIterator for RangeMapIntoIter<T, V> {}
+
+/// Consumes the map, yielding its canonical `(range, value)` entries ascending
+/// by lower cut (the [normal form](RangeMap)).
+impl<T, V> IntoIterator for RangeMap<T, V> {
+    type Item = (Range<T>, V);
+    type IntoIter = RangeMapIntoIter<T, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        RangeMapIntoIter {
+            inner: self.entries.into_iter(),
+        }
+    }
+}
+
 fn cmp_lower_cut<T: Ord + Copy>(a: &Range<T>, b: &Range<T>) -> Ordering {
     a.lower_cut().cmp_cut(&b.lower_cut())
 }
@@ -242,6 +281,40 @@ mod tests {
         assert_eq!(m.get(3), Some(&100));
         assert_eq!(m.get(6), None);
         assert_eq!(m.get(8), Some(&200));
+    }
+
+    #[test]
+    fn into_iter_yields_ascending_normal_form() {
+        let mut m = RangeMap::new();
+        m.put(Range::closed(8, 9), 200);
+        m.put(Range::closed_open(1, 5), 100);
+        let borrowed = collected(&m);
+        let owned: Vec<(Range<i32>, i32)> = m.into_iter().collect();
+        assert_eq!(owned, borrowed);
+        assert_eq!(
+            owned,
+            vec![(Range::closed_open(1, 5), 100), (Range::closed(8, 9), 200)]
+        );
+    }
+
+    #[test]
+    fn into_iter_double_ended_and_exact_size() {
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 5), 10);
+        m.put(Range::closed_open(5, 9), 20);
+        m.put(Range::closed_open(9, 12), 30);
+        let mut it = m.into_iter();
+        assert_eq!(it.len(), 3); // ExactSizeIterator
+        assert_eq!(it.next(), Some((Range::closed_open(1, 5), 10)));
+        assert_eq!(it.next_back(), Some((Range::closed_open(9, 12), 30)));
+        assert_eq!(it.next(), Some((Range::closed_open(5, 9), 20)));
+        assert_eq!(it.next(), None);
+    }
+
+    #[test]
+    fn into_iter_empty() {
+        let m: RangeMap<i32, i32> = RangeMap::new();
+        assert_eq!(m.into_iter().count(), 0);
     }
 
     #[test]

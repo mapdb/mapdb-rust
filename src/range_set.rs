@@ -239,6 +239,45 @@ impl<T: Ord + Copy> RangeSet<T> {
     }
 }
 
+/// Consuming iterator over a [`RangeSet`]'s canonical disjoint ranges,
+/// **ascending by lower cut** — the same order as [`RangeSet::as_ranges`], but
+/// owned. The reuse-free counterpart to `as_ranges` (which borrows).
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct RangeSetIntoIter<T> {
+    inner: std::vec::IntoIter<Range<T>>,
+}
+
+impl<T> Iterator for RangeSetIntoIter<T> {
+    type Item = Range<T>;
+    fn next(&mut self) -> Option<Range<T>> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T> DoubleEndedIterator for RangeSetIntoIter<T> {
+    fn next_back(&mut self) -> Option<Range<T>> {
+        self.inner.next_back()
+    }
+}
+
+impl<T> ExactSizeIterator for RangeSetIntoIter<T> {}
+impl<T> std::iter::FusedIterator for RangeSetIntoIter<T> {}
+
+/// Consumes the set, yielding its canonical disjoint ranges ascending by lower
+/// cut (the [normal form](RangeSet)).
+impl<T> IntoIterator for RangeSet<T> {
+    type Item = Range<T>;
+    type IntoIter = RangeSetIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        RangeSetIntoIter {
+            inner: self.ranges.into_iter(),
+        }
+    }
+}
+
 /// Total cut comparison (the four-variant `Cut` order; see [`crate::range`]).
 fn cmp<T: Ord>(a: Cut<T>, b: Cut<T>) -> Ordering {
     a.cmp_cut(&b)
@@ -271,6 +310,37 @@ mod tests {
         assert!(s.contains(4));
         assert!(!s.contains(10));
         assert_eq!(s.span(), Some(Range::closed(1, 9)));
+    }
+
+    #[test]
+    fn into_iter_yields_ascending_normal_form() {
+        let s = rs(&[Range::closed(5, 9), Range::closed(1, 3)]);
+        let borrowed = collected(&s);
+        let owned: Vec<Range<i32>> = s.into_iter().collect();
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned, vec![Range::closed(1, 3), Range::closed(5, 9)]);
+    }
+
+    #[test]
+    fn into_iter_double_ended_and_exact_size() {
+        let s = rs(&[
+            Range::closed(1, 3),
+            Range::closed(5, 9),
+            Range::closed(20, 30),
+        ]);
+        let mut it = s.into_iter();
+        assert_eq!(it.len(), 3); // ExactSizeIterator
+        assert_eq!(it.next(), Some(Range::closed(1, 3)));
+        assert_eq!(it.next_back(), Some(Range::closed(20, 30)));
+        assert_eq!(it.next(), Some(Range::closed(5, 9)));
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn into_iter_empty() {
+        let s: RangeSet<i32> = RangeSet::new();
+        assert_eq!(s.into_iter().count(), 0);
     }
 
     #[test]

@@ -4,8 +4,23 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access across the collections
+## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` across the collections
 
+- **Owned `IntoIterator` across the remaining containers** — `RangeSet<T>`,
+  `RangeMap<T, V>`, `RoaringU32`, `HashBag<T>`, `Multimap<K, V>`, and
+  `SetMultimap<K, V>` now support consuming iteration (`for x in value`, and
+  `value.into_iter()`), matching the borrowing `IntoIterator` they already had.
+  Each yields in the same order as its borrowing iterator: `RangeSet`/`RangeMap`
+  hand out their normal-form entries ascending by lower cut (double-ended,
+  exact-size, fused, since they wrap the backing `Vec`); `RoaringU32` yields
+  `u32` values in unsigned-ascending order, decompressing one chunk container at
+  a time so peak extra memory is a single chunk; `HashBag` yields each element
+  once **per occurrence**, and `Multimap`/`SetMultimap` yield one flattened
+  `(K, V)` pair per stored value. The bag/multimap owned iterators require
+  `T: Clone` / `K: Clone` respectively (unavoidable: one stored element is handed
+  out as several owned values — it is cloned for every occurrence/value but the
+  last of its group, which moves out); the bound stays on the owned iterator only
+  and does not touch the borrowing iterator or any other method.
 - **`TreeMap::get_mut` / `iter_mut` / `values_mut`** (+ `IntoIterator for &mut
   TreeMap`, i.e. `for (k, v) in &mut map`) — the mutable-value-access surface,
   previously absent. Keys are handed out as `&K` (shared), so a caller cannot

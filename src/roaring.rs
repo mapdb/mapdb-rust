@@ -611,6 +611,45 @@ impl<'a> Extend<&'a u32> for RoaringU32 {
     }
 }
 
+/// Consuming iterator over a [`RoaringU32`]'s values in **unsigned u32
+/// ascending** order — the owned counterpart to [`RoaringU32::iter`]. Each
+/// chunk's container is decompressed and dropped as it is reached, so peak
+/// extra memory is one chunk's low keys rather than the whole set.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct RoaringIntoIter {
+    chunks: std::vec::IntoIter<(u16, Container)>,
+    current: Option<(u16, std::vec::IntoIter<u16>)>,
+}
+
+impl Iterator for RoaringIntoIter {
+    type Item = u32;
+    fn next(&mut self) -> Option<u32> {
+        loop {
+            if let Some((high, lows)) = &mut self.current {
+                if let Some(low) = lows.next() {
+                    return Some(join(*high, low));
+                }
+            }
+            let (high, container) = self.chunks.next()?;
+            self.current = Some((high, container.lows().into_iter()));
+        }
+    }
+}
+
+impl std::iter::FusedIterator for RoaringIntoIter {}
+
+/// Consumes the set, yielding its values in unsigned u32 ascending order.
+impl IntoIterator for RoaringU32 {
+    type Item = u32;
+    type IntoIter = RoaringIntoIter;
+    fn into_iter(self) -> Self::IntoIter {
+        RoaringIntoIter {
+            chunks: self.chunks.into_iter(),
+            current: None,
+        }
+    }
+}
+
 /// Bounds-checked little-endian byte reader.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -764,6 +803,44 @@ mod tests {
             s.serialize(),
             vec![0x55, 0x30, 0x52, 0x32, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
+    }
+
+    #[test]
+    fn into_iter_matches_borrowed_iter_across_chunks() {
+        // Values spanning several high-key chunks, mixing small and large
+        // low-key populations (exercises both array and bitmap containers).
+        let mut vals: Vec<u32> = Vec::new();
+        vals.extend(0..5000u32); // dense low chunk -> bitmap
+        vals.push(70_000); // second chunk, sparse -> array
+        vals.push(0xFFFF_FFFF); // top chunk
+        let s = build(&vals);
+        let borrowed: Vec<u32> = s.iter().collect();
+        let owned: Vec<u32> = s.into_iter().collect();
+        assert_eq!(owned, borrowed);
+        assert_eq!(owned, s_sorted(&vals));
+    }
+
+    #[test]
+    fn into_iter_empty_and_fused() {
+        let s = RoaringU32::new();
+        let mut it = s.into_iter();
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None); // FusedIterator
+    }
+
+    #[test]
+    fn into_iter_ascending_unsigned() {
+        // Reinterpreted i32 -1 (0xFFFFFFFF) sorts last under unsigned order.
+        let s = build(&[0xFFFF_FFFF, 0, 1, 0x8000_0000]);
+        let owned: Vec<u32> = s.into_iter().collect();
+        assert_eq!(owned, vec![0, 1, 0x8000_0000, 0xFFFF_FFFF]);
+    }
+
+    fn s_sorted(vals: &[u32]) -> Vec<u32> {
+        let mut v: Vec<u32> = vals.to_vec();
+        v.sort_unstable();
+        v.dedup();
+        v
     }
 
     #[test]

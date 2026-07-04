@@ -305,6 +305,56 @@ impl<'a, K: Eq + Hash, V> IntoIterator for &'a Multimap<K, V> {
     }
 }
 
+/// Consuming iterator over flattened `(K, V)` pairs (one per stored value) —
+/// the owned counterpart to the borrowing `iter`. Because a key with `n`
+/// values yields `n` **owned** `(K, V)` pairs, `K: Clone` is required (the key
+/// is cloned for every value but the last of its bucket, which moves out).
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct MultimapIntoIter<K, V> {
+    inner: crate::hash_table::OpenHashMapIntoIter<K, Vec<V>>,
+    /// The key currently being flattened and its remaining values.
+    current: Option<(K, std::vec::IntoIter<V>)>,
+}
+
+impl<K: Clone, V> Iterator for MultimapIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        loop {
+            if let Some((key, mut values)) = self.current.take() {
+                if let Some(value) = values.next() {
+                    if values.len() > 0 {
+                        // More values in this bucket: clone the key, keep going.
+                        let pair = (key.clone(), value);
+                        self.current = Some((key, values));
+                        return Some(pair);
+                    }
+                    // Last value of the bucket: move the owned key out.
+                    return Some((key, value));
+                }
+                // Empty bucket (normal form forbids it, but stay robust): drop.
+            }
+            let (key, values) = self.inner.next()?;
+            if !values.is_empty() {
+                self.current = Some((key, values.into_iter()));
+            }
+        }
+    }
+}
+
+impl<K: Clone, V> std::iter::FusedIterator for MultimapIntoIter<K, V> {}
+
+/// Consumes the multimap, yielding one owned `(K, V)` pair per stored value.
+impl<K: Eq + Hash + Clone, V> IntoIterator for Multimap<K, V> {
+    type Item = (K, V);
+    type IntoIter = MultimapIntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        MultimapIntoIter {
+            inner: self.data.into_iter(),
+            current: None,
+        }
+    }
+}
+
 impl<K: Eq + Hash + fmt::Display, V: fmt::Display> fmt::Display for Multimap<K, V> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{{")?;
@@ -353,6 +403,41 @@ mod tests {
         let removed = m.remove_all(&1);
         assert_eq!(removed, vec!["a", "b"]);
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn into_iter_flattens_one_pair_per_value() {
+        let mut m = Multimap::new();
+        m.insert("a", 1);
+        m.insert("a", 2);
+        m.insert("b", 3);
+        let total = m.len();
+        let mut pairs: Vec<(&str, i32)> = m.into_iter().collect();
+        pairs.sort_unstable();
+        assert_eq!(pairs.len(), total); // one pair per stored value
+        assert_eq!(pairs, vec![("a", 1), ("a", 2), ("b", 3)]);
+    }
+
+    #[test]
+    fn into_iter_borrowed_and_owned_agree() {
+        let mut m = Multimap::new();
+        m.insert(String::from("k"), 1);
+        m.insert(String::from("k"), 2);
+        m.insert(String::from("j"), 9);
+        let mut borrowed: Vec<(String, i32)> =
+            (&m).into_iter().map(|(k, v)| (k.clone(), *v)).collect();
+        let mut owned: Vec<(String, i32)> = m.into_iter().collect();
+        borrowed.sort();
+        owned.sort();
+        assert_eq!(borrowed, owned);
+    }
+
+    #[test]
+    fn into_iter_empty_and_fused() {
+        let m: Multimap<i32, i32> = Multimap::new();
+        let mut it = m.into_iter();
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next(), None); // FusedIterator
     }
 
     #[test]

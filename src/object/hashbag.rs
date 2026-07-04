@@ -5,20 +5,24 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 use crate::bulk::BulkError;
-use std::collections::HashMap;
+use crate::hash_table::OpenHashMap;
 use std::hash::Hash;
 
-/// Generic multiset (bag) backed by `HashMap<T, usize>`.
+/// Generic multiset (bag) backed by the crate's own
+/// [`OpenHashMap<T, usize>`](crate::hash_table::OpenHashMap) — the open-
+/// addressing kernel with niche-packed slots — rather than `std::HashMap`, so
+/// the cache-locality properties carry through and the bag reuses one probing
+/// implementation (blueprint M5 / T9 kernel consolidation).
 #[derive(Debug, Clone)]
 pub struct HashBag<T: Eq + Hash> {
-    counts: HashMap<T, usize>,
+    counts: OpenHashMap<T, usize>,
     size: usize,
 }
 
 impl<T: Eq + Hash> HashBag<T> {
     pub fn new() -> Self {
         HashBag {
-            counts: HashMap::new(),
+            counts: OpenHashMap::new(),
             size: 0,
         }
     }
@@ -34,7 +38,7 @@ impl<T: Eq + Hash> HashBag<T> {
     pub fn bulk_load<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, BulkError> {
         let iter = iter.into_iter();
         let hint = iter.size_hint().0;
-        let mut counts: HashMap<T, usize> = HashMap::with_capacity(hint);
+        let mut counts: OpenHashMap<T, usize> = OpenHashMap::with_capacity(hint);
         let mut size = 0usize;
         for (index, v) in iter.enumerate() {
             let c = counts.entry(v).or_insert(0);
@@ -52,7 +56,7 @@ impl<T: Eq + Hash> HashBag<T> {
     ) -> Result<Self, BulkError> {
         let iter = iter.into_iter();
         let hint = iter.size_hint().0;
-        let mut counts: HashMap<T, usize> = HashMap::with_capacity(hint);
+        let mut counts: OpenHashMap<T, usize> = OpenHashMap::with_capacity(hint);
         let mut size = 0usize;
         for (index, (v, n)) in iter.enumerate() {
             if n == 0 {
@@ -195,7 +199,7 @@ impl<T: Eq + Hash> Default for HashBag<T> {
 /// Borrowed iterator yielding each element once per occurrence (matching
 /// [`HashBag::iter`]).
 pub struct HashBagIter<'a, T> {
-    inner: std::collections::hash_map::Iter<'a, T, usize>,
+    inner: crate::hash_table::OpenHashMapIter<'a, T, usize>,
     current: Option<(&'a T, usize)>,
 }
 

@@ -4,13 +4,10 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — v3 Stage C (breaking, v1.0 cut) — IN PROGRESS
+## [Unreleased] — v3 Stage C (breaking, v1.0 cut)
 
 Stage C of the v3 blueprint (`todo/fable-rust`, doc 14 §6): the breaking
-removals and the comparator default-flip that change type identity. **This
-section is in progress** — the tower-trait deletion (`traits.rs`,
-`object/traits.rs`) is not yet landed; it requires re-homing the core API of
-`ArrayList`/`ArrayStack`/object `HashSet`/`HashBag` as inherent methods first.
+removals and the comparator default-flip that change type identity.
 
 ### BREAKING-V3
 
@@ -37,18 +34,31 @@ section is in progress** — the tower-trait deletion (`traits.rs`,
     `sub_set` / `remove_range` are retained.
 - **Removed `keys_to_vec` / `values_to_vec`** on `HashMap` and `LinkedHashMap`
   → use the `keys()` / `values()` iterators + `.collect()`.
+- **Deleted the generic trait towers** `crate::traits` (primitive:
+  `PrimitiveCollection` / `PrimitiveList` / `PrimitiveSet` / `PrimitiveMap` +
+  `Mutable*`) and `crate::object::{Collection, List, Set, Bag, Stack,
+  MapIterable, MutableMap, Mutable*}`. Every method they carried is now an
+  **inherent** method on the concrete type, so ordinary call sites are
+  unchanged; only the `use mapdb_collections::object::{Collection, MutableMap,
+  …}` imports go away (they no longer resolve).
+  - Re-homed per type: `ArrayList` (full structural + functional set),
+    `ArrayStack` (`len`/`is_empty`/`contains`/`iter`/`peek`/`push`/`pop`/`clear`),
+    object `HashSet` (core + `any`/`all`/`none_satisfy`, `count_where`, `detect`,
+    `select`, `reject`, `to_vec`), `HashBag` (core bag API + `insert`), object
+    `HashMap` (core + `for_each`/`any`/`all`/`none_satisfy`), `LinkedHashSet`
+    (functional set), `LinkedHashMap` (`for_each`/`any`/`all`/`none_satisfy`).
+    `HashBiMap` already had every method inherent.
+  - `iter()` now returns a **concrete** iterator (`slice::Iter`,
+    `Rev<slice::Iter>`, `OpenHashSetIter`/`OpenHashMapIter`, `HashBagIter`,
+    the `LinkedHash*` iterators) instead of the old `Box<dyn Iterator<…>>`.
+  - Generic functional helpers that no type-checked caller used
+    (e.g. `for_each`/`inject_into`/`select`/`reject` on `ArrayStack` and
+    `HashBag`) are **not** re-homed — they are dropped, not moved. The trait
+    tower is no longer a shared extension surface.
 
 `ImmutableSortedMap` / `ImmutableSortedSet` **retain** their range/descending
 methods: that frozen type has no lazy `range()` replacement, so those methods
 are not superseded.
-
-### Still pending in Stage C
-
-- Delete the tower traits (`traits.rs`, `object/traits.rs`) after re-homing the
-  core structural + functional API of `ArrayList` / `ArrayStack` / object
-  `HashSet` / `HashBag` / object `HashMap` as inherent methods (the oracle
-  depends on `ArrayList::{push,len,is_empty,iter,inject_into}`).
-- Adversarial (Fable) review of the full Stage C diff.
 
 ## [Unreleased] — v3 Stage B (arena kernel / T9)
 

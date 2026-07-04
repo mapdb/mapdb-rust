@@ -4,9 +4,11 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — HashBag kernel consolidation (T9 tail)
+## [Unreleased] — kernel consolidation (T9 / M4–M6 tails)
 
-Internal, **API-preserving** follow-up to Stage B/T9 (`feat/rust-v3-hashbag-kernel`).
+Internal follow-ups on `feat/rust-v3-hashbag-kernel` that fold the remaining
+hand-rolled hash tables onto the crate's shared kernels. Public method surfaces
+are unchanged.
 
 - **`HashBag<T>` now stores its occurrence counts in the crate's own
   `OpenHashMap<T, usize>`** (open-addressing, niche-packed slots) instead of
@@ -16,6 +18,16 @@ Internal, **API-preserving** follow-up to Stage B/T9 (`feat/rust-v3-hashbag-kern
   `iter` (each element once per occurrence) / `bulk_load*` / the overflow-checked
   size accounting / count-based multiset `PartialEq` are all unchanged. Only the
   private backing field and `HashBagIter`'s inner iterator type changed.
+- **`HashMapWithStrategy` / `HashSetWithStrategy` rebuilt on the shared kernel**
+  (`SlotList` arena + `IndexTable`), deleting the ~250-line private Robin-Hood
+  probe/resize/backward-shift each carried (blueprint M4/M5). The set is now a
+  thin wrapper over `HashMapWithStrategy<T, ()>` (M6). All public methods are
+  preserved. Two behavioral notes: (1) iteration is now **insertion-ordered**
+  (was arbitrary table order — never a documented guarantee); (2) a panic inside
+  a `HashingStrategy` closure can now only happen during the read-only probe,
+  never mid backward-shift, since `IndexTable` re-derives ideal positions from
+  stored hashes (the old `rehash_from` re-invoked `strategy.hash_code` while
+  shifting).
 
 ## [Unreleased] — v3 Stage C (breaking, v1.0 cut)
 

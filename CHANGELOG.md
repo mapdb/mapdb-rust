@@ -36,6 +36,14 @@ so a breaking change is a **minor** version bump.
   strategy-hash desync is impossible. With this, mutable iteration now exists on
   every map type (`TreeMap`, `OpenHashMap`, `object::HashMap`, `LinkedHashMap`,
   `HashMapWithStrategy`).
+- **`drain` for the hash family** — `OpenHashMap`/`OpenHashSet` (and the
+  `object::HashMap`/`HashSet` wrappers) gained `drain()`, which the hash family
+  lacked (only `TreeMap`/`TreeSet` had it). It removes all entries as an owned
+  iterator while **retaining the table's capacity** for reuse (the reuse-friendly
+  counterpart to `into_iter`). Eager like the tree drain: a fresh same-capacity
+  empty table is swapped in *before* the first item is yielded, so the map is left
+  valid and empty even if the iterator is partially consumed, dropped early, or
+  leaked — no drop guard needed. Fused; holds a `&mut` borrow for its lifetime.
 - **Mutable iteration for the `OpenHashMap` kernel + `object::HashMap` parity** —
   `OpenHashMap` gained `iter_mut()` / `values_mut()` (and `IntoIterator for &mut`,
   i.e. `for (k, v) in &mut map`), which the whole hash family previously lacked;

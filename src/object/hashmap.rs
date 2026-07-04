@@ -192,6 +192,12 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
         self.inner.try_reserve(additional)
     }
 
+    /// Remove all entries as an owned `(K, V)` iterator, keeping the map's
+    /// capacity for reuse (mirrors [`OpenHashMap::drain`]).
+    pub fn drain(&mut self) -> crate::hash_table::OpenHashMapDrain<'_, K, V> {
+        self.inner.drain()
+    }
+
     /// Looks up a value by any borrowed form of the key
     /// (`K: Borrow<Q>`), e.g. `map.get("str")` on a `HashMap<String, _>`.
     pub fn get<Q>(&self, key: &Q) -> Option<&V>

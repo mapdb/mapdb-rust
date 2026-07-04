@@ -175,6 +175,25 @@ impl<K, V, S> OpenHashMap<K, V, S> {
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
         self.iter_mut().map(|(_, v)| v)
     }
+
+    /// Remove all entries, yielding them as owned `(K, V)` pairs while
+    /// **retaining the table's capacity** for reuse — the reuse-friendly
+    /// counterpart to `into_iter` (which consumes the map). The map is emptied
+    /// *immediately*: a fresh empty table of the same capacity is swapped in
+    /// before the first item is yielded, so the map is left valid and empty even
+    /// if the returned iterator is only partially consumed, dropped early, or
+    /// leaked (no drop guard needed).
+    pub fn drain(&mut self) -> OpenHashMapDrain<'_, K, V> {
+        let cap = self.entries.len();
+        let mut fresh: Vec<MapSlot<K, V>> = Vec::with_capacity(cap);
+        fresh.resize_with(cap, || MapSlot::Empty);
+        let old = std::mem::replace(&mut self.entries, fresh);
+        self.size = 0;
+        OpenHashMapDrain {
+            inner: old.into_iter(),
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
@@ -841,6 +860,23 @@ impl<K, S> OpenHashSet<K, S> {
             pos: 0,
         }
     }
+
+    /// Remove all elements, yielding them as owned `K` while **retaining the
+    /// table's capacity** for reuse — the reuse-friendly counterpart to
+    /// `into_iter`. Emptied immediately (a fresh same-capacity table is swapped
+    /// in before the first item), so it is leak/early-drop/panic safe with no
+    /// drop guard.
+    pub fn drain(&mut self) -> OpenHashSetDrain<'_, K> {
+        let cap = self.entries.len();
+        let mut fresh: Vec<SetSlot<K>> = Vec::with_capacity(cap);
+        fresh.resize_with(cap, || SetSlot::Empty);
+        let old = std::mem::replace(&mut self.entries, fresh);
+        self.size = 0;
+        OpenHashSetDrain {
+            inner: old.into_iter(),
+            _marker: std::marker::PhantomData,
+        }
+    }
 }
 
 impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
@@ -1189,6 +1225,29 @@ impl<K, V, S> IntoIterator for OpenHashMap<K, V, S> {
     }
 }
 
+/// Draining iterator over an `OpenHashMap`'s `(K, V)` pairs (unspecified order),
+/// returned by [`OpenHashMap::drain`]. Holds a `&mut` borrow of the map for its
+/// lifetime; the map was already emptied when this was created.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct OpenHashMapDrain<'a, K, V> {
+    inner: std::vec::IntoIter<MapSlot<K, V>>,
+    _marker: std::marker::PhantomData<&'a mut ()>,
+}
+
+impl<K, V> Iterator for OpenHashMapDrain<'_, K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<Self::Item> {
+        for e in self.inner.by_ref() {
+            if let MapSlot::Occupied { key, value } = e {
+                return Some((key, value));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> std::iter::FusedIterator for OpenHashMapDrain<'_, K, V> {}
+
 impl<K: Hash + Eq, V, S: BuildHasher + Default> FromIterator<(K, V)> for OpenHashMap<K, V, S> {
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let mut m = OpenHashMap::with_hasher(S::default());
@@ -1251,6 +1310,29 @@ impl<K, S> IntoIterator for OpenHashSet<K, S> {
     }
 }
 
+/// Draining iterator over an `OpenHashSet`'s elements (unspecified order),
+/// returned by [`OpenHashSet::drain`]. Holds a `&mut` borrow for its lifetime;
+/// the set was already emptied when this was created.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct OpenHashSetDrain<'a, K> {
+    inner: std::vec::IntoIter<SetSlot<K>>,
+    _marker: std::marker::PhantomData<&'a mut ()>,
+}
+
+impl<K> Iterator for OpenHashSetDrain<'_, K> {
+    type Item = K;
+    fn next(&mut self) -> Option<Self::Item> {
+        for e in self.inner.by_ref() {
+            if let SetSlot::Occupied { key } = e {
+                return Some(key);
+            }
+        }
+        None
+    }
+}
+
+impl<K> std::iter::FusedIterator for OpenHashSetDrain<'_, K> {}
+
 impl<K: Hash + Eq, S: BuildHasher + Default> FromIterator<K> for OpenHashSet<K, S> {
     fn from_iter<I: IntoIterator<Item = K>>(iter: I) -> Self {
         let mut s = OpenHashSet::with_hasher(S::default());
@@ -1286,6 +1368,54 @@ impl<K: Hash + Eq, S: BuildHasher> Eq for OpenHashSet<K, S> {}
 mod tests {
     use super::*;
     use crate::hashable_float::{HashableF32, HashableF64};
+
+    #[test]
+    fn drain_empties_map_and_yields_all() {
+        let mut m = OpenHashMap::<i32, i32>::new();
+        for i in 0..30 {
+            m.insert(i, i * 10);
+        }
+        let mut drained: Vec<(i32, i32)> = m.drain().collect();
+        drained.sort_unstable();
+        assert_eq!(drained.len(), 30);
+        assert_eq!(drained[5], (5, 50));
+        // Map is empty afterwards and reusable.
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
+        assert_eq!(m.get(&5), None);
+        m.insert(99, 1);
+        assert_eq!(m.get(&99), Some(&1));
+        assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn drain_early_drop_and_leak_leave_empty_map() {
+        // Partial consume then drop: map already empty (eager drain).
+        let mut m = OpenHashMap::<i32, i32>::from_iter((0..10).map(|i| (i, i)));
+        {
+            let mut d = m.drain();
+            assert!(d.next().is_some());
+        } // dropped early
+        assert!(m.is_empty());
+        assert_eq!(m.get(&0), None);
+
+        // Leaking the drain also leaves the map empty (swap happened up front).
+        let mut m2 = OpenHashMap::<i32, i32>::from_iter((0..10).map(|i| (i, i)));
+        std::mem::forget(m2.drain());
+        assert!(m2.is_empty());
+        assert_eq!(m2.get(&3), None);
+    }
+
+    #[test]
+    fn drain_set_empties_and_yields() {
+        let mut s = OpenHashSet::<i32>::from_iter(0..20);
+        let mut drained: Vec<i32> = s.drain().collect();
+        drained.sort_unstable();
+        assert_eq!(drained, (0..20).collect::<Vec<_>>());
+        assert!(s.is_empty());
+        s.insert(7);
+        assert!(s.contains(&7) && !s.contains(&0));
+    }
 
     #[test]
     fn iter_mut_and_values_mut_mutate_in_place() {

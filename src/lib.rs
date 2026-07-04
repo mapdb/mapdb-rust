@@ -54,7 +54,8 @@ pub use count_min::CountMin;
 pub use fenwick::FenwickTree;
 pub use frozen::Frozen;
 pub use hash_table::{
-    Entry, OccupiedEntry, OpenHashMap, OpenHashMapIterMut, OpenHashSet, VacantEntry,
+    Entry, OccupiedEntry, OpenHashMap, OpenHashMapDrain, OpenHashMapIterMut, OpenHashSet,
+    OpenHashSetDrain, VacantEntry,
 };
 pub use hashable_float::{HashableF32, HashableF64};
 pub use hyperloglog::{HllError, HyperLogLog};

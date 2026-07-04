@@ -68,6 +68,12 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
         self.inner.clear();
     }
 
+    /// Remove all elements as an owned iterator, keeping the set's capacity for
+    /// reuse (mirrors [`OpenHashSet::drain`]).
+    pub fn drain(&mut self) -> crate::hash_table::OpenHashSetDrain<'_, T> {
+        self.inner.drain()
+    }
+
     /// Retain only the elements for which `keep(&t)` returns `true`.
     /// O(n), no `T: Clone` (see [`OpenHashSet::retain`]).
     pub fn retain<F>(&mut self, keep: F)

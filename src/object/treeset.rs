@@ -350,6 +350,47 @@ impl<T> DoubleEndedIterator for TreeSetIntoIter<T> {
 impl<T> ExactSizeIterator for TreeSetIntoIter<T> {}
 impl<T> std::iter::FusedIterator for TreeSetIntoIter<T> {}
 
+impl<T, C> TreeSet<T, C> {
+    /// Removes all elements and returns them as an iterator in ascending
+    /// comparator order, keeping the emptied set (and its comparator) for reuse
+    /// — the reuse-friendly counterpart to [`into_iter`](Self::into_iter). The
+    /// set is emptied immediately, before the first item is yielded, so it stays
+    /// valid and empty even if the iterator is dropped early or a consuming loop
+    /// panics. Borrows the set mutably for the iterator's lifetime. Needs no
+    /// comparator (teardown does not compare), matching the bound-free
+    /// [`IntoIterator`].
+    pub fn drain(&mut self) -> TreeSetDrain<'_, T> {
+        TreeSetDrain {
+            inner: self.tree.drain(),
+        }
+    }
+}
+
+/// Draining iterator over a `TreeSet`'s elements in ascending order, from
+/// [`TreeSet::drain`]. The set is emptied when `drain` is called (before the
+/// first item is yielded). Borrows the set mutably for its lifetime.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct TreeSetDrain<'a, T> {
+    inner: super::treemap::TreeMapDrain<'a, T, ()>,
+}
+
+impl<T> Iterator for TreeSetDrain<'_, T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        self.inner.next().map(|(k, _)| k)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl<T> DoubleEndedIterator for TreeSetDrain<'_, T> {
+    fn next_back(&mut self) -> Option<T> {
+        self.inner.next_back().map(|(k, _)| k)
+    }
+}
+impl<T> ExactSizeIterator for TreeSetDrain<'_, T> {}
+impl<T> std::iter::FusedIterator for TreeSetDrain<'_, T> {}
+
 /// Owned iteration in sorted order: `for x in set`, yielding `T` by value.
 impl<T, C> IntoIterator for TreeSet<T, C> {
     type Item = T;
@@ -826,5 +867,30 @@ mod tests {
         let v: Vec<i32> = s.iter().copied().collect();
         assert_eq!(v, (0..20).filter(|x| x % 3 == 0).collect::<Vec<_>>());
         assert_eq!(s.len(), v.len());
+    }
+
+    #[test]
+    fn drain_yields_sorted_and_empties() {
+        let mut s: TreeSet<i32> = (0..20).rev().collect();
+        let drained: Vec<i32> = s.drain().collect();
+        assert_eq!(drained, (0..20).collect::<Vec<_>>());
+        assert_eq!(s.len(), 0);
+        assert!(s.is_empty());
+        assert_eq!(s.iter().count(), 0);
+        // The emptied set is reusable.
+        s.insert(42);
+        assert!(s.contains(&42));
+    }
+
+    #[test]
+    fn drain_dropped_early_still_empties() {
+        let mut s: TreeSet<i32> = (0..10).collect();
+        {
+            let mut d = s.drain();
+            assert_eq!(d.next(), Some(0));
+            assert_eq!(d.next_back(), Some(9));
+        }
+        assert_eq!(s.len(), 0);
+        assert!(s.is_empty());
     }
 }

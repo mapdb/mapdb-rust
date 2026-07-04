@@ -4,8 +4,18 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` across the collections
+## [Unreleased] — additive: `entry` + `retain` + `drain` across the collections
 
+- **`TreeMap::drain()` / `TreeSet::drain()`** — remove all entries and return
+  them as an iterator in ascending comparator order while **keeping the emptied
+  map/set (and its comparator) for reuse** — the reuse-friendly counterpart to
+  `into_iter`, which consumes the container instead. The container is emptied *immediately*, before the first item is
+  yielded, by dismantling the tree up front (no user code runs during teardown);
+  so it is left a valid, empty tree even if the iterator is only partially
+  consumed, dropped early, or a consuming loop panics — no drop guard needed
+  (contrast `retain`). The returned `TreeMapDrain`/`TreeSetDrain` holds a mutable
+  borrow of the container for its lifetime (matching `std`'s `Drain`) and is a
+  double-ended, exact-size, fused iterator. Works for any comparator `C`.
 - **`TreeMap::retain(|&k, &mut v| …)` / `TreeSet::retain(|&t| …)`** — drop the
   entries a predicate rejects, visiting keys in ascending comparator order and
   allowing in-place value mutation (the key, and so the sort order, is

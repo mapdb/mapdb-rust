@@ -1300,6 +1300,33 @@ impl<K, V> DoubleEndedIterator for TreeMapIntoIter<K, V> {
 impl<K, V> ExactSizeIterator for TreeMapIntoIter<K, V> {}
 impl<K, V> std::iter::FusedIterator for TreeMapIntoIter<K, V> {}
 
+/// Draining iterator over `(K, V)` pairs in ascending comparator order, from
+/// [`TreeMap::drain`]. The map is emptied when `drain` is called (before the
+/// first item is yielded), so it stays valid and empty regardless of how much
+/// of this iterator is consumed. Borrows the map mutably for its lifetime.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct TreeMapDrain<'a, K, V> {
+    inner: std::vec::IntoIter<(K, V)>,
+    _marker: std::marker::PhantomData<&'a mut ()>,
+}
+
+impl<K, V> Iterator for TreeMapDrain<'_, K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl<K, V> DoubleEndedIterator for TreeMapDrain<'_, K, V> {
+    fn next_back(&mut self) -> Option<(K, V)> {
+        self.inner.next_back()
+    }
+}
+impl<K, V> ExactSizeIterator for TreeMapDrain<'_, K, V> {}
+impl<K, V> std::iter::FusedIterator for TreeMapDrain<'_, K, V> {}
+
 /// Owned iteration in sorted order: `for (k, v) in map`, yielding `(K, V)` by
 /// value — the bulk ownership-transfer exit.
 impl<K, V, C> IntoIterator for TreeMap<K, V, C> {
@@ -1327,6 +1354,26 @@ impl<K, V, C> TreeMap<K, V, C> {
         self,
     ) -> impl DoubleEndedIterator<Item = V> + ExactSizeIterator + std::iter::FusedIterator {
         self.into_iter().map(|(_, v)| v)
+    }
+
+    /// Removes all entries and returns them as an iterator of `(K, V)` pairs in
+    /// ascending comparator order, keeping the emptied map (and its comparator)
+    /// for reuse — the reuse-friendly counterpart to
+    /// [`into_iter`](Self::into_iter), which consumes the map instead.
+    ///
+    /// The map is emptied *immediately*, before the first item is yielded, by
+    /// dismantling the tree up front (no user code runs during teardown). So it
+    /// is left valid and empty even if the returned iterator is only partially
+    /// consumed, dropped early, or a consuming loop panics — no drop guard is
+    /// needed. Holds a mutable borrow of the map for the iterator's lifetime.
+    pub fn drain(&mut self) -> TreeMapDrain<'_, K, V> {
+        let mut out = Vec::with_capacity(self.size);
+        consume_in_order(self.root.take(), &mut out);
+        self.size = 0;
+        TreeMapDrain {
+            inner: out.into_iter(),
+            _marker: std::marker::PhantomData,
+        }
     }
 }
 
@@ -2317,5 +2364,79 @@ mod tests {
         // Regardless of how many survivors were lost, `len()` must equal the
         // actual live entry count — the drop guard recomputed it from the tree.
         assert_eq!(m.len(), m.iter().count());
+    }
+
+    #[test]
+    fn drain_yields_sorted_and_empties() {
+        let mut m = dyn_map((0..20).rev().map(|i| (i, i * 10)));
+        let drained: Vec<(i32, i32)> = m.drain().collect();
+        assert_eq!(drained, (0..20).map(|k| (k, k * 10)).collect::<Vec<_>>());
+        // Map is empty and valid after draining.
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
+        assert_eq!(m.iter().count(), 0);
+        assert!(m.is_valid_llrb());
+        m.assert_size_invariant();
+    }
+
+    #[test]
+    fn drain_reuses_the_map_allocation() {
+        let mut m = dyn_map((0..10).map(|i| (i, i)));
+        m.drain().for_each(drop);
+        // The emptied map is a normal, reusable map.
+        for i in 100..105 {
+            m.insert(i, i);
+        }
+        assert_eq!(m.len(), 5);
+        assert_eq!(
+            m.keys().copied().collect::<Vec<_>>(),
+            (100..105).collect::<Vec<_>>()
+        );
+        assert!(m.is_valid_llrb());
+        m.assert_size_invariant();
+    }
+
+    #[test]
+    fn drain_double_ended() {
+        let mut m = dyn_map((0..6).map(|i| (i, i)));
+        let mut d = m.drain();
+        assert_eq!(d.next(), Some((0, 0)));
+        assert_eq!(d.next_back(), Some((5, 5)));
+        assert_eq!(d.next_back(), Some((4, 4)));
+        assert_eq!(d.next(), Some((1, 1)));
+        assert_eq!(d.len(), 2); // 2 and 3 remain
+        assert_eq!(d.collect::<Vec<_>>(), vec![(2, 2), (3, 3)]);
+    }
+
+    #[test]
+    fn drain_dropped_early_still_empties() {
+        let mut m = dyn_map((0..20).map(|i| (i, i)));
+        {
+            let mut d = m.drain();
+            assert_eq!(d.next(), Some((0, 0))); // consume only one, then drop
+        }
+        // Every un-yielded entry was removed too — the map emptied up front.
+        assert_eq!(m.len(), 0);
+        assert!(m.is_empty());
+        assert!(m.is_valid_llrb());
+    }
+
+    #[test]
+    fn drain_size_consistent_after_panic_in_loop() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let mut m = dyn_map((0..20).map(|i| (i, i)));
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            for (k, _) in m.drain() {
+                if k == 7 {
+                    panic!("boom mid-drain");
+                }
+            }
+        }));
+        assert!(result.is_err());
+        // The map was emptied before iteration began, so it is empty and valid
+        // even though the consuming loop unwound partway through.
+        assert_eq!(m.len(), 0);
+        assert_eq!(m.iter().count(), 0);
+        assert!(m.is_valid_llrb());
     }
 }

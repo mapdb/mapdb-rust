@@ -234,19 +234,28 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         if self.max_size == 0 {
             return None; // capacity 0: value drops here.
         }
+        self.insert_absent(key, value, expire_at);
+        None
+    }
+
+    /// Insert a **known-absent** `key` (evict-before-insert when at capacity),
+    /// stamping `expire_at`, and return its slot. Caller must have already
+    /// checked `key` is not resident and `max_size >= 1`.
+    ///
+    /// Ordered so a panicking `Clone`, or a panicking `Hash`/`Eq` during the
+    /// index *probe*, leaves the index, arena, free-list, expiry, and policy all
+    /// untouched — not even a leaked cell: the slot is peeked (not committed), the
+    /// only fallible user code (key clone + index insert) runs first, and the
+    /// arena allocation is committed afterwards. (The one residual is a `Hash`
+    /// that panics during a kernel resize-rehash, which can leave `index` partial
+    /// — a pre-existing `OpenHashMap::insert` property shared with `BoundedLruMap`,
+    /// not addressed here.)
+    fn insert_absent(&mut self, key: K, value: V, expire_at: u64) -> usize {
         if self.index.len() >= self.max_size {
             if let Some(victim) = self.policy.victim() {
                 self.evict_slot(victim, EvictionCause::Size);
             }
         }
-        // Pick the slot we WILL use without committing it, run the only fallible
-        // user code (key clone + index insert) first, and commit the arena
-        // allocation only afterwards. So a panicking `Clone`, or a panicking
-        // `Hash`/`Eq` during the index *probe*, leaves the index, arena,
-        // free-list, expiry, and policy all untouched — not even a leaked cell.
-        // (The one residual is a `Hash` that panics during a kernel resize-rehash,
-        // which can leave `index` partial — a pre-existing `OpenHashMap::insert`
-        // property shared with `BoundedLruMap`, not addressed here.)
         let slot = self.free.last().copied().unwrap_or(self.slots.len());
         self.index.insert(key.clone(), slot);
         // Commit the allocation (infallible from here on): reuse the peeked free
@@ -259,7 +268,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         self.slots[slot] = Some((key, value));
         self.expiry[slot] = expire_at;
         self.policy.on_insert(slot);
-        None
+        slot
     }
 
     /// Remove every entry whose logical expiry tick has passed (`expiry <= now`),
@@ -286,6 +295,49 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
             self.evict_slot(slot, EvictionCause::Expired);
         }
         count
+    }
+
+    /// Return a mutable borrow of `key`'s value, computing and inserting `f()`
+    /// first if `key` is absent (compute-if-absent) — shorthand for
+    /// [`get_or_insert_with_at(key, 0, f)`](BoundedMap::get_or_insert_with_at).
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`capacity`](BoundedMap::capacity) is `0` on a miss — a
+    /// zero-capacity map cannot hold the computed value while returning a borrow
+    /// of it. (A hit never allocates, so it never panics.)
+    pub fn get_or_insert_with(&mut self, key: K, f: impl FnOnce() -> V) -> &mut V {
+        self.get_or_insert_with_at(key, 0, f)
+    }
+
+    /// Return a mutable borrow of `key`'s value at logical time `now`, computing
+    /// and inserting `f()` first if `key` is absent.
+    ///
+    /// A **hit** refreshes the policy access (recency) but — because the map's
+    /// TTL is *after-write* — does **not** extend the entry's expiry (it was not
+    /// written). A **miss** is an insert: it evicts one victim first if the map is
+    /// at capacity, stamps the new entry's expiry to `saturating(now + ttl)`, and
+    /// only calls `f` when the key is genuinely absent. If `f` panics nothing is
+    /// committed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if [`capacity`](BoundedMap::capacity) is `0` on a miss.
+    pub fn get_or_insert_with_at(&mut self, key: K, now: u64, f: impl FnOnce() -> V) -> &mut V {
+        if let Some(&slot) = self.index.get(&key) {
+            self.policy.on_access(slot);
+            return &mut self.slots[slot].as_mut().expect("indexed slot occupied").1;
+        }
+        assert!(
+            self.max_size > 0,
+            "get_or_insert_with on a zero-capacity BoundedMap"
+        );
+        let expire_at = self.ttl.map_or(u64::MAX, |t| now.saturating_add(t));
+        let slot = self.insert_absent(key, f(), expire_at);
+        &mut self.slots[slot]
+            .as_mut()
+            .expect("just-inserted slot occupied")
+            .1
     }
 
     /// Read `key`, refreshing its policy access (for [`Lru`] this is the "get
@@ -781,6 +833,72 @@ mod tests {
         assert_eq!(sorted_entries(&m), vec![(3, 30), (4, 40), (5, 50)]);
         m.put(6, 60); // now at capacity -> evicts 3 (LRU)
         assert_eq!(sorted_entries(&m), vec![(4, 40), (5, 50), (6, 60)]);
+    }
+
+    #[test]
+    fn get_or_insert_with_computes_only_on_miss() {
+        let calls = Rc::new(RefCell::new(0));
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4);
+        let c = calls.clone();
+        let v = m.get_or_insert_with(1, || {
+            *c.borrow_mut() += 1;
+            10
+        });
+        assert_eq!(*v, 10);
+        assert_eq!(*calls.borrow(), 1);
+        // Hit: closure must NOT run, existing value returned (and mutable).
+        let c = calls.clone();
+        let v = m.get_or_insert_with(1, || {
+            *c.borrow_mut() += 1;
+            999
+        });
+        assert_eq!(*v, 10);
+        *v += 5;
+        assert_eq!(*calls.borrow(), 1); // still 1 — no recompute
+        assert_eq!(m.peek(&1), Some(&15));
+    }
+
+    #[test]
+    fn get_or_insert_with_evicts_before_insert() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(2);
+        m.put(1, 10);
+        m.put(2, 20); // 1 is LRU
+        m.get_or_insert_with(3, || 30); // miss -> evict 1
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.peek(&1), None);
+        assert_eq!(sorted_entries(&m), vec![(2, 20), (3, 30)]);
+    }
+
+    #[test]
+    fn get_or_insert_with_hit_does_not_extend_ttl() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4).with_ttl(10);
+        m.put_at(1, 10, 0); // expiry 10
+                            // A hit at t=5 refreshes recency but must NOT extend after-write expiry.
+        let _ = m.get_or_insert_with_at(1, 5, || 999);
+        assert_eq!(m.expire_entries(10), 1); // still due at 10
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn get_or_insert_with_does_not_commit_if_closure_panics() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4);
+        m.put(1, 10);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            m.get_or_insert_with(2, || panic!("boom"));
+        }));
+        assert!(r.is_err());
+        assert_eq!(m.len(), 1); // key 2 not inserted
+        assert_eq!(m.peek(&2), None);
+        assert_eq!(m.peek(&1), Some(&10)); // untouched, still usable
+        m.put(3, 30); // map still works
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "zero-capacity")]
+    fn get_or_insert_with_panics_on_zero_capacity_miss() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(0);
+        m.get_or_insert_with(1, || 10);
     }
 
     #[test]

@@ -167,8 +167,11 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
 
     /// Remove all entries.
     pub fn clear(&mut self) {
-        self.slots.clear();
+        // Clear the index first: should a value's `Drop` panic while the arena
+        // is being cleared, the index is already empty and can never reference a
+        // half-cleared arena (worst case stays a safe-Rust panic, never UB).
         self.index.clear();
+        self.slots.clear();
     }
 
     /// Iterate `(&K, &V)` in insertion order.

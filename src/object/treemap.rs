@@ -485,6 +485,49 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
         in_order(&self.root, &mut f);
     }
 
+    /// Retains only the entries for which `keep(&key, &mut value)` returns
+    /// `true`, visiting keys in ascending comparator order; rejected entries
+    /// are dropped. `keep` may mutate a surviving value in place (it cannot
+    /// change the key, so the sorted order is preserved).
+    ///
+    /// Runs in `O(n log n)`: the whole tree is dismantled into its sorted
+    /// entries (no user code runs during teardown), then the survivors are
+    /// moved back into a fresh tree. If `keep` panics, the map is left holding
+    /// exactly the survivors visited before the panic — a valid tree with a
+    /// correct [`len`](Self::len) — and every not-yet-visited entry is dropped.
+    ///
+    /// Panic-consistency also holds if the *comparator* panics during the
+    /// re-insertion of a survivor (an adversarial [`Compare`] with interior
+    /// mutability): the drop guard recomputes `size` from the surviving tree's
+    /// cached root subtree size, so [`len`](Self::len) always equals the live
+    /// entry count on the unwind path — never the stale pre-panic count that a
+    /// bare re-insert loop would leave (`insert` takes `root` before it runs
+    /// the comparator).
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        /// Recomputes `size` from the surviving tree's root augmentation (O(1))
+        /// on both the normal and the unwind path, keeping `len()` consistent
+        /// even if a survivor re-insert aborts mid-way (comparator panic).
+        struct FixSize<'a, K, V, C>(&'a mut TreeMap<K, V, C>);
+        impl<K, V, C> Drop for FixSize<'_, K, V, C> {
+            fn drop(&mut self) {
+                self.0.size = node_size(&self.0.root);
+            }
+        }
+
+        let mut pairs = Vec::with_capacity(self.size);
+        consume_in_order(self.root.take(), &mut pairs);
+        self.size = 0;
+        let guard = FixSize(self);
+        for (k, mut v) in pairs {
+            if keep(&k, &mut v) {
+                guard.0.insert(k, v);
+            }
+        }
+    }
+
     // ── internal: insert ────────────────────────────────────────────
 
     fn insert_rec(
@@ -2122,5 +2165,157 @@ mod tests {
         let keys: Vec<i32> = m.keys().copied().collect();
         assert_eq!(keys, vec![3, 2, 1]);
         assert!(m.is_valid_llrb());
+    }
+
+    /// Builds a naturally-ordered map in the `Comparator` (Dyn) form, whose
+    /// white-box `is_valid_llrb` structural validator is available in tests.
+    fn dyn_map(pairs: impl IntoIterator<Item = (i32, i32)>) -> TreeMap<i32, i32, Comparator<i32>> {
+        let mut m = TreeMap::with_comparator(natural_comparator::<i32>());
+        for (k, v) in pairs {
+            m.insert(k, v);
+        }
+        m
+    }
+
+    #[test]
+    fn retain_keeps_matching_and_drops_rest() {
+        let mut m = dyn_map((0..20).map(|i| (i, i * 10)));
+        m.retain(|k, _| k % 2 == 0);
+        let pairs: Vec<(i32, i32)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(
+            pairs,
+            (0..20)
+                .filter(|k| k % 2 == 0)
+                .map(|k| (k, k * 10))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(m.len(), 10);
+        assert!(m.is_valid_llrb());
+        // The rank/select subtree-size augmentation must survive the rebuild.
+        m.assert_size_invariant();
+        assert_eq!(m.select_key(0), Some(&0));
+        assert_eq!(m.rank(&10), 5);
+    }
+
+    #[test]
+    fn retain_all_and_none() {
+        let mut all = dyn_map((0..8).map(|i| (i, i)));
+        all.retain(|_, _| true);
+        assert_eq!(all.len(), 8);
+        assert_eq!(
+            all.keys().copied().collect::<Vec<_>>(),
+            (0..8).collect::<Vec<_>>()
+        );
+        assert!(all.is_valid_llrb());
+
+        let mut none = dyn_map((0..8).map(|i| (i, i)));
+        none.retain(|_, _| false);
+        assert!(none.is_empty());
+        assert_eq!(none.len(), 0);
+        assert!(none.is_valid_llrb());
+        assert_eq!(none.iter().count(), 0);
+    }
+
+    #[test]
+    fn retain_mutates_surviving_values() {
+        let mut m = dyn_map((0..10).map(|i| (i, i)));
+        m.retain(|_, v| {
+            *v *= 100;
+            *v % 200 == 0 // keep evens (after scaling, still evens)
+        });
+        for (k, v) in m.iter() {
+            assert_eq!(*v, *k * 100);
+            assert_eq!(k % 2, 0);
+        }
+        assert_eq!(m.len(), 5);
+        assert!(m.is_valid_llrb());
+    }
+
+    #[test]
+    fn retain_differential_against_btreemap() {
+        use std::collections::BTreeMap;
+        // A few deterministic pseudo-random keep patterns.
+        for seed in 0u64..40 {
+            let mut m = dyn_map((0..64).map(|i| (i, i * 3)));
+            let mut oracle: BTreeMap<i32, i32> = (0..64).map(|i| (i, i * 3)).collect();
+            let keep =
+                |k: &i32| ((*k as u64).wrapping_mul(2654435761).wrapping_add(seed) >> 5) & 1 == 0;
+            m.retain(|k, v| {
+                *v += 1;
+                keep(k)
+            });
+            oracle.retain(|k, v| {
+                *v += 1;
+                keep(k)
+            });
+            let got: Vec<(i32, i32)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+            let want: Vec<(i32, i32)> = oracle.into_iter().collect();
+            assert_eq!(got, want, "mismatch at seed {seed}");
+            assert_eq!(m.len(), got.len());
+            assert!(m.is_valid_llrb(), "invalid LLRB at seed {seed}");
+            m.assert_size_invariant();
+        }
+    }
+
+    #[test]
+    fn retain_size_consistent_after_caught_panic() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let mut m = dyn_map((0..20).map(|i| (i, i)));
+        // Panic when we reach key 12 (visited in ascending order).
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            m.retain(|k, _| {
+                if *k == 12 {
+                    panic!("boom at 12");
+                }
+                *k % 3 != 0
+            });
+        }));
+        assert!(result.is_err());
+        // Survivors visited before the panic are keys 0..12 with k % 3 != 0.
+        let want: Vec<i32> = (0..12).filter(|k| k % 3 != 0).collect();
+        let got: Vec<i32> = m.keys().copied().collect();
+        assert_eq!(got, want);
+        // len() must match the live entries, and the tree must stay valid.
+        assert_eq!(m.len(), m.iter().count());
+        assert_eq!(m.len(), want.len());
+        assert!(m.is_valid_llrb());
+    }
+
+    #[test]
+    fn retain_size_consistent_after_comparator_panic() {
+        use crate::object::strategy::FnCmp;
+        use std::cell::Cell;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::rc::Rc;
+
+        // A comparator that panics once armed via interior mutability.
+        let armed = Rc::new(Cell::new(false));
+        let armed_cmp = armed.clone();
+        let cmp = FnCmp(move |a: &i32, b: &i32| {
+            assert!(!armed_cmp.get(), "comparator armed");
+            a.cmp(b)
+        });
+        let mut m = TreeMap::with_comparator(cmp);
+        for i in 0..5 {
+            m.insert(i, i); // built while unarmed
+        }
+
+        // retain keeps everything, but arms the comparator at key 2, so the
+        // NEXT survivor re-insert aborts mid-`insert` with a comparator panic —
+        // `insert` has already taken `root`, dropping the earlier survivors.
+        let armed_in = armed.clone();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            m.retain(|k, _| {
+                if *k == 2 {
+                    armed_in.set(true);
+                }
+                true
+            });
+        }));
+        assert!(result.is_err());
+
+        // Regardless of how many survivors were lost, `len()` must equal the
+        // actual live entry count — the drop guard recomputed it from the tree.
+        assert_eq!(m.len(), m.iter().count());
     }
 }

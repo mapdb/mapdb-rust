@@ -73,6 +73,18 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
         self.tree.contains_key(value)
     }
 
+    /// Retains only the elements for which `keep(&elem)` returns `true`,
+    /// visiting them in ascending comparator order; rejected elements are
+    /// dropped. If `keep` panics, the set is left holding exactly the elements
+    /// visited before the panic (a valid set with a correct
+    /// [`len`](Self::len)); every not-yet-visited element is dropped.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.tree.retain(|t, ()| keep(t));
+    }
+
     /// Returns the minimum element, or `None` if empty.
     pub fn min(&self) -> Option<&T> {
         self.tree.min().map(|(k, _)| k)
@@ -805,5 +817,14 @@ mod tests {
         assert_eq!(s.len(), 100);
         let v: Vec<i32> = s.iter().copied().collect();
         assert_eq!(v, (0..100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn retain_keeps_matching_in_order() {
+        let mut s: TreeSet<i32> = (0..20).collect();
+        s.retain(|x| x % 3 == 0);
+        let v: Vec<i32> = s.iter().copied().collect();
+        assert_eq!(v, (0..20).filter(|x| x % 3 == 0).collect::<Vec<_>>());
+        assert_eq!(s.len(), v.len());
     }
 }

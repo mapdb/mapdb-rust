@@ -4,8 +4,21 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` across the hash collections
+## [Unreleased] — additive: `entry` + `retain` across the collections
 
+- **`TreeMap::retain(|&k, &mut v| …)` / `TreeSet::retain(|&t| …)`** — drop the
+  entries a predicate rejects, visiting keys in ascending comparator order and
+  allowing in-place value mutation (the key, and so the sort order, is
+  immutable to the predicate). Works for any comparator `C` (no `K: Clone` /
+  `K: Ord`). `O(n log n)`: the tree is dismantled into its sorted entries with
+  no user code running during teardown, then the survivors are moved back into
+  a fresh tree. Panic-consistent — if the predicate panics, the map is left a
+  valid LLRB tree holding exactly the survivors visited before the panic (with
+  a correct `len()`), and every not-yet-visited entry is dropped; an O(1) drop
+  guard also keeps `len()` consistent if an *adversarial comparator* panics
+  during a survivor re-insert (recomputing `size` from the tree's cached root
+  subtree size). This completes `retain` across **every** map/set/bag/multimap
+  in the crate.
 - **`Multimap::retain(|&k, &v| …)` / `SetMultimap::retain(|&k, &v| …)`** —
   per-(key, value)-pair retain: drops rejected values from each key's bucket
   (order preserved), removes a key whose bucket empties out, and keeps the

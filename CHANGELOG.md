@@ -4,8 +4,28 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` across the collections
+## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **`BoundedMap<K, V, P: EvictionPolicy>`** — a new capacity-bounded map, generic
+  in its value type and in a pluggable **eviction policy**, the value-generic
+  successor to the frozen, `i32`-specialised `BoundedLruMap` (which is untouched).
+  The map owns its values in an `Option<(K, V)>` slot arena, so eviction is
+  ownership transfer, not garbage collection: `evict()` **returns** the victim
+  `(K, V)` to the caller, and an implicit size eviction **drops** the value
+  synchronously (its `Drop` runs *right then* — the point of a generic `V` such
+  as a buffer or file handle). *Which* resident entry is evicted is delegated to a
+  `P: EvictionPolicy` (a slot-index trait — `on_insert`/`on_access`/`on_remove`/
+  `victim`/`clear`), monomorphised in like `OpenHashMap`'s hasher; `Lru`
+  (intrusive recency list over slot indices) and `Fifo` (insertion order) ship,
+  and a new policy is a new type — the map does not change. Surface: `put`
+  (evict-before-insert, returns the previous value), `get`/`get_mut` (refresh
+  recency — hence `&mut self`), `peek` (`&self`, no recency touch), `remove`,
+  `evict`, `clear`, `contains_key`, `iter`/`keys`/`values`, owned + borrowed
+  `IntoIterator`, and an optional `on_evict` **observer** (`&K, &V, cause`; fired
+  for size evictions only — `remove`/`evict`/`clear` are not evictions). Aliased
+  constructors: `BoundedMap::with_capacity(n)` (LRU) and `BoundedMap::fifo(n)`.
+  Requires `K: Clone` (transitional `OpenHashMap<K, usize>` index; a later
+  revision can move to the key-owning-free `IndexTable` kernel to drop it).
 - **Owned `IntoIterator` across the remaining containers** — `RangeSet<T>`,
   `RangeMap<T, V>`, `RoaringU32`, `HashBag<T>`, `Multimap<K, V>`, and
   `SetMultimap<K, V>` now support consuming iteration (`for x in value`, and

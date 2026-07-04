@@ -4,6 +4,40 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
+## [Unreleased] — v3 Stage B (arena kernel / T9)
+
+Stage B of the v3 blueprint (`todo/fable-rust`, doc 14 §5). The
+insertion-ordered collections are rebuilt on a shared arena kernel. **Public
+API and behavior are preserved**; the changes are additive (new methods, a new
+optional hasher type parameter) plus internal-representation replacement. No
+removals.
+
+### Added
+
+- **`LinkedHashMap` / `LinkedHashSet` rebuilt on an intrusive slot arena.**
+  Each entry is now stored **once** (in a `SlotList<(K, V)>` arena) and indexed
+  by a key-owning-free open-addressing `IndexTable` — replacing the old
+  `Vec` + `std::HashMap` double-storage. Consequences:
+  - **`remove` is O(1)** (unlink + recycle a slot; no more O(n) index fix-up
+    sweep), fixing the `02-P9` pitfall structurally.
+  - **No `K: Clone` / `T: Clone`** bound on the core operations.
+  - **`Borrow<Q>` lookups** — `get`/`get_mut`/`contains_key`/`remove` (map) and
+    `contains`/`remove` (set) accept any borrowed form of the key, like `std`.
+  - New **`get_mut`** on `LinkedHashMap`; new **`with_hasher` /
+    `with_capacity_and_hasher`** on both.
+  - A **hasher type parameter** `S = RandomState` (matching `OpenHashMap`),
+    default unchanged. `LinkedHashSet<T>` is now a thin wrapper over
+    `LinkedHashMap<T, ()>` (one implementation instead of two).
+  - Named, unboxed iterators (`Iter`/`IterMut`/`IntoIter`) are re-exported from
+    `object` as `LinkedHashMap{Iter,IterMut,IntoIter}` /
+    `LinkedHashSet{Iter,IntoIter}`.
+- Internal kernels `slot_list::SlotList<T>` and `index_table::IndexTable<S>`
+  (crate-private). The arena stores values in `Option<T>` slots so a removed
+  value's `Drop` runs **at removal time**, not when the slot is later reused
+  (fixing `bounded_lru`'s retain-until-reuse for owning payloads). The index
+  stores `(hash, slot)` inline, so Robin-Hood backward-shift deletion and resize
+  never call a user `Hash`/`Eq` impl.
+
 ## [Unreleased] — v3 Stage A (additive) + review-ledger bug fixes
 
 Stage A of the v3 blueprint (`todo/fable-rust`): all **additive** — no removals,

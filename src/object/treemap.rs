@@ -1009,6 +1009,10 @@ fn clone_err(e: &BulkError) -> BulkError {
     match e {
         BulkError::Duplicate { index } => BulkError::Duplicate { index: *index },
         BulkError::OutOfOrder { index } => BulkError::OutOfOrder { index: *index },
+        BulkError::LengthMismatch { keys, values } => BulkError::LengthMismatch {
+            keys: *keys,
+            values: *values,
+        },
         BulkError::CountOverflow { index } => BulkError::CountOverflow { index: *index },
         BulkError::ExactSizeExceeded { expected } => BulkError::ExactSizeExceeded {
             expected: *expected,

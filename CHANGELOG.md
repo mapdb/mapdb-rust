@@ -6,6 +6,13 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **Fallible `try_from_sorted` constructors on `ImmutableSortedMap`/`Set`** (M8).
+  `try_from_sorted` (and `try_from_sorted_iter`) validate their input and return
+  `Result<Self, BulkError>` instead of **panicking** like the existing
+  `from_sorted` — use them for untrusted input. Errors distinguish
+  `LengthMismatch` (new `BulkError` variant), `Duplicate` (an equal step), and
+  `OutOfOrder` (a descending step), each carrying the offending index. The
+  panicking constructors are unchanged (still the fast path for known-good data).
 - **`Frozen<C>` — a generic read-only wrapper** (blueprint T6/M7). One type
   freezes any collection: `Frozen::new(c)` takes ownership of `c` behind an
   `Arc<C>` and derefs to `&C`, so exactly `C`'s `&self` (read) methods are

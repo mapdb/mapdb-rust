@@ -64,6 +64,7 @@
 //! `<` on a generic, so float keys will widen by supplying a total-order
 //! wrapper ([`crate::HashableF32`]) with no algorithm change.
 
+use crate::bulk::BulkError;
 use crate::range::Range;
 
 /// Panic message helper for the strictly-ascending construction check.
@@ -84,6 +85,22 @@ fn assert_strictly_ascending<T: Ord>(xs: &[T]) {
             trap_not_ascending();
         }
     }
+}
+
+/// Fallible counterpart to [`assert_strictly_ascending`]: reports the first
+/// offending element as a [`BulkError`] instead of panicking, distinguishing a
+/// duplicate ([`BulkError::Duplicate`]) from an out-of-order key
+/// ([`BulkError::OutOfOrder`]). The reported `index` is the offending element's
+/// position (the second of the failing adjacent pair).
+fn check_strictly_ascending<T: Ord>(xs: &[T]) -> Result<(), BulkError> {
+    for (i, pair) in xs.windows(2).enumerate() {
+        match pair[0].cmp(&pair[1]) {
+            std::cmp::Ordering::Less => {}
+            std::cmp::Ordering::Equal => return Err(BulkError::Duplicate { index: i + 1 }),
+            std::cmp::Ordering::Greater => return Err(BulkError::OutOfOrder { index: i + 1 }),
+        }
+    }
+    Ok(())
 }
 
 // ===========================================================================
@@ -138,6 +155,36 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     pub fn from_sorted_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
         Self::from_sorted(&keys, &values)
+    }
+
+    /// Fallible [`from_sorted`](Self::from_sorted): validates the input and
+    /// returns a [`BulkError`] instead of panicking — use this for untrusted
+    /// input. Errors: [`LengthMismatch`](BulkError::LengthMismatch) if the slice
+    /// lengths differ, [`Duplicate`](BulkError::Duplicate) on a repeated key, or
+    /// [`OutOfOrder`](BulkError::OutOfOrder) on a descending step (the `index` is
+    /// the offending key's position).
+    pub fn try_from_sorted(keys: &[K], values: &[V]) -> Result<Self, BulkError> {
+        if keys.len() != values.len() {
+            return Err(BulkError::LengthMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
+        check_strictly_ascending(keys)?;
+        Ok(Self {
+            keys: keys.to_vec(),
+            values: values.to_vec(),
+        })
+    }
+
+    /// Fallible [`from_sorted_iter`](Self::from_sorted_iter): materializes the
+    /// pairs, then validates like [`try_from_sorted`](Self::try_from_sorted)
+    /// (lengths always match here, so only ordering/duplicate errors arise).
+    pub fn try_from_sorted_iter<I: IntoIterator<Item = (K, V)>>(
+        iter: I,
+    ) -> Result<Self, BulkError> {
+        let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
+        Self::try_from_sorted(&keys, &values)
     }
 
     /// Number of entries.
@@ -413,6 +460,25 @@ impl<T: Ord + Copy> ImmutableSortedSet<T> {
     pub fn from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let elems: Vec<T> = iter.into_iter().collect();
         Self::from_sorted(&elems)
+    }
+
+    /// Fallible [`from_sorted`](Self::from_sorted): validates the elements and
+    /// returns a [`BulkError`] instead of panicking — use for untrusted input.
+    /// Errors: [`Duplicate`](BulkError::Duplicate) on a repeated element or
+    /// [`OutOfOrder`](BulkError::OutOfOrder) on a descending step (`index` is the
+    /// offending element's position).
+    pub fn try_from_sorted(elements: &[T]) -> Result<Self, BulkError> {
+        check_strictly_ascending(elements)?;
+        Ok(Self {
+            elems: elements.to_vec(),
+        })
+    }
+
+    /// Fallible [`from_sorted_iter`](Self::from_sorted_iter): materializes then
+    /// validates like [`try_from_sorted`](Self::try_from_sorted).
+    pub fn try_from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, BulkError> {
+        let elems: Vec<T> = iter.into_iter().collect();
+        Self::try_from_sorted(&elems)
     }
 
     /// Number of elements.

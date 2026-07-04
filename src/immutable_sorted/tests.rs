@@ -330,3 +330,77 @@ fn set_snapshot_independence() {
     assert!(s.contains(&1));
     assert!(!s.contains(&99));
 }
+
+// ── Fallible constructors (try_from_sorted) ──────────────────────────
+
+#[test]
+fn try_from_sorted_map_ok_and_errors() {
+    use crate::BulkError;
+
+    // Valid strictly-ascending input.
+    let m = ImmutableSortedMap::try_from_sorted(&[1, 3, 5], &[10, 30, 50]).unwrap();
+    assert_eq!(m.get(&3), Some(&30));
+    assert_eq!(m.len(), 3);
+
+    // Length mismatch.
+    assert!(matches!(
+        ImmutableSortedMap::try_from_sorted(&[1, 2], &[10]),
+        Err(BulkError::LengthMismatch { keys: 2, values: 1 })
+    ));
+
+    // Duplicate key (equal step) -> Duplicate at the offending index.
+    assert!(matches!(
+        ImmutableSortedMap::try_from_sorted(&[1, 2, 2], &[1, 2, 3]),
+        Err(BulkError::Duplicate { index: 2 })
+    ));
+
+    // Out-of-order (descending step) -> OutOfOrder.
+    assert!(matches!(
+        ImmutableSortedMap::try_from_sorted(&[1, 5, 3], &[1, 2, 3]),
+        Err(BulkError::OutOfOrder { index: 2 })
+    ));
+
+    // Empty and single are valid.
+    assert_eq!(
+        ImmutableSortedMap::<i32, i32>::try_from_sorted(&[], &[])
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(
+        ImmutableSortedMap::try_from_sorted(&[7], &[70])
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn try_from_sorted_iter_map_never_length_mismatches() {
+    use crate::BulkError;
+    let ok = ImmutableSortedMap::try_from_sorted_iter([(1, 1), (2, 2)]).unwrap();
+    assert_eq!(ok.len(), 2);
+    assert!(matches!(
+        ImmutableSortedMap::try_from_sorted_iter([(2, 2), (1, 1)]),
+        Err(BulkError::OutOfOrder { index: 1 })
+    ));
+}
+
+#[test]
+fn try_from_sorted_set_ok_and_errors() {
+    use crate::BulkError;
+    let s = ImmutableSortedSet::try_from_sorted(&[1, 2, 4]).unwrap();
+    assert!(s.contains(&2) && !s.contains(&3));
+    assert!(matches!(
+        ImmutableSortedSet::try_from_sorted(&[1, 1]),
+        Err(BulkError::Duplicate { index: 1 })
+    ));
+    assert!(matches!(
+        ImmutableSortedSet::try_from_sorted(&[3, 1]),
+        Err(BulkError::OutOfOrder { index: 1 })
+    ));
+    assert!(matches!(
+        ImmutableSortedSet::try_from_sorted_iter([5, 4]),
+        Err(BulkError::OutOfOrder { index: 1 })
+    ));
+}

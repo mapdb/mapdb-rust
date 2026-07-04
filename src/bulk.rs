@@ -60,6 +60,14 @@ pub enum BulkError {
         /// 0-based index of the out-of-order element in the consumed input.
         index: usize,
     },
+    /// A parallel-array builder (e.g. [`crate::ImmutableSortedMap::try_from_sorted`])
+    /// was given key and value slices of different lengths.
+    LengthMismatch {
+        /// Number of keys supplied.
+        keys: usize,
+        /// Number of values supplied.
+        values: usize,
+    },
     /// The backing allocation could not be satisfied. Carries the std error so
     /// callers can inspect/propagate it.
     Alloc(std::collections::TryReserveError),
@@ -92,6 +100,9 @@ impl std::fmt::Display for BulkError {
             }
             BulkError::OutOfOrder { index } => {
                 write!(f, "input not strictly ascending at index {index}")
+            }
+            BulkError::LengthMismatch { keys, values } => {
+                write!(f, "keys/values length mismatch ({keys} != {values})")
             }
             BulkError::Alloc(e) => write!(f, "allocation failed during bulk load: {e}"),
             BulkError::CountOverflow { index } => {

@@ -46,6 +46,7 @@ pub enum DuplicatePolicy {
 /// `DBException.PumpSourceDuplicate` / `PumpSourceNotSorted`. `Alloc` wraps a
 /// `TryReserveError` for entry points that explicitly pre-reserve fallibly.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum BulkError {
     /// A duplicate key/element was found at input index `index` while the
     /// policy was [`DuplicatePolicy::Error`] (or, for BiMap, a duplicate value).

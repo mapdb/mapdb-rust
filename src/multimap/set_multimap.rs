@@ -125,17 +125,25 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
                         let last_v = bucket.last().unwrap();
                         match val_cmp.compare(last_v, &v) {
                             Ordering::Greater => return Err(BulkError::OutOfOrder { index }),
-                            // Less or Equal: `v` is in val-order. Dedupe by
-                            // `Eq` against the WHOLE bucket, not just the last
+                            // `v` is in val-order. Dedupe by `Eq` against the
+                            // val_cmp-equal TAIL of the bucket, not just the last
                             // value: comparator-equal-but-`Eq`-distinct values
                             // are all retained, so an `Eq`-duplicate can sit
-                            // non-adjacent within the val_cmp-equal tail and
-                            // slip past a `bucket.last()`-only check — breaking
-                            // the set invariant and `size` (repro: abs-value
-                            // val_cmp, values `1, -1, 1`). Matches
-                            // `from_sorted_keys`.
+                            // non-adjacent within that tail and slip past a
+                            // `bucket.last()`-only check — breaking the set
+                            // invariant and `size` (repro: abs-value val_cmp,
+                            // values `1, -1, 1`). Values are val_cmp-sorted, so
+                            // any `Eq`-twin of `v` is necessarily val_cmp-equal
+                            // to `v` and thus in this trailing run — scanning it
+                            // is sufficient and keeps the loader O(n + tail)
+                            // rather than O(bucket) per value.
                             Ordering::Less | Ordering::Equal => {
-                                if !bucket.iter().any(|x| x == &v) {
+                                let is_dup = bucket
+                                    .iter()
+                                    .rev()
+                                    .take_while(|x| val_cmp.compare(x, &v) == Ordering::Equal)
+                                    .any(|x| x == &v);
+                                if !is_dup {
                                     bucket.push(v);
                                 }
                             }

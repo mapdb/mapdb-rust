@@ -160,7 +160,8 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
     pub fn range<R: std::ops::RangeBounds<T>>(
         &self,
         range: R,
-    ) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator + '_ {
+    ) -> impl DoubleEndedIterator<Item = &T> + ExactSizeIterator + std::iter::FusedIterator + '_
+    {
         self.tree.range(range).map(|(k, _)| k)
     }
 

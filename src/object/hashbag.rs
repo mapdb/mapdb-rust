@@ -107,14 +107,20 @@ impl<T: Eq + Hash> MutableBag<T> for HashBag<T> {
     /// overflow `usize` (mirrors the overflow-checked `bulk_load_counts` path;
     /// Guava's `HashMultiset` throws in the same situation).
     fn insert(&mut self, value: T) {
+        // Check `size` first (it is >= any per-value count, so it overflows
+        // first): computing it before mutating `counts` keeps the bag
+        // consistent even if the panic is caught — a bumped count with a stale
+        // size can never be observed. Given `size` fit, `count + 1` cannot
+        // overflow (count <= old size < new size <= usize::MAX).
+        let new_size = self
+            .size
+            .checked_add(1)
+            .expect("HashBag size overflowed usize");
         let c = self.counts.entry(value).or_insert(0);
         *c = c
             .checked_add(1)
             .expect("HashBag occurrence count overflowed usize");
-        self.size = self
-            .size
-            .checked_add(1)
-            .expect("HashBag size overflowed usize");
+        self.size = new_size;
     }
 }
 
@@ -128,14 +134,16 @@ impl<T: Eq + Hash> HashBag<T> {
         if n == 0 {
             return;
         }
+        // See `insert`: size overflows first, so check it before mutating.
+        let new_size = self
+            .size
+            .checked_add(n)
+            .expect("HashBag size overflowed usize");
         let c = self.counts.entry(value).or_insert(0);
         *c = c
             .checked_add(n)
             .expect("HashBag occurrence count overflowed usize");
-        self.size = self
-            .size
-            .checked_add(n)
-            .expect("HashBag size overflowed usize");
+        self.size = new_size;
     }
 
     pub fn remove_one(&mut self, value: &T) -> bool {
@@ -244,9 +252,10 @@ mod tests {
     use super::*;
 
     #[test]
-    #[should_panic(expected = "occurrence count overflowed")]
+    #[should_panic(expected = "size overflowed")]
     fn insert_overflow_panics() {
         // Regression: unchecked `+=` wrapped the count (and `size`) in release.
+        // `size` is checked first (it is >= count), so it is what trips here.
         let mut bag = HashBag::new();
         bag.add_occurrences("a", usize::MAX);
         bag.insert("a"); // 1 more occurrence overflows usize

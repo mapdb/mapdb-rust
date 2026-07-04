@@ -149,8 +149,11 @@ pub trait RichIterator: Iterator + Sized {
             return Vec::new();
         }
         // Min-heap of the running top-n: the smallest kept element is at the top
-        // and is evicted when a larger one arrives.
-        let mut heap: BinaryHeap<Reverse<Self::Item>> = BinaryHeap::with_capacity(n + 1);
+        // and is evicted when a larger one arrives. Pre-size to min(n, known
+        // length) + 1 — saturating so a huge `n` neither overflows nor
+        // over-allocates; the heap still grows if the stream is longer.
+        let cap = n.min(self.size_hint().0).saturating_add(1);
+        let mut heap: BinaryHeap<Reverse<Self::Item>> = BinaryHeap::with_capacity(cap);
         for item in self {
             heap.push(Reverse(item));
             if heap.len() > n {
@@ -171,7 +174,8 @@ pub trait RichIterator: Iterator + Sized {
         if n == 0 {
             return Vec::new();
         }
-        let mut heap: BinaryHeap<Self::Item> = BinaryHeap::with_capacity(n + 1);
+        let cap = n.min(self.size_hint().0).saturating_add(1);
+        let mut heap: BinaryHeap<Self::Item> = BinaryHeap::with_capacity(cap);
         for item in self {
             heap.push(item);
             if heap.len() > n {
@@ -435,6 +439,16 @@ mod tests {
         assert_eq!(data.into_iter().top_n(0), Vec::<i32>::new());
         // n larger than the stream returns everything, sorted.
         assert_eq!(data.into_iter().top_n(100), vec![9, 8, 7, 5, 3, 2, 1]);
+        // A huge n must not overflow the capacity pre-size (n + 1) nor
+        // over-allocate; result is still bounded by the stream length.
+        assert_eq!(
+            data.into_iter().top_n(usize::MAX),
+            vec![9, 8, 7, 5, 3, 2, 1]
+        );
+        assert_eq!(
+            data.into_iter().bottom_n(usize::MAX),
+            vec![1, 2, 3, 5, 7, 8, 9]
+        );
     }
 
     #[test]

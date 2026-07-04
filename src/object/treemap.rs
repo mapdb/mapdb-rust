@@ -1331,12 +1331,16 @@ impl<K, V, C> IntoIterator for TreeMap<K, V, C> {
 
 impl<K, V, C> TreeMap<K, V, C> {
     /// Consumes the map, yielding keys in ascending order.
-    pub fn into_keys(self) -> impl DoubleEndedIterator<Item = K> + ExactSizeIterator {
+    pub fn into_keys(
+        self,
+    ) -> impl DoubleEndedIterator<Item = K> + ExactSizeIterator + std::iter::FusedIterator {
         self.into_iter().map(|(k, _)| k)
     }
 
     /// Consumes the map, yielding values in ascending key order.
-    pub fn into_values(self) -> impl DoubleEndedIterator<Item = V> + ExactSizeIterator {
+    pub fn into_values(
+        self,
+    ) -> impl DoubleEndedIterator<Item = V> + ExactSizeIterator + std::iter::FusedIterator {
         self.into_iter().map(|(_, v)| v)
     }
 }

@@ -5,36 +5,35 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 //! Open-addressing hash map with pluggable [`HashingStrategy`] for keys.
+//!
+//! Built on the crate's shared kernel rather than a private probe loop
+//! (blueprint M4/M5): a [`SlotList`] arena owns the `(K, V)` entries and an
+//! [`IndexTable`] maps each key's strategy hash to its arena slot. This deletes
+//! the duplicate Robin-Hood implementation the type used to carry, and inherits
+//! the index's hardening — because the index stores each key's hash inline,
+//! backward-shift deletion and resize re-derive ideal positions *without*
+//! calling the user's strategy, so a panic in a `HashingStrategy` closure can
+//! only occur during the read-only probe, never mid-shift. (The old
+//! `rehash_from` re-invoked `strategy.hash_code` while shifting.)
+//!
+//! Identity comes entirely from the strategy (there is no `K: Hash + Eq`
+//! bound); the index's own `BuildHasher` is unused — lookups pass the
+//! strategy-computed hash directly.
 
 use super::strategy::HashingStrategy;
+use crate::index_table::{IndexTable, RawEntry};
+use crate::slot_list::SlotList;
 use std::fmt;
-
-const DEFAULT_CAPACITY: usize = 16;
-
-struct Entry<K, V> {
-    key: Option<K>,
-    value: Option<V>,
-}
-
-impl<K, V> Entry<K, V> {
-    fn empty() -> Self {
-        Entry {
-            key: None,
-            value: None,
-        }
-    }
-
-    fn is_occupied(&self) -> bool {
-        self.key.is_some()
-    }
-}
 
 /// An open-addressing hash map that uses a pluggable [`HashingStrategy`]
 /// for key identity. This allows case-insensitive maps, maps keyed by
 /// extracted fields, etc.
 pub struct HashMapWithStrategy<K, V> {
-    entries: Vec<Entry<K, V>>,
-    size: usize,
+    /// Sole owner of every key and value (insertion order).
+    slots: SlotList<(K, V)>,
+    /// Strategy-hash → arena slot index. Owns no keys; its `BuildHasher` is
+    /// unused (hashes come from the strategy).
+    index: IndexTable,
     strategy: HashingStrategy<K>,
 }
 
@@ -47,22 +46,18 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for HashMapWithStrategy<K, V> {
 impl<K, V> HashMapWithStrategy<K, V> {
     /// Creates an empty map using the given hashing strategy for keys.
     pub fn new(strategy: HashingStrategy<K>) -> Self {
-        Self::with_capacity(strategy, DEFAULT_CAPACITY)
+        HashMapWithStrategy {
+            slots: SlotList::new(),
+            index: IndexTable::new(),
+            strategy,
+        }
     }
 
     /// Creates an empty map with pre-allocated capacity.
     pub fn with_capacity(strategy: HashingStrategy<K>, capacity: usize) -> Self {
-        let cap = capacity
-            .max(DEFAULT_CAPACITY)
-            .checked_next_power_of_two()
-            .unwrap_or(usize::MAX);
-        let mut entries = Vec::with_capacity(cap);
-        for _ in 0..cap {
-            entries.push(Entry::empty());
-        }
         HashMapWithStrategy {
-            entries,
-            size: 0,
+            slots: SlotList::with_capacity(capacity),
+            index: IndexTable::with_capacity(capacity),
             strategy,
         }
     }
@@ -70,183 +65,103 @@ impl<K, V> HashMapWithStrategy<K, V> {
     /// Inserts a key-value pair. Returns `Some(old_value)` if the key was
     /// already present (per the strategy's equality), or `None` if it was new.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if self.needs_resize() {
-            self.resize();
-        }
-        let mask = self.entries.len() - 1;
-        let mut idx = self.strategy.hash_code(&key) as usize & mask;
-        loop {
-            if !self.entries[idx].is_occupied() {
-                self.entries[idx].key = Some(key);
-                self.entries[idx].value = Some(value);
-                self.size += 1;
-                return None;
+        let hash = self.strategy.hash_code(&key);
+        // Disjoint-field borrows: `probe` borrows `index` mutably while the
+        // `eq` closure reads `slots`/`strategy`. No user code runs between the
+        // probe and `fill_vacant`.
+        let slots = &self.slots;
+        let strategy = &self.strategy;
+        match self
+            .index
+            .probe(hash, |s| strategy.equals(&slots.get(s).0, &key))
+        {
+            RawEntry::Occupied(slot) => {
+                Some(std::mem::replace(&mut self.slots.get_mut(slot).1, value))
             }
-            if self
-                .strategy
-                .equals(self.entries[idx].key.as_ref().unwrap(), &key)
-            {
-                let old = self.entries[idx].value.take();
-                self.entries[idx].value = Some(value);
-                return old;
+            RawEntry::Vacant(cell) => {
+                let slot = self.slots.push_back((key, value));
+                self.index.fill_vacant(cell, hash, slot);
+                None
             }
-            idx = (idx + 1) & mask;
         }
     }
 
     /// Returns a reference to the value associated with the key, or `None`.
     pub fn get(&self, key: &K) -> Option<&V> {
-        if self.size == 0 {
-            return None;
-        }
-        let mask = self.entries.len() - 1;
-        let mut idx = self.strategy.hash_code(key) as usize & mask;
-        loop {
-            if !self.entries[idx].is_occupied() {
-                return None;
-            }
-            if self
-                .strategy
-                .equals(self.entries[idx].key.as_ref().unwrap(), key)
-            {
-                return self.entries[idx].value.as_ref();
-            }
-            idx = (idx + 1) & mask;
-        }
+        let slot = self.find_slot(key)?;
+        Some(&self.slots.get(slot).1)
     }
 
     /// Removes the entry for the given key. Returns `Some(value)` if found.
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        if self.size == 0 {
-            return None;
-        }
-        let mask = self.entries.len() - 1;
-        let mut idx = self.strategy.hash_code(key) as usize & mask;
-        loop {
-            if !self.entries[idx].is_occupied() {
-                return None;
-            }
-            if self
-                .strategy
-                .equals(self.entries[idx].key.as_ref().unwrap(), key)
-            {
-                let old = self.entries[idx].value.take();
-                self.entries[idx].key = None;
-                self.size -= 1;
-                self.rehash_from(idx, mask);
-                return old;
-            }
-            idx = (idx + 1) & mask;
-        }
+        let hash = self.strategy.hash_code(key);
+        let slots = &self.slots;
+        let strategy = &self.strategy;
+        let slot = self
+            .index
+            .remove(hash, |s| strategy.equals(&slots.get(s).0, key))?;
+        let (_k, v) = self.slots.unlink_free(slot);
+        Some(v)
     }
 
     /// Returns `true` if the map contains the given key.
     pub fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
+        self.find_slot(key).is_some()
     }
 
     /// Returns the number of key-value pairs.
     pub fn len(&self) -> usize {
-        self.size
+        self.slots.len()
     }
 
     /// Returns `true` if the map is empty.
     pub fn is_empty(&self) -> bool {
-        self.size == 0
+        self.slots.is_empty()
     }
 
     /// Removes all entries.
     pub fn clear(&mut self) {
-        for entry in &mut self.entries {
-            entry.key = None;
-            entry.value = None;
-        }
-        self.size = 0;
+        // Clear the index first so a panicking value `Drop` during the arena
+        // clear can never leave the index referencing a half-cleared arena.
+        self.index.clear();
+        self.slots.clear();
     }
 
-    /// Returns an iterator over `(&K, &V)` pairs.
+    /// Returns an iterator over `(&K, &V)` pairs (insertion order).
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
-        self.entries.iter().filter_map(|e| {
-            if e.is_occupied() {
-                Some((e.key.as_ref().unwrap(), e.value.as_ref().unwrap()))
-            } else {
-                None
-            }
-        })
+        self.slots.iter().map(|(k, v)| (k, v))
     }
 
-    /// Returns an iterator over keys.
+    /// Returns an iterator over keys (insertion order).
     pub fn keys(&self) -> impl Iterator<Item = &K> {
-        self.entries.iter().filter_map(|e| e.key.as_ref())
+        self.slots.iter().map(|(k, _)| k)
     }
 
-    /// Returns an iterator over values.
+    /// Returns an iterator over values (insertion order).
     pub fn values(&self) -> impl Iterator<Item = &V> {
-        self.entries.iter().filter_map(|e| {
-            if e.is_occupied() {
-                e.value.as_ref()
-            } else {
-                None
-            }
-        })
+        self.slots.iter().map(|(_, v)| v)
     }
 
     /// Calls `f` for each key-value pair.
     pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
-        for entry in &self.entries {
-            if let (Some(ref k), Some(ref v)) = (&entry.key, &entry.value) {
-                f(k, v);
-            }
+        for (k, v) in self.iter() {
+            f(k, v);
         }
     }
 
-    // ── internal ────────────────────────────────────────────────────
-
-    fn needs_resize(&self) -> bool {
-        // Grow strictly *below* the 0.75 load factor: the table must
-        // not hold `(size+1)` entries once that count reaches `cap*3/4`.
-        // `>=` (not `>`) ensures we grow when `cap*3 == (size+1)*4`
-        // exactly (e.g. the 12th insert into a capacity-16 table).
-        (self.size + 1) * 4 >= self.entries.len() * 3
-    }
-
-    fn resize(&mut self) {
-        let new_cap = self.entries.len() * 2;
-        let old = std::mem::replace(&mut self.entries, {
-            let mut v = Vec::with_capacity(new_cap);
-            for _ in 0..new_cap {
-                v.push(Entry::empty());
-            }
-            v
-        });
-        self.size = 0;
-        for entry in old {
-            if let (Some(k), Some(v)) = (entry.key, entry.value) {
-                self.insert(k, v);
-            }
+    /// Locate the arena slot for `key` through the index. The `eq` closure and
+    /// `find` borrow disjoint fields (`slots`/`strategy` vs `index`), so this
+    /// type-checks without splitting the struct.
+    #[inline]
+    fn find_slot(&self, key: &K) -> Option<usize> {
+        if self.slots.is_empty() {
+            return None;
         }
-    }
-
-    fn rehash_from(&mut self, deleted: usize, mask: usize) {
-        let cap = self.entries.len();
-        let mut gap = deleted;
-        let mut idx = (deleted + 1) & mask;
-        while self.entries[idx].is_occupied() {
-            let ideal =
-                self.strategy
-                    .hash_code(self.entries[idx].key.as_ref().unwrap()) as usize
-                    & mask;
-            let dist_current = (idx.wrapping_sub(ideal).wrapping_add(cap)) & mask;
-            let dist_gap = (gap.wrapping_sub(ideal).wrapping_add(cap)) & mask;
-            if dist_current > dist_gap {
-                self.entries.swap(gap, idx);
-                gap = idx;
-            }
-            idx = (idx + 1) & mask;
-            if idx == gap {
-                break;
-            }
-        }
+        let hash = self.strategy.hash_code(key);
+        let slots = &self.slots;
+        let strategy = &self.strategy;
+        self.index
+            .find(hash, |s| strategy.equals(&slots.get(s).0, key))
     }
 }
 
@@ -318,6 +233,9 @@ mod tests {
         assert!(m.is_empty());
     }
 
+    // Resize/backward-shift correctness through many grows: the capacity policy
+    // itself now lives in (and is unit-tested by) `IndexTable`; here we only
+    // pin the behavioral contract — every key survives repeated resizes.
     #[test]
     fn test_resize_stress() {
         let mut m = HashMapWithStrategy::new(string_hashing_strategy());
@@ -330,39 +248,35 @@ mod tests {
         }
     }
 
-    // Exercises the std `next_power_of_two()` capacity path (previously a
-    // hand-rolled `next_pow2` with an ungated `v >> 32` that panicked on
-    // 32-bit targets). A from-scratch grow drives the same code path.
+    // Remove-heavy churn exercises the index's backward-shift deletion against
+    // the arena's slot recycling: interleave inserts and removes, then verify
+    // the surviving set is exactly correct.
     #[test]
-    fn test_capacity_growth_via_next_power_of_two() {
+    fn test_remove_churn_keeps_probe_chains_intact() {
         let mut m = HashMapWithStrategy::new(string_hashing_strategy());
-        assert_eq!(m.entries.len(), 16);
         for i in 0..200 {
             m.insert(format!("k{}", i), i);
         }
-        // Table must have grown to a power of two strictly larger than 16.
-        assert!(m.entries.len() > 16);
-        assert!(m.entries.len().is_power_of_two());
-        assert_eq!(m.len(), 200);
-    }
-
-    // Spec: load factor must stay strictly below 0.75. With a capacity-16
-    // table, the 12th distinct entry (size would reach 12 == 16*0.75) must
-    // trigger a grow before it is stored.
-    #[test]
-    fn test_load_factor_strictly_below_three_quarters() {
-        let mut m = HashMapWithStrategy::new(string_hashing_strategy());
-        assert_eq!(m.entries.len(), 16);
-        for i in 0..11 {
-            m.insert(format!("k{}", i), i);
+        // Remove every even key.
+        for i in (0..200).step_by(2) {
+            assert_eq!(m.remove(&format!("k{}", i)), Some(i));
         }
-        // 11 entries: 12*4 = 48 >= 16*3 = 48 would grow on the *next*
-        // insert; at 11 the table has not yet grown.
-        assert_eq!(m.entries.len(), 16);
-        m.insert("k11".to_string(), 11);
-        // 12th insert: must have grown strictly below 0.75.
-        assert_eq!(m.entries.len(), 32);
-        assert_eq!(m.len(), 12);
+        assert_eq!(m.len(), 100);
+        for i in 0..200 {
+            let got = m.get(&format!("k{}", i));
+            if i % 2 == 0 {
+                assert_eq!(got, None);
+            } else {
+                assert_eq!(got, Some(&i));
+            }
+        }
+        // Re-insert the removed keys (drives slot reuse + fresh index cells).
+        for i in (0..200).step_by(2) {
+            assert!(m.insert(format!("k{}", i), i * 10).is_none());
+        }
+        assert_eq!(m.len(), 200);
+        assert_eq!(m.get(&"k0".to_string()), Some(&0));
+        assert_eq!(m.get(&"k2".to_string()), Some(&20));
     }
 
     #[test]

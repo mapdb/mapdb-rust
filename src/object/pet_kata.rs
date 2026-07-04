@@ -16,9 +16,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::object::{
-        ArrayList, Bag, Collection, HashBag, HashSet, MutableBag, MutableList, MutableSet,
-    };
+    use crate::object::{ArrayList, HashBag, HashSet};
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum PetType {

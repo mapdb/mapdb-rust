@@ -108,6 +108,36 @@ impl<T: Eq + Hash> HashBag<T> {
         self.size = 0;
     }
 
+    /// Retain only the distinct elements for which `keep(&elem, occurrences)`
+    /// returns `true`; a rejected element is removed with **all** its
+    /// occurrences. The total-size accounting (`len`) stays exact.
+    /// O(distinct), no `T: Clone`.
+    ///
+    /// # Panics
+    /// If `keep` panics, the panic propagates. `size` is recomputed from the
+    /// surviving counts on the way out (via a drop guard), so a caught panic
+    /// still leaves `len()` consistent with the elements actually present —
+    /// matching the panic-consistency the other mutators keep.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T, usize) -> bool,
+    {
+        // `OpenHashMap::retain` leaves `counts` in a valid state even if the
+        // predicate panics (it drops the unprocessed entries), so summing the
+        // survivors is correct on both the normal and the unwind path. A guard
+        // recomputes `size` in either case, keeping it in sync with `counts`.
+        struct FixSize<'a, T: Eq + Hash>(&'a mut HashBag<T>);
+        impl<T: Eq + Hash> Drop for FixSize<'_, T> {
+            fn drop(&mut self) {
+                // Survivors' counts sum to ≤ the old size (a subset), so no
+                // overflow; `usize` addition suffices.
+                self.0.size = self.0.counts.iter().map(|(_, &c)| c).sum();
+            }
+        }
+        let guard = FixSize(self);
+        guard.0.counts.retain(|elem, count| keep(elem, *count));
+    }
+
     /// Add one occurrence of `value`.
     ///
     /// # Panics
@@ -383,5 +413,70 @@ mod tests {
     fn bulk_load_empty() {
         let bag: HashBag<i32> = HashBag::bulk_load(Vec::new()).unwrap();
         assert!(bag.is_empty());
+    }
+
+    #[test]
+    fn retain_drops_whole_elements_and_fixes_size() {
+        // counts: a=3, b=1, c=2, d=4  → total 10
+        let mut bag = HashBag::from_iter(["a", "a", "a", "b", "c", "c", "d", "d", "d", "d"]);
+        assert_eq!(bag.len(), 10);
+        assert_eq!(bag.distinct_len(), 4);
+        // Keep elements with an even occurrence count: c=2, d=4.
+        bag.retain(|_, occ| occ % 2 == 0);
+        assert_eq!(bag.distinct_len(), 2);
+        assert_eq!(bag.occurrences_of(&"c"), 2);
+        assert_eq!(bag.occurrences_of(&"d"), 4);
+        assert_eq!(bag.occurrences_of(&"a"), 0);
+        assert_eq!(bag.occurrences_of(&"b"), 0);
+        assert!(!bag.contains(&"a"));
+        // Size == sum of surviving occurrences (2 + 4).
+        assert_eq!(bag.len(), 6);
+        // Predicate sees the element too; the bag stays usable afterwards.
+        bag.insert("c");
+        assert_eq!(bag.occurrences_of(&"c"), 3);
+        assert_eq!(bag.len(), 7);
+    }
+
+    #[test]
+    fn retain_all_and_none() {
+        let mut bag = HashBag::from_iter([1, 1, 2, 3, 3, 3]); // size 6
+        bag.retain(|_, _| true);
+        assert_eq!(bag.len(), 6);
+        assert_eq!(bag.distinct_len(), 3);
+        bag.retain(|_, _| false);
+        assert!(bag.is_empty());
+        assert_eq!(bag.distinct_len(), 0);
+        assert_eq!(bag.len(), 0);
+    }
+
+    #[test]
+    fn retain_size_stays_consistent_after_caught_panic() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        let mut bag = HashBag::from_iter(["a", "a", "b"]); // size 3
+        let r = catch_unwind(AssertUnwindSafe(|| {
+            bag.retain(|_, _| panic!("boom"));
+        }));
+        assert!(r.is_err());
+        // Whatever survived, `len()` must equal the actual occurrences present.
+        let actual: usize = bag.iter().count();
+        assert_eq!(bag.len(), actual, "size must match surviving occurrences");
+        // Same distinct/count relationship holds for the reduced bag.
+        let by_distinct: usize = bag
+            .top_occurrences(usize::MAX)
+            .iter()
+            .map(|(_, c)| *c)
+            .sum();
+        assert_eq!(bag.len(), by_distinct);
+    }
+
+    #[test]
+    fn retain_element_predicate() {
+        // Predicate keys on the element value, not just the count.
+        let mut bag = HashBag::from_iter([1, 1, 2, 2, 2, 3]); // 1:2, 2:3, 3:1
+        bag.retain(|&v, _| v != 2);
+        assert_eq!(bag.len(), 3); // 1×2 + 3×1
+        assert_eq!(bag.occurrences_of(&2), 0);
+        assert_eq!(bag.occurrences_of(&1), 2);
+        assert_eq!(bag.occurrences_of(&3), 1);
     }
 }

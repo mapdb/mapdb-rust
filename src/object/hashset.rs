@@ -68,6 +68,15 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
         self.inner.clear();
     }
 
+    /// Retain only the elements for which `keep(&t)` returns `true`.
+    /// O(n), no `T: Clone` (see [`OpenHashSet::retain`]).
+    pub fn retain<F>(&mut self, keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.inner.retain(keep);
+    }
+
     /// Whether any element satisfies `predicate`.
     pub fn any_satisfy(&self, predicate: impl Fn(&T) -> bool) -> bool {
         self.inner.iter().any(predicate)
@@ -318,5 +327,14 @@ mod tests {
             inc.insert(*v);
         }
         assert_eq!(bulk, inc);
+    }
+
+    #[test]
+    fn retain_keeps_matching() {
+        let mut s: HashSet<i32> = (0..10).collect();
+        s.retain(|v| v % 3 == 0);
+        assert_eq!(s.len(), 4); // 0,3,6,9
+        assert!(s.contains(&0) && s.contains(&9));
+        assert!(!s.contains(&1));
     }
 }

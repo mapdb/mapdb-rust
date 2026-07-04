@@ -73,6 +73,15 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
         self.inner.clear();
     }
 
+    /// Retain only the entries for which `keep(&k, &mut v)` returns `true`.
+    /// O(n), no `K: Clone` (see [`OpenHashMap::retain`]).
+    pub fn retain<F>(&mut self, keep: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        self.inner.retain(keep);
+    }
+
     /// Apply `f` to each entry.
     pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
         for (k, v) in self.inner.iter() {
@@ -337,5 +346,25 @@ mod tests {
             inc.insert(*k, *v);
         }
         assert_eq!(bulk, inc);
+    }
+
+    #[test]
+    fn retain_drops_and_mutates() {
+        let mut m: HashMap<i32, i32> = HashMap::new();
+        for k in 0..10 {
+            m.insert(k, k);
+        }
+        m.retain(|k, v| {
+            *v += 100;
+            k % 2 == 0
+        });
+        assert_eq!(m.len(), 5);
+        for k in 0..10 {
+            if k % 2 == 0 {
+                assert_eq!(m.get(&k), Some(&(k + 100)));
+            } else {
+                assert_eq!(m.get(&k), None);
+            }
+        }
     }
 }

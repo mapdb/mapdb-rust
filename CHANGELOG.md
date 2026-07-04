@@ -4,8 +4,14 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` on `LinkedHash*`
+## [Unreleased] — additive: `entry` + `retain` on the object hash family
 
+- **`retain` across the rest of the object hash family** — `object::HashMap`,
+  `object::HashSet` (thin delegations to the `OpenHashMap`/`OpenHashSet` kernel
+  retain), and `HashBag::retain(|&elem, occurrences| …)` (multiset retain: drops
+  a rejected distinct element with *all* its occurrences and keeps the total-size
+  accounting exact by subtracting the dropped counts). Together with the
+  `LinkedHash*` retain below, every object hash collection now has `retain`.
 - **`LinkedHashMap::retain(|&k, &mut v| …)` / `LinkedHashSet::retain(|&t| …)`** —
   drop the entries a predicate rejects, in a single insertion-order pass, keeping
   survivors' positions and allowing in-place value mutation. O(n): each dropped

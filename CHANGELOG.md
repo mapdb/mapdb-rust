@@ -6,6 +6,21 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **Lazy `RangeBounds` iterator on `ImmutableSortedMap`/`Set`** (blueprint T4).
+  New `range<R: RangeBounds<K>>(r)` methods return a **lazy, double-ended,
+  borrowing** iterator (`SortedRangeIter` / `SortedRangeElemIter`) — callers write
+  `m.range(a..=b)`, `m.range(a..)`, `m.range(..)`, or an explicit
+  `(Excluded(&a), Included(&b))` tuple, and get `(&K, &V)` / `&T` back without
+  materializing a `Vec`. The iterators are `ExactSizeIterator`/`FusedIterator`
+  (the in-range entries are one contiguous slice, bracketed by two binary searches
+  over `Ord::cmp`, so there are no per-item comparisons and no `v ± 1` arithmetic —
+  `INT_MIN`/`INT_MAX` keys are safe). Bounds semantics match `TreeMap::range`
+  exactly; inverted/empty ranges (`b..a`, `a..a` exclusive) yield nothing rather
+  than panicking (unlike `BTreeMap::range`), consistent with the crate's
+  cut-empty convention. The methods live in `impl<K: Ord, V>` blocks (no `Copy`
+  bound), so they are ready for non-`Copy` keys once construction drops its `Copy`
+  requirement. Additive — the existing `Vec`-returning `range_keys`/`range_entries`
+  (`Range<K>`) stay.
 - **`FromIterator`/`Extend` parity** — `RangeSet` (coalescing) and `RangeMap`
   (last-writer-wins in iterator order) gained both, so `iter.collect()` and
   `set.extend(iter)` work; `BoundedMap` gained `Extend<(K, V)>` (each pair is

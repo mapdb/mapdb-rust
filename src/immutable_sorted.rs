@@ -48,14 +48,20 @@
 //! The types expose **no** `insert`/`put`/`add`/`remove`/`clear`/`set`. There
 //! is nothing to trap on a mutator: the methods simply do not exist.
 //!
-//! ## Iterators: materialized snapshots
+//! ## Iterators: materialized snapshots + a lazy `range`
 //!
-//! The ascending/descending and range iterators return **materialized [`Vec`]
+//! The descending and `Range<K>` methods return **materialized [`Vec`]
 //! snapshots** (`Vec<K>` / `Vec<(K, V)>`), matching the convention the
-//! [`crate::object::treemap::TreeMap`] range/descending methods already use
+//! [`crate::object::treemap::TreeMap`] descending methods already use
 //! (`navigable-map.md`'s slice/iterator equivalence). A materialized snapshot
-//! and a lazy iterator are observably identical; the snapshot keeps the API
+//! and a lazy iterator are observably identical; the snapshot keeps that API
 //! `Copy`-bounded and trivially independent of `&self`'s lifetime.
+//!
+//! Alongside them, [`ImmutableSortedMap::range`] / [`ImmutableSortedSet::range`]
+//! provide the std-shape T4 counterpart: they accept any [`RangeBounds<K>`]
+//! (`map.range(a..=b)`, `map.range(..)`) and return a **lazy, double-ended,
+//! borrowing** iterator ([`SortedRangeIter`] / [`SortedRangeElemIter`]) —
+//! [`ExactSizeIterator`], needing neither `K: Copy` nor `V: Copy`.
 //!
 //! v1 ships the `i32` surface (the cross-language validation universe). The
 //! types stay generic over `K/T: Ord + Copy` so the float / wider-integer
@@ -66,6 +72,35 @@
 
 use crate::bulk::BulkError;
 use crate::range::Range;
+use std::ops::{Bound, RangeBounds};
+
+/// Convert any [`RangeBounds<K>`] into the `[lo, hi)` slice bracket of a
+/// strictly-ascending array, using `Ord::cmp` (never a bare `<`, so a
+/// float-total-order key widens with no change). The brackets follow the same
+/// cut semantics as [`crate::object::treemap::TreeMap::range`]:
+///
+/// * start `Included(q)` → first index `>= q`  (`# keys strictly < q`);
+/// * start `Excluded(q)` → first index `>  q`  (`# keys <= q`);
+/// * end   `Included(q)` → first index `>  q`  (`# keys <= q`);
+/// * end   `Excluded(q)` → first index `>= q`  (`# keys strictly < q`).
+///
+/// An inverted or empty range (`hi < lo`) collapses to the empty bracket
+/// `(lo, lo)` — empty, never a panic — matching the crate's
+/// `Range<T>`/`TreeMap` "cut-empty is valid" convention (and diverging from
+/// `std::collections::BTreeMap::range`, which panics).
+fn range_bracket<K: Ord, R: RangeBounds<K>>(sorted: &[K], range: R) -> (usize, usize) {
+    let lo = match range.start_bound() {
+        Bound::Unbounded => 0,
+        Bound::Included(q) => sorted.partition_point(|k| k.cmp(q).is_lt()),
+        Bound::Excluded(q) => sorted.partition_point(|k| k.cmp(q).is_le()),
+    };
+    let hi = match range.end_bound() {
+        Bound::Unbounded => sorted.len(),
+        Bound::Included(q) => sorted.partition_point(|k| k.cmp(q).is_le()),
+        Bound::Excluded(q) => sorted.partition_point(|k| k.cmp(q).is_lt()),
+    };
+    (lo, hi.max(lo))
+}
 
 /// Panic message helper for the strictly-ascending construction check.
 #[cold]
@@ -426,6 +461,65 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     }
 }
 
+// ── Lazy std-shape range iterator (`RangeBounds`, borrowing, no `Copy`) ──
+//
+// The `range_*(Range<K>) -> Vec` methods above are the `Copy`-bounded snapshot
+// API. This block adds the T4 std-shape counterpart: `range(a..=b)` accepting
+// any `RangeBounds<K>` and returning a **lazy, double-ended, borrowing**
+// iterator. It needs neither `K: Copy` nor `V: Copy` (it hands back references
+// into `self`), so it lives in its own `impl<K: Ord, V>` block.
+impl<K: Ord, V> ImmutableSortedMap<K, V> {
+    /// A lazy, **double-ended** iterator over the `(&K, &V)` entries whose key
+    /// falls in `range`, in ascending key order (`.rev()` for descending).
+    ///
+    /// Bounds are any [`RangeBounds<K>`] — `map.range(a..=b)`, `map.range(..)`,
+    /// `map.range(a..)`, `map.range((Excluded(a), Unbounded))` — compared
+    /// through [`Ord`], mirroring
+    /// [`TreeMap::range`](crate::object::treemap::TreeMap::range). The in-range
+    /// entries are a contiguous slice (the range is convex), bracketed by two
+    /// binary searches, so the iterator is [`ExactSizeIterator`] and performs
+    /// no per-item bound comparison.
+    ///
+    /// # Inverted / empty bounds
+    /// An inverted or empty range (`b..a` with `a < b`, or `a..a` exclusive)
+    /// yields **nothing** — treated as empty rather than a panic (consistent
+    /// with the `Range<K>` methods above and diverging from
+    /// [`std::collections::BTreeMap::range`]).
+    pub fn range<R: RangeBounds<K>>(&self, range: R) -> SortedRangeIter<'_, K, V> {
+        let (lo, hi) = range_bracket(&self.keys, range);
+        SortedRangeIter {
+            inner: self.keys[lo..hi].iter().zip(self.values[lo..hi].iter()),
+        }
+    }
+}
+
+/// Lazy double-ended iterator over an [`ImmutableSortedMap`] key range,
+/// yielding `(&K, &V)` in ascending key order. Returned by
+/// [`ImmutableSortedMap::range`].
+#[derive(Clone, Debug)]
+pub struct SortedRangeIter<'a, K, V> {
+    inner: std::iter::Zip<std::slice::Iter<'a, K>, std::slice::Iter<'a, V>>,
+}
+
+impl<'a, K, V> Iterator for SortedRangeIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<K, V> DoubleEndedIterator for SortedRangeIter<'_, K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+impl<K, V> ExactSizeIterator for SortedRangeIter<'_, K, V> {}
+impl<K, V> std::iter::FusedIterator for SortedRangeIter<'_, K, V> {}
+
 // ===========================================================================
 // ImmutableSortedSet<T>
 // ===========================================================================
@@ -579,6 +673,47 @@ impl<T: Ord + Copy> ImmutableSortedSet<T> {
         v
     }
 }
+
+// ── Lazy std-shape range iterator (`RangeBounds`, borrowing, no `Copy`) ──
+impl<T: Ord> ImmutableSortedSet<T> {
+    /// A lazy, **double-ended** iterator over the `&T` elements in `range`, in
+    /// ascending order (`.rev()` for descending). Bounds are any
+    /// [`RangeBounds<T>`], compared through [`Ord`] — the element analogue of
+    /// [`ImmutableSortedMap::range`]. An inverted/empty range yields nothing
+    /// (never a panic). [`ExactSizeIterator`] (contiguous convex slice).
+    pub fn range<R: RangeBounds<T>>(&self, range: R) -> SortedRangeElemIter<'_, T> {
+        let (lo, hi) = range_bracket(&self.elems, range);
+        SortedRangeElemIter {
+            inner: self.elems[lo..hi].iter(),
+        }
+    }
+}
+
+/// Lazy double-ended iterator over an [`ImmutableSortedSet`] element range,
+/// yielding `&T` in ascending order. Returned by [`ImmutableSortedSet::range`].
+#[derive(Clone, Debug)]
+pub struct SortedRangeElemIter<'a, T> {
+    inner: std::slice::Iter<'a, T>,
+}
+
+impl<'a, T> Iterator for SortedRangeElemIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<T> DoubleEndedIterator for SortedRangeElemIter<'_, T> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+impl<T> ExactSizeIterator for SortedRangeElemIter<'_, T> {}
+impl<T> std::iter::FusedIterator for SortedRangeElemIter<'_, T> {}
 
 #[cfg(test)]
 mod tests;

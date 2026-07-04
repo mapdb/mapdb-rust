@@ -266,6 +266,104 @@ fn range_query_contiguous_slice() {
     assert_eq!(m.range_keys(Range::all()).len(), 10);
 }
 
+// ── Lazy std-shape `range` (RangeBounds, borrowing, double-ended) ────
+
+#[test]
+fn lazy_range_all_bounds_match_snapshot() {
+    let keys: Vec<i32> = (1..=10).map(|i| i * 10).collect();
+    let vals: Vec<i32> = keys.iter().map(|k| k * 10).collect();
+    let m = ImmutableSortedMap::from_sorted(&keys, &vals);
+
+    // half-open a..b, closed a..=b, from a.., to ..b, to-inclusive ..=b, full ..
+    let collect = |it: super::SortedRangeIter<'_, i32, i32>| -> Vec<(i32, i32)> {
+        it.map(|(k, v)| (*k, *v)).collect()
+    };
+    assert_eq!(
+        collect(m.range(30..70)),
+        vec![(30, 300), (40, 400), (50, 500), (60, 600)]
+    );
+    assert_eq!(collect(m.range(40..=50)), vec![(40, 400), (50, 500)]);
+    assert_eq!(
+        collect(m.range(80..)),
+        vec![(80, 800), (90, 900), (100, 1000)]
+    );
+    assert_eq!(
+        collect(m.range(..=30)),
+        vec![(10, 100), (20, 200), (30, 300)]
+    );
+    assert_eq!(collect(m.range(..30)), vec![(10, 100), (20, 200)]);
+    assert_eq!(m.range(..).count(), 10);
+    // Excluded start via explicit tuple bound: (30, 50] -> 40,50.
+    use std::ops::Bound::{Excluded, Included};
+    assert_eq!(
+        collect(m.range((Excluded(30), Included(50)))),
+        vec![(40, 400), (50, 500)]
+    );
+}
+
+#[test]
+fn lazy_range_matches_vec_methods() {
+    let keys: Vec<i32> = (1..=10).map(|i| i * 10).collect();
+    let vals: Vec<i32> = keys.iter().map(|k| k * 10).collect();
+    let m = ImmutableSortedMap::from_sorted(&keys, &vals);
+    // closed_open(30,70) is exactly `30..70` under RangeBounds.
+    let lazy: Vec<(i32, i32)> = m.range(30..70).map(|(k, v)| (*k, *v)).collect();
+    assert_eq!(lazy, m.range_entries(Range::closed_open(30, 70)));
+    // descending == .rev().
+    let desc: Vec<(i32, i32)> = m.range(30..70).rev().map(|(k, v)| (*k, *v)).collect();
+    assert_eq!(desc, m.descending_range_entries(Range::closed_open(30, 70)));
+}
+
+#[test]
+fn lazy_range_double_ended_and_exact_size() {
+    let keys: Vec<i32> = (1..=10).map(|i| i * 10).collect();
+    let vals: Vec<i32> = keys.iter().map(|k| k * 10).collect();
+    let m = ImmutableSortedMap::from_sorted(&keys, &vals);
+    let mut it = m.range(20..=80); // 20,30,40,50,60,70,80 -> len 7
+    assert_eq!(it.len(), 7);
+    assert_eq!(it.next(), Some((&20, &200)));
+    assert_eq!(it.next_back(), Some((&80, &800)));
+    assert_eq!(it.len(), 5);
+    assert_eq!(it.next_back(), Some((&70, &700)));
+    assert_eq!(it.next(), Some((&30, &300)));
+    // remaining middle: 40,50,60
+    let rest: Vec<i32> = it.map(|(k, _)| *k).collect();
+    assert_eq!(rest, vec![40, 50, 60]);
+}
+
+#[test]
+#[allow(clippy::reversed_empty_ranges)] // intentionally inverted — exercises the empty-bracket path
+fn lazy_range_inverted_and_empty_yield_nothing() {
+    let keys: Vec<i32> = (1..=5).collect();
+    let vals = keys.clone();
+    let m = ImmutableSortedMap::from_sorted(&keys, &vals);
+    assert_eq!(m.range(4..2).count(), 0); // inverted
+    assert_eq!(m.range(3..3).count(), 0); // empty half-open
+    assert_eq!(m.range(10..0).count(), 0); // fully out of range + inverted
+    assert_eq!(m.range(100..200).count(), 0); // above everything
+}
+
+// NB: the lazy `range` lives in an `impl<K: Ord, V>` block (no `Copy`), so it
+// is ready for non-`Copy` keys the moment construction drops its `Copy` bound
+// (deferred T6-tail work). Until then every constructible instance is `Copy`,
+// so a non-`Copy` exercise isn't buildable here.
+
+#[test]
+#[allow(clippy::reversed_empty_ranges)] // intentionally inverted at the end
+fn lazy_range_set_mirrors_map() {
+    let s = ImmutableSortedSet::from_sorted(&[10, 20, 30, 40, 50]);
+    let got: Vec<i32> = s.range(20..=40).copied().collect();
+    assert_eq!(got, vec![20, 30, 40]);
+    let desc: Vec<i32> = s.range(20..=40).rev().copied().collect();
+    assert_eq!(desc, vec![40, 30, 20]);
+    let mut it = s.range(..); // full, double-ended
+    assert_eq!(it.len(), 5);
+    assert_eq!(it.next(), Some(&10));
+    assert_eq!(it.next_back(), Some(&50));
+    assert_eq!(it.len(), 3);
+    assert_eq!(s.range(40..20).count(), 0); // inverted -> empty
+}
+
 // ── Large flat-array parity (paging-invariance is trivial for flat) ──
 
 #[test]

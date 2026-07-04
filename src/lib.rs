@@ -60,7 +60,9 @@ pub use hash_table::{
 pub use hashable_float::{HashableF32, HashableF64};
 pub use hyperloglog::{HllError, HyperLogLog};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};
-pub use immutable_sorted::{ImmutableSortedMap, ImmutableSortedSet};
+pub use immutable_sorted::{
+    ImmutableSortedMap, ImmutableSortedSet, SortedRangeElemIter, SortedRangeIter,
+};
 pub use interval::{Interval, SignedPrimInt};
 pub use multimap::{Multimap, SetMultimap};
 pub use pair::Pair;

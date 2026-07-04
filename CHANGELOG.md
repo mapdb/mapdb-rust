@@ -4,7 +4,7 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
+## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
 - **`FromIterator`/`Extend` parity** — `RangeSet` (coalescing) and `RangeMap`
   (last-writer-wins in iterator order) gained both, so `iter.collect()` and

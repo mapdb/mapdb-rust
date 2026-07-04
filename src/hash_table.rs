@@ -161,6 +161,20 @@ impl<K, V, S> OpenHashMap<K, V, S> {
     pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
         self.iter().map(|(_, v)| v)
     }
+
+    /// Iterate `(&K, &mut V)` over the live entries in unspecified order. Keys are
+    /// handed out as shared `&K` (mutating a key would desync its hash slot);
+    /// only values are mutable.
+    pub fn iter_mut(&mut self) -> OpenHashMapIterMut<'_, K, V> {
+        OpenHashMapIterMut {
+            entries: self.entries.iter_mut(),
+        }
+    }
+
+    /// Iterate `&mut V` over the live values in unspecified order.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
+        self.iter_mut().map(|(_, v)| v)
+    }
 }
 
 impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
@@ -1119,6 +1133,35 @@ impl<'a, K, V, S> IntoIterator for &'a OpenHashMap<K, V, S> {
     }
 }
 
+/// Mutable-value iterator over an `OpenHashMap`'s live entries (unspecified
+/// order): yields `(&K, &mut V)`. Built by a disjoint-borrow walk of the slot
+/// array (no `unsafe`); the key is shared so the hash slot can't be desynced.
+pub struct OpenHashMapIterMut<'a, K, V> {
+    entries: std::slice::IterMut<'a, MapSlot<K, V>>,
+}
+
+impl<'a, K, V> Iterator for OpenHashMapIterMut<'a, K, V> {
+    type Item = (&'a K, &'a mut V);
+    fn next(&mut self) -> Option<Self::Item> {
+        for slot in self.entries.by_ref() {
+            if let MapSlot::Occupied { key, value } = slot {
+                return Some((&*key, value));
+            }
+        }
+        None
+    }
+}
+
+impl<K, V> std::iter::FusedIterator for OpenHashMapIterMut<'_, K, V> {}
+
+impl<'a, K, V, S> IntoIterator for &'a mut OpenHashMap<K, V, S> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = OpenHashMapIterMut<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
 /// Owning iterator over an `OpenHashMap`'s `(K, V)` pairs (unspecified order).
 pub struct OpenHashMapIntoIter<K, V> {
     inner: std::vec::IntoIter<MapSlot<K, V>>,
@@ -1243,6 +1286,46 @@ impl<K: Hash + Eq, S: BuildHasher> Eq for OpenHashSet<K, S> {}
 mod tests {
     use super::*;
     use crate::hashable_float::{HashableF32, HashableF64};
+
+    #[test]
+    fn iter_mut_and_values_mut_mutate_in_place() {
+        let mut m = OpenHashMap::<i32, i32>::new();
+        for i in 0..50 {
+            m.insert(i, i);
+        }
+        for (k, v) in m.iter_mut() {
+            *v += *k * 100; // key is &K (shared) — read-only; value mutable
+        }
+        for i in 0..50 {
+            assert_eq!(m.get(&i), Some(&(i + i * 100)));
+        }
+        for v in m.values_mut() {
+            *v = 0;
+        }
+        assert!(m.values().all(|&v| v == 0));
+        assert_eq!(m.len(), 50);
+    }
+
+    #[test]
+    fn iter_mut_via_mut_ref_into_iter() {
+        let mut m = OpenHashMap::<&str, i32>::new();
+        m.insert("a", 1);
+        m.insert("b", 2);
+        for (_k, v) in &mut m {
+            *v *= 10;
+        }
+        let mut got: Vec<(&str, i32)> = m.iter().map(|(&k, &v)| (k, v)).collect();
+        got.sort_unstable();
+        assert_eq!(got, vec![("a", 10), ("b", 20)]);
+    }
+
+    #[test]
+    fn iter_mut_empty_and_fused() {
+        let mut m = OpenHashMap::<i32, i32>::new();
+        let mut it = m.iter_mut();
+        assert!(it.next().is_none());
+        assert!(it.next().is_none()); // FusedIterator
+    }
 
     #[test]
     fn open_hash_map_partial_eq_order_insensitive() {

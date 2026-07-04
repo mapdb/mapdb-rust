@@ -153,6 +153,45 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
         self.inner.iter()
     }
 
+    /// Borrowed key iterator (unspecified order).
+    pub fn keys(&self) -> impl Iterator<Item = &K> + '_ {
+        self.inner.keys()
+    }
+
+    /// Borrowed value iterator (unspecified order).
+    pub fn values(&self) -> impl Iterator<Item = &V> + '_ {
+        self.inner.values()
+    }
+
+    /// Mutable-value iterator `(&K, &mut V)` (unspecified order); keys stay
+    /// shared so the hash slot cannot be desynced.
+    pub fn iter_mut(&mut self) -> crate::hash_table::OpenHashMapIterMut<'_, K, V> {
+        self.inner.iter_mut()
+    }
+
+    /// Mutable iterator over the values (unspecified order).
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> + '_ {
+        self.inner.values_mut()
+    }
+
+    /// Insert-or-update cursor for `key`, hashing once (mirrors
+    /// [`OpenHashMap::entry`]).
+    pub fn entry(
+        &mut self,
+        key: K,
+    ) -> crate::hash_table::Entry<'_, K, V, std::collections::hash_map::RandomState> {
+        self.inner.entry(key)
+    }
+
+    /// Reserve capacity for at least `additional` more entries, or return a
+    /// [`std::collections::TryReserveError`] if the allocator cannot.
+    pub fn try_reserve(
+        &mut self,
+        additional: usize,
+    ) -> Result<(), std::collections::TryReserveError> {
+        self.inner.try_reserve(additional)
+    }
+
     /// Looks up a value by any borrowed form of the key
     /// (`K: Borrow<Q>`), e.g. `map.get("str")` on a `HashMap<String, _>`.
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -193,6 +232,14 @@ impl<'a, K: Eq + Hash, V> IntoIterator for &'a HashMap<K, V> {
     type IntoIter = crate::hash_table::OpenHashMapIter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter {
         self.inner.iter()
+    }
+}
+
+impl<'a, K: Eq + Hash, V> IntoIterator for &'a mut HashMap<K, V> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = crate::hash_table::OpenHashMapIterMut<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.iter_mut()
     }
 }
 
@@ -248,6 +295,39 @@ mod tests {
         assert_eq!(m.get(&"a"), Some(&10));
         assert_eq!(m.remove(&"a"), Some(10));
         assert_eq!(m.len(), 1);
+    }
+
+    #[test]
+    fn kernel_parity_entry_keys_values_and_mut() {
+        let mut m: HashMap<&str, i32> = HashMap::new();
+        m.insert("a", 1);
+        m.insert("b", 2);
+
+        // entry: insert-or-update
+        *m.entry("a").or_insert(0) += 100;
+        assert_eq!(m.get(&"a"), Some(&101));
+        m.entry("c").or_insert(3);
+        assert_eq!(m.get(&"c"), Some(&3));
+
+        // keys / values
+        let mut ks: Vec<&str> = m.keys().copied().collect();
+        ks.sort_unstable();
+        assert_eq!(ks, vec!["a", "b", "c"]);
+        let sum: i32 = m.values().sum();
+        assert_eq!(sum, 101 + 2 + 3);
+
+        // iter_mut / values_mut + &mut IntoIterator
+        for (_k, v) in &mut m {
+            *v += 1;
+        }
+        for v in m.values_mut() {
+            *v *= 2;
+        }
+        assert_eq!(m.get(&"a"), Some(&((101 + 1) * 2)));
+        assert_eq!(m.get(&"b"), Some(&((2 + 1) * 2)));
+
+        // try_reserve succeeds for a sane request
+        assert!(m.try_reserve(100).is_ok());
     }
 
     #[test]

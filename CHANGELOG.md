@@ -6,6 +6,13 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **Mutable iteration for the `OpenHashMap` kernel + `object::HashMap` parity** —
+  `OpenHashMap` gained `iter_mut()` / `values_mut()` (and `IntoIterator for &mut`,
+  i.e. `for (k, v) in &mut map`), which the whole hash family previously lacked;
+  built by a disjoint-borrow walk of the slot array (no `unsafe`), keys handed out
+  as shared `&K` so a key mutation can't desync its hash slot. `object::HashMap`
+  gained the missing kernel-parity surface: `entry`, `keys`, `values`, `iter_mut`,
+  `values_mut`, `try_reserve`, and `IntoIterator for &mut HashMap`.
 - **BREAKING: `RoaringU32::deserialize` now returns `Result<_, RoaringError>`**
   (a typed enum) instead of `Result<_, String>`, mirroring the crate's other
   typed decode error `HllError`. Each of the 13 variants names a specific

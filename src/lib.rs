@@ -49,7 +49,9 @@ pub use bounded_map::{BoundedMap, BoundedMapIntoIter, EvictionPolicy, Fifo, Lru}
 pub use bulk::{BulkError, DuplicatePolicy};
 pub use count_min::CountMin;
 pub use fenwick::FenwickTree;
-pub use hash_table::{Entry, OccupiedEntry, OpenHashMap, OpenHashSet, VacantEntry};
+pub use hash_table::{
+    Entry, OccupiedEntry, OpenHashMap, OpenHashMapIterMut, OpenHashSet, VacantEntry,
+};
 pub use hashable_float::{HashableF32, HashableF64};
 pub use hyperloglog::{HllError, HyperLogLog};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};

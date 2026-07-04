@@ -19,6 +19,7 @@ pub mod bounded_map;
 pub mod bulk;
 pub mod count_min;
 pub mod fenwick;
+pub mod frozen;
 pub mod hash;
 pub mod hash_table;
 pub mod hashable_float;
@@ -49,6 +50,7 @@ pub use bounded_map::{BoundedMap, BoundedMapIntoIter, EvictionPolicy, Fifo, Lru}
 pub use bulk::{BulkError, DuplicatePolicy};
 pub use count_min::CountMin;
 pub use fenwick::FenwickTree;
+pub use frozen::Frozen;
 pub use hash_table::{
     Entry, OccupiedEntry, OpenHashMap, OpenHashMapIterMut, OpenHashSet, VacantEntry,
 };

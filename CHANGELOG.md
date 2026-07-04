@@ -6,6 +6,18 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **`Frozen<C>` — a generic read-only wrapper** (blueprint T6/M7). One type
+  freezes any collection: `Frozen::new(c)` takes ownership of `c` behind an
+  `Arc<C>` and derefs to `&C`, so exactly `C`'s `&self` (read) methods are
+  reachable — `get`, `contains`, `len`, `iter`, `keys`, `values`, … — while every
+  `&mut self` mutator is unreachable *by construction* (no `unsafe`, no per-type
+  wrapper, no `ReadOnly` associated type). `clone` is O(1) (shares the `Arc`);
+  `get_mut`/`try_unwrap` reclaim mutation/ownership only while the handle is
+  unique. Impls: `Deref`/`AsRef`, `Clone`, `From<C>`, `Default`, `Debug`
+  (transparent), `PartialEq`/`Eq` (`Arc`-pointer fast path then value compare),
+  `Hash`, `FromIterator` (`iter.collect::<Frozen<OpenHashMap<_,_>>>()`), and
+  `IntoIterator for &Frozen<C>`. Additive; migrating the concrete `Immutable*`
+  types to `Frozen` aliases is a later step.
 - **Mutable-value access on `HashMapWithStrategy`** — `get_mut`, `iter_mut`
   (`(&K, &mut V)`, insertion order), and `values_mut`, built on the existing
   `SlotList::iter_mut`/`get_mut` arena primitives; keys stay shared so a

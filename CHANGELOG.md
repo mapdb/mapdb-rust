@@ -4,6 +4,52 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
+## [Unreleased] — v3 Stage C (breaking, v1.0 cut) — IN PROGRESS
+
+Stage C of the v3 blueprint (`todo/fable-rust`, doc 14 §6): the breaking
+removals and the comparator default-flip that change type identity. **This
+section is in progress** — the tower-trait deletion (`traits.rs`,
+`object/traits.rs`) is not yet landed; it requires re-homing the core API of
+`ArrayList`/`ArrayStack`/object `HashSet`/`HashBag` as inherent methods first.
+
+### BREAKING-V3
+
+- **`TreeMap` / `TreeSet` default comparator flipped to `Natural`.** The `C`
+  type parameter now defaults to the zero-sized `Ord`-based `Natural` instead of
+  the runtime `Comparator<K>`. This changes type identity: `TreeMap<K, V>` /
+  `TreeSet<T>` now name the **natural-order** type.
+  - `new()` / `TreeSet::new()` are now **no-arg** natural-order constructors.
+    The `new(cmp)` dynamic constructors are **removed** → use
+    `with_comparator(cmp)`, or the `DynTreeMap<K,V>` / `DynTreeSet<T>` aliases.
+  - The bulk data pump (`from_sorted`, `TreeMapSink` / `TreeSetSink`, `create`)
+    is anchored to the `DynTreeMap` / `DynTreeSet` form (it validates order with
+    a runtime `Comparator`).
+  - `sub_map` / `sub_set` are natural-order snapshots; comparator-correct slices
+    are the job of the lazy `range(bounds)` iterator (T4).
+- **Removed the `stream` module** (collectors + generators). Superseded by the
+  blanket-impl `RichIterator` (T1) — build pipelines on any `.iter()`.
+- **Removed `Vec`-returning range methods** superseded by the lazy `range()`
+  iterator (T4):
+  - `TreeMap`: `range_keys`, `range_entries`, `descending_keys`,
+    `descending_entries`, `descending_range_keys`, `descending_range_entries`.
+  - `TreeSet`: `range_elements`, `descending_range_elements`, `descending`.
+  - Replace with `range(bounds)` (`.rev()` for descending). `sub_map` /
+    `sub_set` / `remove_range` are retained.
+- **Removed `keys_to_vec` / `values_to_vec`** on `HashMap` and `LinkedHashMap`
+  → use the `keys()` / `values()` iterators + `.collect()`.
+
+`ImmutableSortedMap` / `ImmutableSortedSet` **retain** their range/descending
+methods: that frozen type has no lazy `range()` replacement, so those methods
+are not superseded.
+
+### Still pending in Stage C
+
+- Delete the tower traits (`traits.rs`, `object/traits.rs`) after re-homing the
+  core structural + functional API of `ArrayList` / `ArrayStack` / object
+  `HashSet` / `HashBag` / object `HashMap` as inherent methods (the oracle
+  depends on `ArrayList::{push,len,is_empty,iter,inject_into}`).
+- Adversarial (Fable) review of the full Stage C diff.
+
 ## [Unreleased] — v3 Stage B (arena kernel / T9)
 
 Stage B of the v3 blueprint (`todo/fable-rust`, doc 14 §5). The

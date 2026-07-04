@@ -506,6 +506,17 @@ impl<'a, K, V> Iterator for BoundedMapIter<'a, K, V> {
 
 impl<K, V> std::iter::FusedIterator for BoundedMapIter<'_, K, V> {}
 
+/// [`put`](BoundedMap::put) each pair in iterator order — later inserts may evict
+/// earlier ones once the map is at capacity (there is no `FromIterator`: a
+/// bounded map needs a capacity/policy the iterator cannot supply).
+impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> Extend<(K, V)> for BoundedMap<K, V, P> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, entries: I) {
+        for (k, v) in entries {
+            self.put(k, v);
+        }
+    }
+}
+
 impl<'a, K: Hash + Eq + Clone, V, P: EvictionPolicy> IntoIterator for &'a BoundedMap<K, V, P> {
     type Item = (&'a K, &'a V);
     type IntoIter = BoundedMapIter<'a, K, V>;
@@ -797,6 +808,14 @@ mod tests {
         );
         // Arena never grew beyond what capacity needs (+ at most transient slack).
         assert!(m.slots.len() <= 4, "arena bloated to {}", m.slots.len());
+    }
+
+    #[test]
+    fn extend_puts_each_and_honours_capacity() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(2);
+        m.extend([(1, 10), (2, 20), (3, 30)]); // 1 evicted (LRU) at the 3rd put
+        assert_eq!(m.len(), 2);
+        assert_eq!(sorted_entries(&m), vec![(2, 20), (3, 30)]);
     }
 
     #[test]

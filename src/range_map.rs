@@ -241,6 +241,26 @@ impl<T, V> DoubleEndedIterator for RangeMapIntoIter<T, V> {
 impl<T, V> ExactSizeIterator for RangeMapIntoIter<T, V> {}
 impl<T, V> std::iter::FusedIterator for RangeMapIntoIter<T, V> {}
 
+/// [`put`](RangeMap::put) each `(range, value)` in iterator order
+/// (last-writer-wins on overlap; no coalescing across values).
+impl<T: Ord + Copy, V: Copy + PartialEq> Extend<(Range<T>, V)> for RangeMap<T, V> {
+    fn extend<I: IntoIterator<Item = (Range<T>, V)>>(&mut self, entries: I) {
+        for (range, value) in entries {
+            self.put(range, value);
+        }
+    }
+}
+
+/// Build a `RangeMap` from `(range, value)` entries (`iter.collect()`),
+/// last-writer-wins over overlaps in iterator order.
+impl<T: Ord + Copy, V: Copy + PartialEq> FromIterator<(Range<T>, V)> for RangeMap<T, V> {
+    fn from_iter<I: IntoIterator<Item = (Range<T>, V)>>(iter: I) -> Self {
+        let mut map = RangeMap::new();
+        map.extend(iter);
+        map
+    }
+}
+
 /// Consumes the map, yielding its canonical `(range, value)` entries ascending
 /// by lower cut (the [normal form](RangeMap)).
 impl<T, V> IntoIterator for RangeMap<T, V> {
@@ -315,6 +335,25 @@ mod tests {
     fn into_iter_empty() {
         let m: RangeMap<i32, i32> = RangeMap::new();
         assert_eq!(m.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn from_iter_and_extend_last_writer_wins() {
+        // collect() applies put in order; the later overlapping entry wins.
+        let m: RangeMap<i32, i32> = [
+            (Range::closed_open(1, 5), 10),
+            (Range::closed_open(3, 9), 20),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(m.get(2), Some(&10));
+        assert_eq!(m.get(4), Some(&20));
+        assert_eq!(m.get(8), Some(&20));
+
+        let mut m2: RangeMap<i32, i32> = RangeMap::new();
+        m2.extend([(Range::closed(1, 2), 1), (Range::closed(5, 6), 2)]);
+        assert_eq!(m2.get(1), Some(&1));
+        assert_eq!(m2.get(5), Some(&2));
     }
 
     #[test]

@@ -266,6 +266,23 @@ impl<T> DoubleEndedIterator for RangeSetIntoIter<T> {
 impl<T> ExactSizeIterator for RangeSetIntoIter<T> {}
 impl<T> std::iter::FusedIterator for RangeSetIntoIter<T> {}
 
+/// [`add`](RangeSet::add) each range (auto-coalescing); the final normal form is
+/// order-independent.
+impl<T: Ord + Copy> Extend<Range<T>> for RangeSet<T> {
+    fn extend<I: IntoIterator<Item = Range<T>>>(&mut self, ranges: I) {
+        self.add_all(ranges);
+    }
+}
+
+/// Build a `RangeSet` from ranges (`iter.collect()`), coalescing as it goes.
+impl<T: Ord + Copy> FromIterator<Range<T>> for RangeSet<T> {
+    fn from_iter<I: IntoIterator<Item = Range<T>>>(iter: I) -> Self {
+        let mut set = RangeSet::new();
+        set.add_all(iter);
+        set
+    }
+}
+
 /// Consumes the set, yielding its canonical disjoint ranges ascending by lower
 /// cut (the [normal form](RangeSet)).
 impl<T> IntoIterator for RangeSet<T> {
@@ -341,6 +358,29 @@ mod tests {
     fn into_iter_empty() {
         let s: RangeSet<i32> = RangeSet::new();
         assert_eq!(s.into_iter().count(), 0);
+    }
+
+    #[test]
+    fn from_iter_and_extend_coalesce() {
+        // collect() coalesces connected ranges just like add.
+        let s: RangeSet<i32> = [
+            Range::closed(1, 3),
+            Range::closed(3, 5),
+            Range::closed(20, 25),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            collected(&s),
+            vec![Range::closed(1, 5), Range::closed(20, 25)]
+        );
+
+        let mut s2 = rs(&[Range::closed(1, 2)]);
+        s2.extend([Range::closed(2, 4), Range::closed(10, 11)]);
+        assert_eq!(
+            collected(&s2),
+            vec![Range::closed(1, 4), Range::closed(10, 11)]
+        );
     }
 
     #[test]

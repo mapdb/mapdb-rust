@@ -6,6 +6,11 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access + owned `IntoIterator` + `BoundedMap` across the collections
 
+- **`FromIterator`/`Extend` parity** — `RangeSet` (coalescing) and `RangeMap`
+  (last-writer-wins in iterator order) gained both, so `iter.collect()` and
+  `set.extend(iter)` work; `BoundedMap` gained `Extend<(K, V)>` (each pair is
+  `put`, so extending past capacity evicts as usual — no `FromIterator` because a
+  bounded map needs a capacity/policy the iterator can't supply).
 - **Fallible `try_from_sorted` constructors on `ImmutableSortedMap`/`Set`** (M8).
   `try_from_sorted` (and `try_from_sorted_iter`) validate their input and return
   `Result<Self, BulkError>` instead of **panicking** like the existing

@@ -22,10 +22,14 @@ so a breaking change is a **minor** version bump.
   recency — hence `&mut self`), `peek` (`&self`, no recency touch), `remove`,
   `evict`, `clear`, `contains_key`, `iter`/`keys`/`values`, owned + borrowed
   `IntoIterator`, and an optional `on_evict` **observer** (`&K, &V, cause`; fired
-  for size evictions only — `remove`/`evict`/`clear` are not evictions). Aliased
-  constructors: `BoundedMap::with_capacity(n)` (LRU) and `BoundedMap::fifo(n)`.
-  Requires `K: Clone` (transitional `OpenHashMap<K, usize>` index; a later
-  revision can move to the key-owning-free `IndexTable` kernel to drop it).
+  for size and TTL-expiry evictions — `remove`/`evict`/`clear` are not evictions).
+  Optional after-write **TTL** (`with_ttl(ticks)` + `put_at(k, v, now)` +
+  `expire_entries(now)`), orthogonal to the eviction policy (time vs space) and
+  matching `BoundedLruMap`'s logical-tick model; `u64::MAX` is the never-expire
+  sentinel. Aliased constructors: `BoundedMap::with_capacity(n)` (LRU) and
+  `BoundedMap::fifo(n)`. Requires `K: Clone` (transitional `OpenHashMap<K, usize>`
+  index; a later revision can move to the key-owning-free `IndexTable` kernel to
+  drop it).
 - **Owned `IntoIterator` across the remaining containers** — `RangeSet<T>`,
   `RangeMap<T, V>`, `RoaringU32`, `HashBag<T>`, `Multimap<K, V>`, and
   `SetMultimap<K, V>` now support consuming iteration (`for x in value`, and

@@ -124,12 +124,20 @@ pub struct BoundedMap<K: Hash + Eq + Clone, V, P: EvictionPolicy = Lru> {
     slots: Vec<Option<(K, V)>>,
     /// Free-list of reusable slot indices.
     free: Vec<usize>,
+    /// Per-slot logical expiry tick, parallel to `slots` (`u64::MAX` = never).
+    /// An entry expires when `now >= expiry[slot]`; only meaningful for live
+    /// slots (a freed slot's stale value is ignored — it is overwritten on
+    /// reuse). Kept length-synced with `slots`.
+    expiry: Vec<u64>,
     /// The eviction policy (victim selection + recency/order bookkeeping).
     policy: P,
     /// Capacity: at most this many resident entries (`0` ⇒ every insert drops).
     max_size: usize,
-    /// Optional eviction observer, fired for `Size` evictions only (explicit
-    /// [`evict`](BoundedMap::evict) returns the value instead of observing).
+    /// After-write TTL in logical ticks, or `None` for a pure max-size map.
+    /// `expiry[slot] = saturating(now + ttl)` on each write.
+    ttl: Option<u64>,
+    /// Optional eviction observer, fired for `Size` and `Expired` evictions
+    /// (explicit [`evict`](BoundedMap::evict) returns the value instead).
     on_evict: Option<EvictObserver<K, V>>,
 }
 
@@ -140,16 +148,30 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
             index: OpenHashMap::new(),
             slots: Vec::new(),
             free: Vec::new(),
+            expiry: Vec::new(),
             policy,
             max_size,
+            ttl: None,
             on_evict: None,
         }
     }
 
+    /// Set the after-write TTL in logical ticks (builder-style). Each write
+    /// (`put`/`put_at`) then stamps the entry with `expiry = saturating(now +
+    /// ttl)`, and [`expire_entries`](BoundedMap::expire_entries)`(now)` removes
+    /// every entry whose expiry tick has passed. TTL is **orthogonal** to the
+    /// eviction policy — it is about *time*, the policy about *space*.
+    #[must_use]
+    pub fn with_ttl(mut self, ttl: u64) -> Self {
+        self.ttl = Some(ttl);
+        self
+    }
+
     /// Install an eviction **observer** (builder-style; replaces any previous
     /// one). It is called `(&key, &value, cause)` for every entry evicted under
-    /// size pressure, after the map is already consistent and before the value
-    /// drops. It must not attempt to mutate the map.
+    /// size pressure ([`Size`](EvictionCause::Size)) or by TTL expiry
+    /// ([`Expired`](EvictionCause::Expired)), after the map is already consistent
+    /// and before the value drops. It must not attempt to mutate the map.
     #[must_use]
     pub fn on_evict<F: FnMut(&K, &V, EvictionCause) + 'static>(mut self, cb: F) -> Self {
         self.on_evict = Some(Box::new(cb));
@@ -177,7 +199,15 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         self.index.contains_key(key)
     }
 
-    /// Insert or update `key`. Returns the previous value if `key` was resident.
+    /// Insert or update `key` at logical time `0` — shorthand for
+    /// [`put_at(key, value, 0)`](BoundedMap::put_at). Use `put_at` when a TTL is
+    /// configured and you need real expiry timestamps.
+    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+        self.put_at(key, value, 0)
+    }
+
+    /// Insert or update `key` at logical time `now`. Returns the previous value
+    /// if `key` was resident.
     ///
     /// On a **new** key when the map is already at capacity, exactly one victim
     /// (chosen by the policy) is evicted first — firing the [`on_evict`] observer
@@ -185,11 +215,17 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
     /// `max_size`. A capacity of `0` drops every insert (returns `None`).
     /// Updating an existing key refreshes its policy access and never evicts.
     ///
+    /// If a TTL is configured ([`with_ttl`](BoundedMap::with_ttl)), the (new or
+    /// updated) entry's expiry is (re)stamped to `saturating(now + ttl)` — TTL is
+    /// after-write, so every write extends the entry's life.
+    ///
     /// [`on_evict`]: BoundedMap::on_evict
-    pub fn put(&mut self, key: K, value: V) -> Option<V> {
+    pub fn put_at(&mut self, key: K, value: V, now: u64) -> Option<V> {
+        let expire_at = self.ttl.map_or(u64::MAX, |t| now.saturating_add(t));
         if let Some(&slot) = self.index.get(&key) {
-            // Update in place: refresh recency, swap the value, keep the key.
+            // Update in place: refresh recency + expiry, swap the value.
             self.policy.on_access(slot);
+            self.expiry[slot] = expire_at;
             let cell = self.slots[slot]
                 .as_mut()
                 .expect("indexed slot must be occupied");
@@ -207,20 +243,49 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
         // user code (key clone + index insert) first, and commit the arena
         // allocation only afterwards. So a panicking `Clone`, or a panicking
         // `Hash`/`Eq` during the index *probe*, leaves the index, arena,
-        // free-list, and policy all untouched — not even a leaked cell. (The one
-        // residual is a `Hash` that panics during a kernel resize-rehash, which
-        // can leave `index` partial — a pre-existing `OpenHashMap::insert`
+        // free-list, expiry, and policy all untouched — not even a leaked cell.
+        // (The one residual is a `Hash` that panics during a kernel resize-rehash,
+        // which can leave `index` partial — a pre-existing `OpenHashMap::insert`
         // property shared with `BoundedLruMap`, not addressed here.)
         let slot = self.free.last().copied().unwrap_or(self.slots.len());
         self.index.insert(key.clone(), slot);
         // Commit the allocation (infallible from here on): reuse the peeked free
-        // slot, or grow the arena to make `slot` valid.
+        // slot, or grow the arena (both `slots` and the parallel `expiry`) to make
+        // `slot` valid.
         if self.free.pop().is_none() {
             self.slots.push(None);
+            self.expiry.push(u64::MAX);
         }
         self.slots[slot] = Some((key, value));
+        self.expiry[slot] = expire_at;
         self.policy.on_insert(slot);
         None
+    }
+
+    /// Remove every entry whose logical expiry tick has passed (`expiry <= now`),
+    /// firing the [`on_evict`] observer with cause
+    /// [`Expired`](EvictionCause::Expired) for each and dropping its value.
+    /// Returns the number expired. A no-op when no TTL is configured. Order of
+    /// removal is unspecified (arena order).
+    ///
+    /// [`on_evict`]: BoundedMap::on_evict
+    pub fn expire_entries(&mut self, now: u64) -> usize {
+        // Two-phase: collect the expired slots under a read-only scan, then evict
+        // them. If a value `Drop` or the observer panics mid-eviction, each
+        // already-processed slot is fully consistent and the rest simply remain
+        // (a later call re-collects them) — no divergence.
+        let expired: Vec<usize> = (0..self.slots.len())
+            .filter(|&i| {
+                // `u64::MAX` is the "never expires" sentinel — excluded even at
+                // `now == u64::MAX`.
+                self.slots[i].is_some() && self.expiry[i] != u64::MAX && self.expiry[i] <= now
+            })
+            .collect();
+        let count = expired.len();
+        for slot in expired {
+            self.evict_slot(slot, EvictionCause::Expired);
+        }
+        count
     }
 
     /// Read `key`, refreshing its policy access (for [`Lru`] this is the "get
@@ -274,6 +339,7 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
     pub fn clear(&mut self) {
         self.policy.clear();
         self.free.clear();
+        self.expiry.clear();
         let old_index = std::mem::replace(&mut self.index, OpenHashMap::new());
         let old_slots = std::mem::take(&mut self.slots);
         // `self` is now a valid empty map; dropping the drained keys/values below
@@ -715,6 +781,76 @@ mod tests {
         assert_eq!(sorted_entries(&m), vec![(3, 30), (4, 40), (5, 50)]);
         m.put(6, 60); // now at capacity -> evicts 3 (LRU)
         assert_eq!(sorted_entries(&m), vec![(4, 40), (5, 50), (6, 60)]);
+    }
+
+    #[test]
+    fn ttl_expires_entries_at_or_past_deadline() {
+        // ttl 10, written at now=0 -> expiry 10. expire_entries removes at >= 10.
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(8).with_ttl(10);
+        m.put_at(1, 10, 0);
+        m.put_at(2, 20, 5);
+        assert_eq!(m.expire_entries(9), 0); // nothing due yet (deadlines 10, 15)
+        assert_eq!(m.len(), 2);
+        assert_eq!(m.expire_entries(10), 1); // key 1 (expiry 10) is due
+        assert_eq!(m.peek(&1), None);
+        assert_eq!(m.peek(&2), Some(&20));
+        assert_eq!(m.expire_entries(15), 1); // key 2 (expiry 15)
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn ttl_rewrite_extends_life() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(8).with_ttl(10);
+        m.put_at(1, 10, 0); // expiry 10
+        m.put_at(1, 11, 7); // after-write TTL: expiry now 17
+        assert_eq!(m.expire_entries(10), 0); // no longer due at 10
+        assert_eq!(m.peek(&1), Some(&11));
+        assert_eq!(m.expire_entries(17), 1);
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn ttl_fires_observer_with_expired_cause() {
+        let log = Rc::new(RefCell::new(Vec::<(i32, &'static str)>::new()));
+        let l = log.clone();
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(8)
+            .with_ttl(5)
+            .on_evict(move |&k, _v, c| l.borrow_mut().push((k, c.as_str())));
+        m.put_at(1, 10, 0);
+        m.put_at(2, 20, 0);
+        m.expire_entries(5);
+        let mut got = log.borrow().clone();
+        got.sort_unstable();
+        assert_eq!(got, vec![(1, "expired"), (2, "expired")]);
+    }
+
+    #[test]
+    fn no_ttl_means_expire_entries_is_a_noop() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4); // no TTL
+        m.put(1, 10);
+        assert_eq!(m.expire_entries(u64::MAX), 0);
+        assert_eq!(m.peek(&1), Some(&10));
+    }
+
+    #[test]
+    fn ttl_saturates_without_overflow() {
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(4).with_ttl(u64::MAX);
+        m.put_at(1, 10, u64::MAX); // now + ttl saturates to u64::MAX, never expires
+        assert_eq!(m.expire_entries(u64::MAX - 1), 0);
+        assert_eq!(m.peek(&1), Some(&10));
+    }
+
+    #[test]
+    fn ttl_expiry_slot_reuse_stays_consistent() {
+        // An expired-then-reused slot must not carry a stale expiry.
+        let mut m: BoundedMap<i32, i32> = BoundedMap::with_capacity(2).with_ttl(10);
+        m.put_at(1, 10, 0); // expiry 10
+        m.expire_entries(10); // remove 1; its slot goes to the free-list
+        m.put_at(2, 20, 100); // reuses that slot; expiry must be 110, not 10
+        assert_eq!(m.expire_entries(10), 0); // stale 10 must NOT expire key 2
+        assert_eq!(m.peek(&2), Some(&20));
+        assert_eq!(m.expire_entries(110), 1);
+        assert!(m.is_empty());
     }
 
     #[test]

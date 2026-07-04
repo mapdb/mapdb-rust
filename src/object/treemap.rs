@@ -1274,6 +1274,69 @@ impl<'a, K, V, C: Compare<K>> IntoIterator for &'a TreeMap<K, V, C> {
     }
 }
 
+/// Consumes the tree in ascending order into `out`. Recursion depth is
+/// O(log n) on the balanced LLRB.
+fn consume_in_order<K, V>(node: Option<Box<Node<K, V>>>, out: &mut Vec<(K, V)>) {
+    if let Some(n) = node {
+        let Node {
+            key, value, left, right, ..
+        } = *n;
+        consume_in_order(left, out);
+        out.push((key, value));
+        consume_in_order(right, out);
+    }
+}
+
+/// Owning iterator over `(K, V)` pairs in ascending comparator order, from
+/// `TreeMap::into_iter`.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct TreeMapIntoIter<K, V> {
+    inner: std::vec::IntoIter<(K, V)>,
+}
+
+impl<K, V> Iterator for TreeMapIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<(K, V)> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl<K, V> DoubleEndedIterator for TreeMapIntoIter<K, V> {
+    fn next_back(&mut self) -> Option<(K, V)> {
+        self.inner.next_back()
+    }
+}
+impl<K, V> ExactSizeIterator for TreeMapIntoIter<K, V> {}
+impl<K, V> std::iter::FusedIterator for TreeMapIntoIter<K, V> {}
+
+/// Owned iteration in sorted order: `for (k, v) in map`, yielding `(K, V)` by
+/// value — the bulk ownership-transfer exit.
+impl<K, V, C> IntoIterator for TreeMap<K, V, C> {
+    type Item = (K, V);
+    type IntoIter = TreeMapIntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        let mut out = Vec::with_capacity(self.size);
+        consume_in_order(self.root, &mut out);
+        TreeMapIntoIter {
+            inner: out.into_iter(),
+        }
+    }
+}
+
+impl<K, V, C> TreeMap<K, V, C> {
+    /// Consumes the map, yielding keys in ascending order.
+    pub fn into_keys(self) -> impl DoubleEndedIterator<Item = K> + ExactSizeIterator {
+        self.into_iter().map(|(k, _)| k)
+    }
+
+    /// Consumes the map, yielding values in ascending key order.
+    pub fn into_values(self) -> impl DoubleEndedIterator<Item = V> + ExactSizeIterator {
+        self.into_iter().map(|(_, v)| v)
+    }
+}
+
 impl<K: Ord, V> Default for TreeMap<K, V, Natural> {
     /// An empty map ordered by natural [`Ord`].
     fn default() -> Self {
@@ -1384,6 +1447,18 @@ mod tests {
 
         let keys: Vec<&i32> = m.keys().collect();
         assert_eq!(keys, vec![&3, &2, &1]);
+    }
+
+    #[test]
+    fn owned_into_iter_and_into_keys_values() {
+        let m: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * 10)).collect();
+        let pairs: Vec<(i32, i32)> = m.into_iter().collect();
+        assert_eq!(pairs, vec![(0, 0), (1, 10), (2, 20), (3, 30), (4, 40)]);
+
+        let m2: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * 10)).collect();
+        assert_eq!(m2.into_keys().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        let m3: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * 10)).collect();
+        assert_eq!(m3.into_values().rev().collect::<Vec<_>>(), vec![40, 30, 20, 10, 0]);
     }
 
     #[test]

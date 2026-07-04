@@ -585,6 +585,32 @@ impl RoaringU32 {
     }
 }
 
+impl FromIterator<u32> for RoaringU32 {
+    /// Builds a set from `u32` values (`iter.collect()`), superseding the
+    /// explicit [`from_iter_u32`](RoaringU32::from_iter_u32).
+    fn from_iter<I: IntoIterator<Item = u32>>(iter: I) -> Self {
+        let mut s = RoaringU32::new();
+        s.extend(iter);
+        s
+    }
+}
+
+impl Extend<u32> for RoaringU32 {
+    fn extend<I: IntoIterator<Item = u32>>(&mut self, iter: I) {
+        for v in iter {
+            self.add(v);
+        }
+    }
+}
+
+impl<'a> Extend<&'a u32> for RoaringU32 {
+    fn extend<I: IntoIterator<Item = &'a u32>>(&mut self, iter: I) {
+        for &v in iter {
+            self.add(v);
+        }
+    }
+}
+
 /// Bounds-checked little-endian byte reader.
 struct Reader<'a> {
     bytes: &'a [u8],
@@ -933,6 +959,17 @@ mod tests {
         assert_eq!(x.cardinality(), 30);
         assert_eq!(x.container_types(), vec!["array"]); // canonical for 30
         assert_eq!(x.to_sorted_vec(), (5000..5030u32).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn from_iter_and_extend() {
+        let a: RoaringU32 = [5u32, 1, 9, 1, 100_000].into_iter().collect();
+        assert_eq!(a.cardinality(), 4);
+        assert!(a.contains(9) && a.contains(100_000) && !a.contains(2));
+        let mut b: RoaringU32 = RoaringU32::new();
+        b.extend([1u32, 2, 3]);
+        b.extend(&[3u32, 4]);
+        assert_eq!(b.cardinality(), 4);
     }
 
     #[test]

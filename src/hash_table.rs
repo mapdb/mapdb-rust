@@ -332,6 +332,31 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         }
     }
 
+    /// Retains only the entries for which `keep(&k, &mut v)` returns `true`.
+    ///
+    /// Implemented by rebuilding the table in place (take entries, clear,
+    /// re-insert the survivors at the **same capacity**) rather than an
+    /// in-place scan — over the backward-shift kernel a live scan index can be
+    /// invalidated when a surviving key is relocated into an already-visited
+    /// slot, so a rebuild is the correct primitive. O(n), no `K: Clone`.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        let cap = self.entries.len();
+        let mut fresh: Vec<MapSlot<K, V>> = Vec::with_capacity(cap);
+        fresh.resize_with(cap, || MapSlot::Empty);
+        let old = std::mem::replace(&mut self.entries, fresh);
+        self.size = 0;
+        for slot in old {
+            if let MapSlot::Occupied { key, mut value } = slot {
+                if keep(&key, &mut value) {
+                    self.insert_no_resize(key, value);
+                }
+            }
+        }
+    }
+
     fn rehash_from(&mut self, deleted: usize) {
         let mask = self.mask();
         let mut gap = deleted;
@@ -871,6 +896,27 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
                     return true;
                 }
                 SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
+            }
+        }
+    }
+
+    /// Retains only the elements for which `keep(&k)` returns `true`. Rebuilds
+    /// the table in place at the same capacity (see [`OpenHashMap::retain`] for
+    /// why a rebuild rather than an in-place scan). O(n), no `K: Clone`.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K) -> bool,
+    {
+        let cap = self.entries.len();
+        let mut fresh: Vec<SetSlot<K>> = Vec::with_capacity(cap);
+        fresh.resize_with(cap, || SetSlot::Empty);
+        let old = std::mem::replace(&mut self.entries, fresh);
+        self.size = 0;
+        for slot in old {
+            if let SetSlot::Occupied { key } = slot {
+                if keep(&key) {
+                    self.insert_no_resize(key);
+                }
             }
         }
     }
@@ -1767,6 +1813,32 @@ mod tests {
             "entry at the load threshold must grow the table like insert"
         );
         assert_eq!(v, existing, "or_insert must not overwrite an existing value");
+    }
+
+    #[test]
+    fn map_retain_keeps_survivors_probe_consistent() {
+        let mut m: OpenHashMap<i32, i32> = (0..100).map(|i| (i, i)).collect();
+        m.retain(|k, v| {
+            *v += 1000; // retain may mutate the value
+            k % 3 == 0
+        });
+        assert_eq!(m.len(), 34); // 0,3,..,99
+        for k in 0..100 {
+            if k % 3 == 0 {
+                assert_eq!(m.get(&k), Some(&(k + 1000)), "kept {k}");
+            } else {
+                assert_eq!(m.get(&k), None, "dropped {k}");
+            }
+        }
+    }
+
+    #[test]
+    fn set_retain_keeps_survivors() {
+        let mut s: OpenHashSet<i32> = (0..100).collect();
+        s.retain(|k| k % 7 == 0);
+        for k in 0..100 {
+            assert_eq!(s.contains(&k), k % 7 == 0, "at {k}");
+        }
     }
 
     #[test]

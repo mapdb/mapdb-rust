@@ -337,6 +337,40 @@ impl<'a, T, C: Compare<T>> IntoIterator for &'a TreeSet<T, C> {
     }
 }
 
+/// Owning iterator over a `TreeSet`'s elements in ascending order.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct TreeSetIntoIter<T> {
+    inner: super::treemap::TreeMapIntoIter<T, ()>,
+}
+
+impl<T> Iterator for TreeSetIntoIter<T> {
+    type Item = T;
+    fn next(&mut self) -> Option<T> {
+        self.inner.next().map(|(k, _)| k)
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl<T> DoubleEndedIterator for TreeSetIntoIter<T> {
+    fn next_back(&mut self) -> Option<T> {
+        self.inner.next_back().map(|(k, _)| k)
+    }
+}
+impl<T> ExactSizeIterator for TreeSetIntoIter<T> {}
+impl<T> std::iter::FusedIterator for TreeSetIntoIter<T> {}
+
+/// Owned iteration in sorted order: `for x in set`, yielding `T` by value.
+impl<T, C> IntoIterator for TreeSet<T, C> {
+    type Item = T;
+    type IntoIter = TreeSetIntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter {
+        TreeSetIntoIter {
+            inner: self.tree.into_iter(),
+        }
+    }
+}
+
 impl<T: Ord> Default for TreeSet<T, Natural> {
     /// An empty set ordered by natural [`Ord`].
     fn default() -> Self {

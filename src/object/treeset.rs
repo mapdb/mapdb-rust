@@ -6,29 +6,53 @@
 
 //! Sorted set backed by a [`TreeMap`] with pluggable [`Comparator`].
 
-use super::strategy::Comparator;
+use super::strategy::{Compare, Comparator, Natural};
 use super::treemap::{TreeMap, TreeMapSink};
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::range::Range;
 use std::fmt;
 
-/// A sorted set backed by a red-black tree with a pluggable [`Comparator`].
-/// Elements are maintained in the order defined by the comparator.
-pub struct TreeSet<T> {
-    tree: TreeMap<T, ()>,
+/// A sorted set backed by a [`TreeMap`] with a pluggable comparator `C` (the
+/// [`Compare`] type parameter). `C` defaults to [`Comparator<T>`] for backward
+/// compatibility; use [`with_comparator`](TreeSet::with_comparator) /
+/// [`natural`](TreeSet::natural) for a statically-dispatched comparator.
+pub struct TreeSet<T, C = Comparator<T>> {
+    tree: TreeMap<T, (), C>,
 }
 
-impl<T: fmt::Debug> fmt::Debug for TreeSet<T> {
+/// A [`TreeSet`] whose order is a runtime [`Comparator`].
+pub type DynTreeSet<T> = TreeSet<T, Comparator<T>>;
+
+impl<T: fmt::Debug, C: Compare<T>> fmt::Debug for TreeSet<T, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_set().entries(self.iter()).finish()
     }
 }
 
-impl<T> TreeSet<T> {
-    /// Creates an empty `TreeSet` using the given comparator.
+impl<T> TreeSet<T, Comparator<T>> {
+    /// Creates an empty `TreeSet` using the given runtime comparator.
     pub fn new(cmp: Comparator<T>) -> Self {
         TreeSet {
             tree: TreeMap::new(cmp),
+        }
+    }
+}
+
+impl<T: Ord> TreeSet<T, Natural> {
+    /// Creates an empty `TreeSet` ordered by the element's natural [`Ord`]
+    /// (zero-sized comparator; comparisons inline).
+    pub fn natural() -> Self {
+        TreeSet {
+            tree: TreeMap::natural(),
+        }
+    }
+}
+
+impl<T, C: Compare<T>> TreeSet<T, C> {
+    /// Creates an empty `TreeSet` using the [`Compare`] value `cmp`.
+    pub fn with_comparator(cmp: C) -> Self {
+        TreeSet {
+            tree: TreeMap::with_comparator(cmp),
         }
     }
 
@@ -152,6 +176,9 @@ impl<T> TreeSet<T> {
         self.iter().filter(|v| !predicate(v)).collect()
     }
 
+}
+
+impl<T> TreeSet<T, Comparator<T>> {
     /// Builds a fresh `TreeSet` from already-sorted input in a single O(n)
     /// pass. Input must be strictly ascending under `cmp`; see
     /// [`TreeMap::from_sorted`] for the order/duplicate contract.
@@ -211,7 +238,7 @@ impl<T> TreeSetSink<T> {
     }
 }
 
-impl<T: Clone> TreeSet<T> {
+impl<T: Clone, C: Compare<T>> TreeSet<T, C> {
     // ── Poll (positional removal) ───────────────────────────────────
 
     /// Removes and returns the minimum element, or `None` if empty. Does
@@ -288,10 +315,7 @@ impl<'a, T> Iterator for TreeSetIter<'a, T> {
 }
 
 /// Borrowing iteration in sorted order: `for x in &set`.
-///
-/// Owned iteration / `FromIterator` are intentionally not provided: a
-/// `TreeSet` needs a [`Comparator`] that an iterator alone cannot supply.
-impl<'a, T> IntoIterator for &'a TreeSet<T> {
+impl<'a, T, C: Compare<T>> IntoIterator for &'a TreeSet<T, C> {
     type Item = &'a T;
     type IntoIter = TreeSetIter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
@@ -301,10 +325,52 @@ impl<'a, T> IntoIterator for &'a TreeSet<T> {
     }
 }
 
+impl<T: Ord> Default for TreeSet<T, Natural> {
+    /// An empty set ordered by natural [`Ord`].
+    fn default() -> Self {
+        Self::natural()
+    }
+}
+
+impl<T: Ord> FromIterator<T> for TreeSet<T, Natural> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut set = TreeSet::natural();
+        for v in iter {
+            set.insert(v);
+        }
+        set
+    }
+}
+
+impl<T: Ord> Extend<T> for TreeSet<T, Natural> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for v in iter {
+            self.insert(v);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::object::strategy::*;
+
+    #[test]
+    fn natural_and_reverse_type_params() {
+        use crate::object::strategy::Reverse;
+        // Natural: collect, Default.
+        let s: TreeSet<i32, Natural> = [3, 1, 2, 1].into_iter().collect();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert!(TreeSet::<i32, Natural>::default().is_empty());
+
+        // Reverse type parameter descends.
+        let mut r: TreeSet<i32, Reverse> = TreeSet::with_comparator(Reverse(Natural));
+        for x in [1, 3, 2] {
+            r.insert(x);
+        }
+        assert_eq!(r.iter().copied().collect::<Vec<_>>(), vec![3, 2, 1]);
+    }
 
     #[test]
     fn test_sub_set_preserves_comparator() {

@@ -6,7 +6,7 @@
 
 //! Sorted map backed by a red-black tree with pluggable [`Comparator`].
 
-use super::strategy::Comparator;
+use super::strategy::{Compare, Comparator, Natural};
 use crate::bulk::{BulkError, DuplicatePolicy};
 use crate::range::Range;
 use std::cmp::Ordering;
@@ -66,21 +66,34 @@ enum Bound {
 }
 
 /// A sorted map backed by a left-leaning red-black tree with a pluggable
-/// [`Comparator`]. Keys are maintained in the order defined by the comparator.
-pub struct TreeMap<K, V> {
+/// comparator `C` (the [`Compare`] type parameter — `BuildHasher` for order).
+///
+/// `C` defaults to [`Comparator<K>`] (the runtime `Arc<dyn Fn>` comparator) for
+/// full backward compatibility, so `TreeMap<K, V>` behaves exactly as before.
+/// Use [`with_comparator`](TreeMap::with_comparator) with a [`Natural`],
+/// [`Reverse`](super::strategy::Reverse), or custom zero-sized `C` for a
+/// statically-dispatched, inlined comparison. [`DynTreeMap`] names the runtime
+/// case explicitly.
+pub struct TreeMap<K, V, C = Comparator<K>> {
     root: Option<Box<Node<K, V>>>,
     size: usize,
-    cmp: Comparator<K>,
+    cmp: C,
 }
 
-impl<K: fmt::Debug, V: fmt::Debug> fmt::Debug for TreeMap<K, V> {
+/// A [`TreeMap`] whose order is a runtime [`Comparator`] (the pre-v3 default,
+/// named explicitly for when the comparator is chosen at runtime).
+pub type DynTreeMap<K, V> = TreeMap<K, V, Comparator<K>>;
+
+impl<K: fmt::Debug, V: fmt::Debug, C: Compare<K>> fmt::Debug for TreeMap<K, V, C> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_map().entries(self.iter()).finish()
     }
 }
 
-impl<K, V> TreeMap<K, V> {
-    /// Creates an empty `TreeMap` using the given comparator.
+impl<K, V> TreeMap<K, V, Comparator<K>> {
+    /// Creates an empty `TreeMap` using the given runtime comparator. For a
+    /// static/zero-sized comparator use [`with_comparator`](TreeMap::with_comparator);
+    /// for the natural `Ord` order use [`natural`](TreeMap::natural).
     pub fn new(cmp: Comparator<K>) -> Self {
         TreeMap {
             root: None,
@@ -89,11 +102,35 @@ impl<K, V> TreeMap<K, V> {
         }
     }
 
-    /// Returns a clone of this map's comparator (shares the underlying
+    /// Returns a clone of this map's runtime comparator (shares the underlying
     /// closure). Used to preserve ordering semantics when building a
     /// materialized snapshot (`sub_map`).
     pub fn comparator(&self) -> Comparator<K> {
         self.cmp.clone()
+    }
+}
+
+impl<K: Ord, V> TreeMap<K, V, Natural> {
+    /// Creates an empty `TreeMap` ordered by the key's natural [`Ord`]. The
+    /// comparator is a zero-sized [`Natural`], so comparisons inline.
+    pub fn natural() -> Self {
+        TreeMap {
+            root: None,
+            size: 0,
+            cmp: Natural,
+        }
+    }
+}
+
+impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
+    /// Creates an empty `TreeMap` using the [`Compare`] value `cmp` (typically
+    /// a zero-sized type like [`Natural`] or [`Reverse`](super::strategy::Reverse)).
+    pub fn with_comparator(cmp: C) -> Self {
+        TreeMap {
+            root: None,
+            size: 0,
+            cmp,
+        }
     }
 
     /// Inserts a key-value pair. Returns `Some(old_value)` if the key was
@@ -394,7 +431,7 @@ impl<K, V> TreeMap<K, V> {
     // ── internal: insert ────────────────────────────────────────────
 
     fn insert_rec(
-        cmp: &Comparator<K>,
+        cmp: &C,
         node: Option<Box<Node<K, V>>>,
         key: K,
         value: V,
@@ -423,7 +460,7 @@ impl<K, V> TreeMap<K, V> {
     // ── internal: remove ────────────────────────────────────────────
 
     fn remove_rec(
-        cmp: &Comparator<K>,
+        cmp: &C,
         node: Option<Box<Node<K, V>>>,
         key: &K,
         removed: &mut Option<V>,
@@ -461,7 +498,7 @@ impl<K, V> TreeMap<K, V> {
     }
 }
 
-impl<K: Clone, V> TreeMap<K, V> {
+impl<K: Clone, V, C: Compare<K>> TreeMap<K, V, C> {
     // ── Poll (positional removal) ───────────────────────────────────
 
     /// Removes and returns the minimum entry, or `None` if empty. Does not
@@ -1065,13 +1102,37 @@ impl<'a, K, V> Iterator for TreeMapIter<'a, K, V> {
 
 /// Borrowing iteration in sorted order: `for (k, v) in &map`.
 ///
-/// Owned iteration / `FromIterator` are intentionally not provided: a
-/// `TreeMap` needs a [`Comparator`] that an iterator alone cannot supply.
-impl<'a, K, V> IntoIterator for &'a TreeMap<K, V> {
+/// Borrowing iteration in sorted order: `for (k, v) in &map`.
+impl<'a, K, V, C: Compare<K>> IntoIterator for &'a TreeMap<K, V, C> {
     type Item = (&'a K, &'a V);
     type IntoIter = TreeMapIter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+impl<K: Ord, V> Default for TreeMap<K, V, Natural> {
+    /// An empty map ordered by natural [`Ord`].
+    fn default() -> Self {
+        Self::natural()
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for TreeMap<K, V, Natural> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        let mut map = TreeMap::natural();
+        for (k, v) in iter {
+            map.insert(k, v);
+        }
+        map
+    }
+}
+
+impl<K: Ord, V> Extend<(K, V)> for TreeMap<K, V, Natural> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
     }
 }
 
@@ -1160,6 +1221,44 @@ mod tests {
 
         let keys: Vec<&i32> = m.keys().collect();
         assert_eq!(keys, vec![&3, &2, &1]);
+    }
+
+    #[test]
+    fn natural_comparator_type_param() {
+        // Zero-sized Natural comparator: new(), Default, FromIterator, Extend.
+        let mut m: TreeMap<i32, &str, Natural> = TreeMap::natural();
+        m.insert(3, "c");
+        m.insert(1, "a");
+        m.insert(2, "b");
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![1, 2, 3]);
+        assert_eq!(m.get(&2), Some(&"b"));
+
+        // FromIterator / collect.
+        let c: TreeMap<i32, i32, Natural> = (0..5).map(|i| (i, i * i)).collect();
+        assert_eq!(c.len(), 5);
+        assert_eq!(c.get(&4), Some(&16));
+
+        // Default is an empty Natural map.
+        let d: TreeMap<i32, i32, Natural> = TreeMap::default();
+        assert!(d.is_empty());
+    }
+
+    #[test]
+    fn reverse_and_fncmp_type_params() {
+        use crate::object::strategy::{FnCmp, Reverse};
+        let mut r: TreeMap<i32, (), Reverse> = TreeMap::with_comparator(Reverse(Natural));
+        for k in [1, 3, 2] {
+            r.insert(k, ());
+        }
+        assert_eq!(r.keys().copied().collect::<Vec<_>>(), vec![3, 2, 1]);
+
+        // Ad-hoc closure comparator by absolute value.
+        let cmp = FnCmp(|a: &i32, b: &i32| a.abs().cmp(&b.abs()));
+        let mut m = TreeMap::with_comparator(cmp);
+        for k in [-5, 2, -1, 3] {
+            m.insert(k, ());
+        }
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![-1, 2, 3, -5]);
     }
 
     #[test]

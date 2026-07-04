@@ -35,13 +35,13 @@ pub use linkedhashset::LinkedHashSet;
 pub use strategy::{
     by_field, case_insensitive_hashing_strategy, comparator_by_field, comparator_by_field_with,
     natural_comparator, reverse_comparator, reversed, string_hashing_strategy, then_comparing,
-    Comparator, HashingStrategy,
+    Compare, Comparator, FnCmp, HashingStrategy, Natural, Reverse,
 };
 pub use strategy_hashmap::HashMapWithStrategy;
 pub use strategy_hashset::HashSetWithStrategy;
 pub use traits::*;
-pub use treemap::{TreeMap, TreeMapSink};
-pub use treeset::{TreeSet, TreeSetSink};
+pub use treemap::{DynTreeMap, TreeMap, TreeMapSink};
+pub use treeset::{DynTreeSet, TreeSet, TreeSetSink};
 
 #[cfg(test)]
 mod property_tests;

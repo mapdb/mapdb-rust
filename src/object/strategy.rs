@@ -145,6 +145,72 @@ impl<T: ?Sized> std::fmt::Debug for Comparator<T> {
     }
 }
 
+/// A total order over `K`, usable as a **type parameter** (the `BuildHasher`
+/// model for comparators).
+///
+/// Where [`Comparator`] is a runtime `Arc<dyn Fn>` (dynamic dispatch per
+/// comparison), a `Compare<K>` implementor can be a zero-sized type
+/// ([`Natural`]) whose `compare` **inlines** to `a.cmp(b)` — removing an
+/// indirect call per node visited on every tree operation. Because
+/// `TreeMap<K, V, C>` is generic over `C`, a `TreeMap<K, V, Reverse>` is a
+/// *different type* from `TreeMap<K, V, Natural>`, so comparator mix-ups become
+/// compile errors.
+///
+/// [`Comparator`] itself implements this trait (the migration bridge), so a
+/// runtime comparator still works as the type parameter via
+/// [`DynTreeMap`](crate::object::TreeMap).
+pub trait Compare<K: ?Sized> {
+    /// Total order: `Less`/`Equal`/`Greater` for `a` vs `b`.
+    fn compare(&self, a: &K, b: &K) -> Ordering;
+}
+
+/// The natural [`Ord`] ordering as a zero-sized [`Compare`] type. The default
+/// comparator for `Ord` keys; its `compare` inlines to `a.cmp(b)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Natural;
+
+impl<K: Ord + ?Sized> Compare<K> for Natural {
+    #[inline]
+    fn compare(&self, a: &K, b: &K) -> Ordering {
+        a.cmp(b)
+    }
+}
+
+/// Reverses another [`Compare`] (composition, not a closure): `Reverse` is
+/// descending natural order, `Reverse(custom)` flips a custom order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Reverse<C = Natural>(pub C);
+
+impl<K: ?Sized, C: Compare<K>> Compare<K> for Reverse<C> {
+    #[inline]
+    fn compare(&self, a: &K, b: &K) -> Ordering {
+        self.0.compare(b, a)
+    }
+}
+
+/// Wraps an ad-hoc closure `Fn(&K, &K) -> Ordering` as a [`Compare`] type, for
+/// local use where a named type is not needed.
+#[derive(Clone, Copy, Debug)]
+pub struct FnCmp<F>(pub F);
+
+impl<K: ?Sized, F: Fn(&K, &K) -> Ordering> Compare<K> for FnCmp<F> {
+    #[inline]
+    fn compare(&self, a: &K, b: &K) -> Ordering {
+        (self.0)(a, b)
+    }
+}
+
+/// Migration bridge: today's runtime [`Comparator`] is a valid `Compare<K>`
+/// type parameter, so `TreeMap<K, V, Comparator<K>>` (aliased
+/// [`DynTreeMap`](crate::object::treemap::DynTreeMap)) preserves the pre-v3
+/// runtime-comparator semantics.
+impl<K: ?Sized> Compare<K> for Comparator<K> {
+    #[inline]
+    fn compare(&self, a: &K, b: &K) -> Ordering {
+        Comparator::compare(self, a, b)
+    }
+}
+
 /// Returns a comparator using the natural ordering of `Ord` types.
 pub fn natural_comparator<T: Ord + 'static>() -> Comparator<T> {
     Comparator {

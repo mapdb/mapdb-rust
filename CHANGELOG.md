@@ -4,6 +4,19 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
+## [Unreleased] — HashBag kernel consolidation (T9 tail)
+
+Internal, **API-preserving** follow-up to Stage B/T9 (`feat/rust-v3-hashbag-kernel`).
+
+- **`HashBag<T>` now stores its occurrence counts in the crate's own
+  `OpenHashMap<T, usize>`** (open-addressing, niche-packed slots) instead of
+  `std::collections::HashMap`, completing blueprint M5 / the T9 "HashBag on the
+  kernel" leftover. No public API or observable-behavior change — `insert` /
+  `remove_one` / `add_occurrences` / `occurrences_of` / `distinct_len` / `len` /
+  `iter` (each element once per occurrence) / `bulk_load*` / the overflow-checked
+  size accounting / count-based multiset `PartialEq` are all unchanged. Only the
+  private backing field and `HashBagIter`'s inner iterator type changed.
+
 ## [Unreleased] — v3 Stage C (breaking, v1.0 cut)
 
 Stage C of the v3 blueprint (`todo/fable-rust`, doc 14 §6): the breaking

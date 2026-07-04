@@ -30,8 +30,9 @@ pub use hashbimap::HashBiMap;
 pub use hashmap::HashMap;
 pub use hashset::HashSet;
 pub use linkedhashmap::{
-    IntoIter as LinkedHashMapIntoIter, Iter as LinkedHashMapIter, IterMut as LinkedHashMapIterMut,
-    LinkedHashMap,
+    Entry as LinkedHashMapEntry, IntoIter as LinkedHashMapIntoIter, Iter as LinkedHashMapIter,
+    IterMut as LinkedHashMapIterMut, LinkedHashMap, OccupiedEntry as LinkedHashMapOccupiedEntry,
+    VacantEntry as LinkedHashMapVacantEntry,
 };
 pub use linkedhashset::{
     IntoIter as LinkedHashSetIntoIter, Iter as LinkedHashSetIter, LinkedHashSet,

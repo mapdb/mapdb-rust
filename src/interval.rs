@@ -74,9 +74,13 @@ pub struct Interval<T: SignedPrimInt> {
 }
 
 impl<T: SignedPrimInt> Interval<T> {
-    /// `[from, to]` with the given non-zero step. Panics if `step` is
-    /// zero, or if the step direction disagrees with the from/to
-    /// direction.
+    /// `[from, to]` with the given non-zero step.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `step` is zero, or if the step's sign disagrees with the
+    /// `from`→`to` direction (a positive step with `from > to`, or a negative
+    /// step with `from < to`) — such an interval could never reach `to`.
     pub fn from_to_by(from: T, to: T, step: T) -> Self {
         let zero = T::from_i64_truncate(0);
         if step == zero {
@@ -237,10 +241,13 @@ impl<T: SignedPrimInt> Interval<T> {
         !self.any_satisfy(p)
     }
 
-    /// `[to, from]` with `-step`. **Panics** if `step == T::MIN` —
-    /// negating the minimum signed value is unrepresentable on every
-    /// architecture we target. See `algorithms.md` §"Reversed() panics
-    /// at minimum step".
+    /// `[to, from]` with `-step`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `step == T::MIN` — negating the minimum signed value is
+    /// unrepresentable on every architecture we target. See `algorithms.md`
+    /// §"Reversed() panics at minimum step".
     pub fn reversed(&self) -> Self {
         if self.step.to_i64() == T::MIN_I64 {
             panic!("Interval: cannot reverse interval with minimum step");

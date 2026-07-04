@@ -74,6 +74,10 @@ impl<T: PartialEq> ArrayList<T> {
         self.items.push(value);
     }
     /// Replace the element at `index`, returning the old value.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `index >= len()` (out of bounds).
     pub fn set(&mut self, index: usize, value: T) -> T {
         std::mem::replace(&mut self.items[index], value)
     }

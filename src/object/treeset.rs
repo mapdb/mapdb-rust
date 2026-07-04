@@ -244,8 +244,13 @@ impl<T> TreeSetSink<T> {
         Ok(())
     }
 
-    /// Finishes the build, returning the constructed `TreeSet`. A poisoned sink
-    /// panics in all build modes (see [`TreeMapSink::create`]).
+    /// Finishes the build, returning the constructed `TreeSet`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sink is **poisoned** (a prior `put` error was swallowed) —
+    /// see [`TreeMapSink::create`]. Use [`try_create`](TreeSetSink::try_create)
+    /// for the fallible form.
     pub fn create(self) -> TreeSet<T, Comparator<T>> {
         TreeSet {
             tree: self.inner.create(),

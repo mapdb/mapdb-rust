@@ -979,10 +979,15 @@ impl<K, V> TreeMapSink<K, V> {
     /// Finishes the build, returning the constructed `TreeMap`. Consuming
     /// `self` makes `create` once-only.
     ///
-    /// A poisoned sink (any prior `put` error) **panics in all build modes** —
-    /// never returns a half-built collection. The data-pump contract requires
-    /// that a failed pump never yields a partial result; use
-    /// [`try_create`](TreeMapSink::try_create) for the fallible form.
+    /// The data-pump contract requires that a failed pump never yields a partial
+    /// result, so this never returns a half-built collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the sink is **poisoned** — i.e. a prior [`put`](TreeMapSink::put)
+    /// / `put_all` returned an error that the caller swallowed instead of
+    /// stopping. Use [`try_create`](TreeMapSink::try_create) for the fallible
+    /// form that returns the poisoning error instead of panicking.
     pub fn create(self) -> TreeMap<K, V, Comparator<K>> {
         match self.try_create() {
             Ok(map) => map,

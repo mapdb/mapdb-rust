@@ -24,7 +24,7 @@
 //!
 //! *Which* resident entry to evict under size pressure is delegated to a
 //! pluggable [`EvictionPolicy`], monomorphised into the map (zero vtable cost),
-//! exactly as [`OpenHashMap`](crate::OpenHashMap) parameterises its hasher. The
+//! exactly as [`OpenHashMap`] parameterises its hasher. The
 //! map owns the *mechanism* (arena storage, the key index, the eviction
 //! listener); the policy owns the *decision*. [`Lru`] (least-recently-used) and
 //! [`Fifo`] (insertion order) ship here; a new policy is a new type implementing
@@ -38,7 +38,7 @@
 //!
 //! ## Transitional backing
 //!
-//! The key index is an [`OpenHashMap`](crate::OpenHashMap)`<K, usize>` (so
+//! The key index is an [`OpenHashMap`]`<K, usize>` (so
 //! `K: Clone` — the key is stored once in the index and once in its arena slot,
 //! matching [`BoundedLruMap`](crate::BoundedLruMap)). A later revision can move
 //! the index to the crate's key-owning-free `IndexTable` + `SlotList` kernels to

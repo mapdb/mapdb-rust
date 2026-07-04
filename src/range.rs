@@ -150,24 +150,40 @@ impl<T: Ord + Copy> Range<T> {
 
     // ---- factories (Guava-parity names) -----------------------------------
 
-    /// `(a, b)` — both endpoints open. Panics if `a >= b` (incl. `open(v, v)`,
-    /// which is empty-but-invalid-as-open).
+    /// `(a, b)` — both endpoints open.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `a >= b` (including `open(v, v)`, which is empty-but-invalid as
+    /// an open range — the lower cut would exceed the upper).
     pub fn open(a: T, b: T) -> Self {
         Self::from_cuts(Cut::Above(a), Cut::Below(b))
     }
 
-    /// `[a, b]` — both endpoints closed. Panics if `a > b`.
+    /// `[a, b]` — both endpoints closed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `a > b` (the lower cut would exceed the upper).
     pub fn closed(a: T, b: T) -> Self {
         Self::from_cuts(Cut::Below(a), Cut::Above(b))
     }
 
-    /// `(a, b]`. Panics if `a > b`.
+    /// `(a, b]`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `a > b` (the lower cut would exceed the upper).
     pub fn open_closed(a: T, b: T) -> Self {
         Self::from_cuts(Cut::Above(a), Cut::Above(b))
     }
 
-    /// `[a, b)`. Panics if `a > b`. `closed_open(v, v)` is the valid empty
-    /// range `(Below(v), Below(v))`.
+    /// `[a, b)`. `closed_open(v, v)` is the valid empty range
+    /// `(Below(v), Below(v))`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `a > b` (the lower cut would exceed the upper).
     pub fn closed_open(a: T, b: T) -> Self {
         Self::from_cuts(Cut::Below(a), Cut::Below(b))
     }

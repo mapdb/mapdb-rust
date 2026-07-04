@@ -97,6 +97,13 @@ impl BitSet {
         }
     }
 
+    /// Set the bit at `bit`, growing the backing word vector as needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit == usize::MAX` (the `bit + 1` length bookkeeping overflows),
+    /// or if `bit` is so large that the backing `Vec<u64>` (one word per 64 bits)
+    /// cannot be allocated.
     pub fn set(&mut self, bit: usize) {
         self.ensure(bit);
         self.words[word_index(bit)] |= bit_mask(bit);
@@ -111,6 +118,12 @@ impl BitSet {
         self.words[wi] &= !bit_mask(bit);
     }
 
+    /// Toggle the bit at `bit`, growing the backing word vector as needed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `bit == usize::MAX` (the `bit + 1` length bookkeeping overflows),
+    /// or if `bit` is so large that the backing `Vec<u64>` cannot be allocated.
     pub fn flip(&mut self, bit: usize) {
         self.ensure(bit);
         self.words[word_index(bit)] ^= bit_mask(bit);

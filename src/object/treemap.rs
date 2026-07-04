@@ -160,6 +160,12 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
         None
     }
 
+    /// Returns a mutable reference to the value associated with the key, or
+    /// `None`. The key (and so the sort order) cannot be changed through it.
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        get_rec_mut(&self.cmp, &mut self.root, key)
+    }
+
     /// Returns `true` if the map contains the given key.
     pub fn contains_key(&self, key: &K) -> bool {
         self.get(key).is_some()
@@ -478,6 +484,22 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
     /// Returns an iterator over values in key-sorted order.
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.iter().map(|(_, v)| v)
+    }
+
+    /// Returns an iterator over `(&K, &mut V)` pairs in sorted order, allowing
+    /// in-place mutation of each value. Keys are shared (immutable), so the
+    /// sorted order is preserved. Double-ended and exact-size.
+    pub fn iter_mut(&mut self) -> TreeMapIterMut<'_, K, V> {
+        let mut out = Vec::with_capacity(self.size);
+        collect_in_order_mut(&mut self.root, &mut out);
+        TreeMapIterMut {
+            inner: out.into_iter(),
+        }
+    }
+
+    /// Returns an iterator over mutable values in key-sorted order.
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.iter_mut().map(|(_, v)| v)
     }
 
     /// Calls `f` for each key-value pair in sorted order.
@@ -1127,6 +1149,46 @@ fn push_left_spine<'a, K, V>(node: &'a Option<Box<Node<K, V>>>, stack: &mut Vec<
     }
 }
 
+/// Recursive mutable point lookup: descends by the comparator, returning a
+/// mutable reference to the matching value. Recursion depth is O(log n) on the
+/// balanced tree. (A `while let` descent would trip NLL "problem case #3" — the
+/// returned borrow conflicts with the loop's reassignment — so recur instead.)
+fn get_rec_mut<'a, K, V, C: Compare<K>>(
+    cmp: &C,
+    node: &'a mut Option<Box<Node<K, V>>>,
+    key: &K,
+) -> Option<&'a mut V> {
+    match node.as_deref_mut() {
+        Some(n) => match cmp.compare(key, &n.key) {
+            Ordering::Less => get_rec_mut(cmp, &mut n.left, key),
+            Ordering::Greater => get_rec_mut(cmp, &mut n.right, key),
+            Ordering::Equal => Some(&mut n.value),
+        },
+        None => None,
+    }
+}
+
+/// Collects `(&K, &mut V)` pairs in ascending order. Each `&mut Node` is split
+/// into disjoint field borrows so the key/value/child references coexist under
+/// the borrow checker with no `unsafe`. Recursion depth is O(log n).
+fn collect_in_order_mut<'a, K, V>(
+    node: &'a mut Option<Box<Node<K, V>>>,
+    out: &mut Vec<(&'a K, &'a mut V)>,
+) {
+    if let Some(n) = node {
+        let Node {
+            key,
+            value,
+            left,
+            right,
+            ..
+        } = &mut **n;
+        collect_in_order_mut(left, out);
+        out.push((key, value));
+        collect_in_order_mut(right, out);
+    }
+}
+
 /// Iterator over `(&K, &V)` pairs of a `TreeMap` in sorted order.
 pub struct TreeMapIter<'a, K, V> {
     stack: Vec<&'a Node<K, V>>,
@@ -1142,6 +1204,31 @@ impl<'a, K, V> Iterator for TreeMapIter<'a, K, V> {
         Some(result)
     }
 }
+
+/// Iterator over `(&K, &mut V)` pairs of a `TreeMap` in sorted order, from
+/// [`TreeMap::iter_mut`]. Keys are shared (immutable) so the sort order is
+/// preserved; each value is independently mutable.
+#[must_use = "iterators are lazy and do nothing unless consumed"]
+pub struct TreeMapIterMut<'a, K, V> {
+    inner: std::vec::IntoIter<(&'a K, &'a mut V)>,
+}
+
+impl<'a, K, V> Iterator for TreeMapIterMut<'a, K, V> {
+    type Item = (&'a K, &'a mut V);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+impl<'a, K, V> DoubleEndedIterator for TreeMapIterMut<'a, K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+impl<K, V> ExactSizeIterator for TreeMapIterMut<'_, K, V> {}
+impl<K, V> std::iter::FusedIterator for TreeMapIterMut<'_, K, V> {}
 
 // ── Range iterator (double-ended, exact-size via the size augmentation) ──
 
@@ -1256,6 +1343,15 @@ impl<'a, K, V, C: Compare<K>> IntoIterator for &'a TreeMap<K, V, C> {
     type IntoIter = TreeMapIter<'a, K, V>;
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
+    }
+}
+
+/// Mutable borrowing iteration in sorted order: `for (k, v) in &mut map`.
+impl<'a, K, V, C: Compare<K>> IntoIterator for &'a mut TreeMap<K, V, C> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = TreeMapIterMut<'a, K, V>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
     }
 }
 
@@ -2364,6 +2460,72 @@ mod tests {
         // Regardless of how many survivors were lost, `len()` must equal the
         // actual live entry count — the drop guard recomputed it from the tree.
         assert_eq!(m.len(), m.iter().count());
+    }
+
+    #[test]
+    fn get_mut_modifies_value_in_place() {
+        let mut m = dyn_map((0..10).map(|i| (i, i)));
+        *m.get_mut(&5).unwrap() += 100;
+        assert_eq!(m.get(&5), Some(&105));
+        assert_eq!(m.get_mut(&999), None);
+        // Structure/size untouched by a value mutation.
+        assert!(m.is_valid_llrb());
+        m.assert_size_invariant();
+        assert_eq!(m.len(), 10);
+    }
+
+    #[test]
+    fn iter_mut_visits_sorted_and_mutates() {
+        let mut m = dyn_map((0..20).rev().map(|i| (i, i)));
+        for (k, v) in m.iter_mut() {
+            *v = *k * 2;
+        }
+        let pairs: Vec<(i32, i32)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(pairs, (0..20).map(|k| (k, k * 2)).collect::<Vec<_>>());
+        assert!(m.is_valid_llrb());
+        m.assert_size_invariant();
+    }
+
+    #[test]
+    fn iter_mut_double_ended_and_exact_size() {
+        let mut m = dyn_map((0..6).map(|i| (i, i)));
+        let mut it = m.iter_mut();
+        assert_eq!(it.len(), 6);
+        assert_eq!(it.next().map(|(k, _)| *k), Some(0));
+        assert_eq!(it.next_back().map(|(k, _)| *k), Some(5));
+        assert_eq!(it.len(), 4);
+        // Mutate through the remaining middle.
+        for (_, v) in it {
+            *v = -1;
+        }
+        assert_eq!(m.get(&2), Some(&-1));
+        assert_eq!(m.get(&3), Some(&-1));
+        assert_eq!(m.get(&0), Some(&0)); // ends untouched
+        assert_eq!(m.get(&5), Some(&5));
+    }
+
+    #[test]
+    fn values_mut_mutates_all() {
+        let mut m = dyn_map((0..8).map(|i| (i, i)));
+        for v in m.values_mut() {
+            *v += 1;
+        }
+        assert_eq!(
+            m.values().copied().collect::<Vec<_>>(),
+            (1..9).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn for_mut_ref_loop_mutates() {
+        let mut m = dyn_map((0..5).map(|i| (i, 0)));
+        for (k, v) in &mut m {
+            *v = *k;
+        }
+        assert_eq!(
+            m.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(),
+            (0..5).map(|k| (k, k)).collect::<Vec<_>>()
+        );
     }
 
     #[test]

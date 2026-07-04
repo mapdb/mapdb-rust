@@ -4,8 +4,18 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` + `retain` + `drain` across the collections
+## [Unreleased] — additive: `entry` + `retain` + `drain` + mutable access across the collections
 
+- **`TreeMap::get_mut` / `iter_mut` / `values_mut`** (+ `IntoIterator for &mut
+  TreeMap`, i.e. `for (k, v) in &mut map`) — the mutable-value-access surface,
+  previously absent. Keys are handed out as `&K` (shared), so a caller cannot
+  change a key and desync the sort order; only values are mutable. `get_mut`
+  is an O(log n) recursive comparator descent. `iter_mut`/`values_mut` visit in
+  ascending order and are built by disjoint-borrow materialization — each
+  `&mut Node` is split into disjoint field borrows (no `unsafe`) to collect
+  `(&K, &mut V)` pairs — so `TreeMapIterMut` is double-ended, exact-size, and
+  fused. `TreeSet` intentionally gains none of this (mutating an element in
+  place would break the ordering invariant).
 - **`TreeMap::drain()` / `TreeSet::drain()`** — remove all entries and return
   them as an iterator in ascending comparator order while **keeping the emptied
   map/set (and its comparator) for reuse** — the reuse-friendly counterpart to

@@ -30,8 +30,13 @@ pub use hashbag::HashBag;
 pub use hashbimap::HashBiMap;
 pub use hashmap::HashMap;
 pub use hashset::HashSet;
-pub use linkedhashmap::LinkedHashMap;
-pub use linkedhashset::LinkedHashSet;
+pub use linkedhashmap::{
+    IntoIter as LinkedHashMapIntoIter, Iter as LinkedHashMapIter, IterMut as LinkedHashMapIterMut,
+    LinkedHashMap,
+};
+pub use linkedhashset::{
+    IntoIter as LinkedHashSetIntoIter, Iter as LinkedHashSetIter, LinkedHashSet,
+};
 pub use strategy::{
     by_field, case_insensitive_hashing_strategy, comparator_by_field, comparator_by_field_with,
     natural_comparator, reverse_comparator, reversed, string_hashing_strategy, then_comparing,

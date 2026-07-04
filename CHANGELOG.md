@@ -4,6 +4,62 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
+## [Unreleased] — v3 Stage A (additive) + review-ledger bug fixes
+
+Stage A of the v3 blueprint (`todo/fable-rust`): all **additive** — no removals,
+no type-identity changes. Existing code compiles unchanged. Deprecated items
+warn but still work; they are scheduled for removal in the breaking Stage C.
+
+### Added
+
+- **`RichIterator`** — a blanket extension trait over `Iterator` carrying the
+  Eclipse-Collections vocabulary (`select`/`reject` lazy adapters, `detect`,
+  `inject_into`, `group_by`/`group_by_each` → crate `OpenHashMap`, `to_bag`,
+  `partition_into`, `top_n`/`bottom_n`, `join_display`, `count_where`, …).
+  Available on every iterator, unboxed. Re-exported at the crate root.
+- **`OpenHashMap::entry`** — full `Entry`/`OccupiedEntry`/`VacantEntry` API
+  (`or_insert`/`or_insert_with`/`or_default`/`and_modify`/`remove`). Resolves a
+  pending resize before probing, so an entry-built table is byte-identical to an
+  insert-built one. Wired into `Multimap`/`SetMultimap::insert` and
+  `RichIterator::group_by` (was a double probe).
+- **`Compare<K>` comparator type parameter** on `TreeMap`/`TreeSet` (default
+  `C = Comparator<K>`, so unchanged by default): `Natural` (zero-sized, inlined),
+  `Reverse<C>`, `FnCmp<F>`, and a `Comparator<K>` bridge. New `with_comparator`
+  / `natural` constructors; `Default`/`FromIterator`/`Extend` on the `Natural`
+  instantiation; `DynTreeMap`/`DynTreeSet` aliases for the runtime-comparator case.
+- **`TreeMap::range` / `TreeSet::range`** taking any `RangeBounds<K>`, returning
+  a lazy **double-ended, exact-size** iterator whose bounds are compared through
+  the map's own comparator (so range selection can never disagree with tree
+  order). `.rev()` gives descending. Inverted/empty bounds yield nothing (no
+  panic — documented divergence from `BTreeMap::range`).
+- **`retain`** on `OpenHashMap`/`OpenHashSet`; **owned `IntoIterator`** +
+  `into_keys`/`into_values` on `TreeMap`, owned `IntoIterator` on `TreeSet`
+  (all `DoubleEnded` + `ExactSize`); **`FromIterator`/`Extend`** on `RoaringU32`.
+
+### Fixed (confirmed review-ledger findings)
+
+- `HashBag::insert`/`add_occurrences` now overflow-check the count and size
+  (were unchecked `+=`, wrapping in release).
+- `SetMultimap::from_sorted_key_values` dedupes a value by `Eq` against the whole
+  bucket, not just the last element (a non-adjacent `Eq`-duplicate of a
+  comparator-equal value no longer breaks the set invariant / `len`).
+- `RangeMap::put_coalescing` merges an already-emitted equal-valued left entry
+  that a later entry bridges (was two entries instead of one).
+- `BitSet::from_sorted_indices([usize::MAX])` returns `BulkError::IndexOverflow`
+  (new variant) instead of overflowing.
+- `BitSet` `PartialEq` is now logical-bits-only (`java.util.BitSet.equals`
+  semantics); capacity/history no longer observable.
+- `CountMin::optimal` range-checks `(d, w)` before the `f64 as u32` casts.
+- `PriorityQueue::Display` documents its non-canonical heap-array order;
+  `TreeMap`/`TreeSet` legacy `Range<K>` methods documented as natural-order-only;
+  `sub_map`/`sub_range_set`/`sub_range_map` documented as snapshots, not views.
+
+### Deprecated
+
+- `stream::collectors::*` and `stream::generators::*` free functions —
+  superseded by `RichIterator` and `std` iterator constructors (see the `stream`
+  module docs for the mapping).
+
 ## [0.2.0] — breaking idiom pass
 
 This release renames the remaining Java-isms to standard-library vocabulary,

@@ -184,6 +184,23 @@ impl<T> SlotList<T> {
         self.len = 0;
     }
 
+    /// The live slot indices in insertion order (oldest → newest).
+    ///
+    /// For callers that must both inspect a slot *and* remove it — e.g. a
+    /// `retain` that drives an external index removal before freeing the slot —
+    /// and so need the stable slot index, not just `&T`. Snapshotting the order
+    /// up front lets the caller `unlink_free` visited slots without disturbing
+    /// the walk (freed slots are simply never revisited).
+    pub(crate) fn order_indices(&self) -> Vec<usize> {
+        let mut order = Vec::with_capacity(self.len);
+        let mut cur = self.head;
+        while cur != NIL {
+            order.push(cur);
+            cur = self.arena[cur].next;
+        }
+        order
+    }
+
     /// Iterate live values in insertion order (oldest → newest).
     pub(crate) fn iter(&self) -> Iter<'_, T> {
         Iter {

@@ -212,6 +212,43 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
         self.slots.clear();
     }
 
+    /// Retain only the entries for which `keep(&k, &mut v)` returns `true`,
+    /// visiting entries in insertion order. Surviving entries keep their
+    /// positions; each dropped entry is unlinked and its slot recycled in O(1)
+    /// (no index fix-up sweep), so this is O(n) overall.
+    ///
+    /// `keep` may mutate the value of a surviving entry in place; mutations to a
+    /// dropped entry's value are moot (it is removed). No `K: Clone` bound.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        // Snapshot the live slots first so unlinking during the walk cannot
+        // disturb iteration (freed slots are never revisited, and no `push_back`
+        // runs here, so no slot is recycled mid-walk).
+        for slot in self.slots.order_indices() {
+            // Derive the removal hash from the key *before* running `keep`.
+            // `keep` gets `&K` and could mutate the key through interior
+            // mutability (e.g. a `Cell` field feeding `Hash`); computing the hash
+            // afterwards would probe the wrong chain and orphan the index cell.
+            // Taken up front, it equals the stored hash (the same cell-location
+            // argument as `OccupiedEntry::remove_entry`).
+            let hash = self.index.hash(&self.slots.get(slot).0);
+            let kv = self.slots.get_mut(slot);
+            if keep(&kv.0, &mut kv.1) {
+                continue;
+            }
+            // Remove the index cell first, then free the arena slot — but only
+            // when the cell was actually found. Guarding on that keeps the index
+            // and arena in agreement even if a prior logic error (a key mutated
+            // while in the map) already desynced the stored hash, turning a
+            // would-be dangling cell into a harmless retained entry.
+            if self.index.remove(hash, |s| s == slot).is_some() {
+                self.slots.unlink_free(slot);
+            }
+        }
+    }
+
     /// Iterate `(&K, &V)` in insertion order.
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
@@ -854,6 +891,126 @@ mod tests {
         // Full order + content agreement at the end.
         let map_pairs: Vec<(i32, i32)> = map.iter().map(|(k, v)| (*k, *v)).collect();
         assert_eq!(map_pairs, model);
+    }
+
+    // ---- retain --------------------------------------------------------
+
+    #[test]
+    fn retain_keeps_order_and_removes_rest() {
+        let mut m: LinkedHashMap<i32, i32> = LinkedHashMap::new();
+        for k in 0..6 {
+            m.insert(k, k * 10);
+        }
+        // Keep evens; mutate the survivors in place.
+        m.retain(|k, v| {
+            if k % 2 == 0 {
+                *v += 1;
+                true
+            } else {
+                false
+            }
+        });
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![0, 2, 4]);
+        assert_eq!(m.get(&0), Some(&1));
+        assert_eq!(m.get(&2), Some(&21));
+        assert_eq!(m.get(&4), Some(&41));
+        assert_eq!(m.len(), 3);
+        // The index stays consistent: removed keys are gone, survivors resolve,
+        // and freed slots are reusable.
+        assert_eq!(m.get(&1), None);
+        m.insert(1, 111);
+        assert_eq!(m.get(&1), Some(&111));
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![0, 2, 4, 1]);
+    }
+
+    #[test]
+    fn retain_all_and_none() {
+        let mut m: LinkedHashMap<i32, i32> = (0..5).map(|k| (k, k)).collect();
+        m.retain(|_, _| true);
+        assert_eq!(m.len(), 5);
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+        m.retain(|_, _| false);
+        assert!(m.is_empty());
+        // Still usable after clearing everything via retain.
+        m.insert(9, 9);
+        assert_eq!(m.get(&9), Some(&9));
+    }
+
+    /// A predicate that mutates the key's hash (via interior mutability) before
+    /// returning `false` must still remove the entry cleanly — the removal hash
+    /// is taken *before* `keep` runs, so the index cell is found and the map
+    /// stays structurally intact (no orphaned cell → no later panic).
+    #[test]
+    fn retain_key_mutated_in_predicate_stays_consistent() {
+        use std::cell::Cell;
+        use std::hash::Hasher;
+
+        #[derive(Eq)]
+        struct K(Cell<u64>);
+        impl PartialEq for K {
+            fn eq(&self, o: &Self) -> bool {
+                self.0.get() == o.0.get()
+            }
+        }
+        impl Hash for K {
+            fn hash<H: Hasher>(&self, h: &mut H) {
+                self.0.get().hash(h);
+            }
+        }
+
+        let mut m: LinkedHashMap<K, &str> = LinkedHashMap::new();
+        m.insert(K(Cell::new(1)), "a");
+        m.insert(K(Cell::new(2)), "b");
+        // Drop key 1, but mutate its hash inside the predicate first.
+        m.retain(|k, _| {
+            if k.0.get() == 1 {
+                k.0.set(999); // interior-mutability hash change, then drop
+                false
+            } else {
+                true
+            }
+        });
+        assert_eq!(m.len(), 1);
+        // The index must have no orphaned cell: these lookups must not panic and
+        // must be consistent with the arena.
+        assert_eq!(m.get(&K(Cell::new(1))), None);
+        assert_eq!(m.get(&K(Cell::new(999))), None);
+        assert_eq!(m.get(&K(Cell::new(2))), Some(&"b"));
+        // Reusing the freed slot and probing again must stay sound.
+        m.insert(K(Cell::new(3)), "c");
+        assert_eq!(m.get(&K(Cell::new(3))), Some(&"c"));
+        assert_eq!(m.len(), 2);
+    }
+
+    /// `retain` must match a `Vec`-ordered reference model (content + order)
+    /// across a churned map, including runs that remove head/tail/interior.
+    #[test]
+    fn retain_differential_against_reference_model() {
+        let mut map: LinkedHashMap<i32, i32> = LinkedHashMap::new();
+        let mut model: Vec<(i32, i32)> = Vec::new();
+        let mut state: u64 = 0x5EED_1234_ABCD_9876;
+        for round in 0..400 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // Refill a few entries.
+            for _ in 0..8 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let k = ((state >> 33) % 40) as i32;
+                let v = ((state >> 20) & 0xFFFF) as i32;
+                if let Some(e) = model.iter_mut().find(|(ek, _)| *ek == k) {
+                    e.1 = v;
+                } else {
+                    model.push((k, v));
+                }
+                map.insert(k, v);
+            }
+            // Retain on a rotating predicate.
+            let m = round % 3;
+            map.retain(|k, _| (k % 3) != m);
+            model.retain(|(k, _)| (k % 3) != m);
+            let got: Vec<(i32, i32)> = map.iter().map(|(k, v)| (*k, *v)).collect();
+            assert_eq!(got, model, "mismatch at round {round}");
+            assert_eq!(map.len(), model.len());
+        }
     }
 
     // ---- entry API -----------------------------------------------------

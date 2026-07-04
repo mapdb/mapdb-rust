@@ -89,6 +89,16 @@ impl<T: Eq + Hash, S: BuildHasher> LinkedHashSet<T, S> {
         self.map.clear();
     }
 
+    /// Retain only the elements for which `keep(&t)` returns `true`, visiting
+    /// them in insertion order. Survivors keep their positions; each dropped
+    /// element is removed in O(1). No `T: Clone` bound.
+    pub fn retain<F>(&mut self, mut keep: F)
+    where
+        F: FnMut(&T) -> bool,
+    {
+        self.map.retain(|t, ()| keep(t));
+    }
+
     /// Iterate elements in insertion order.
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
@@ -418,6 +428,18 @@ mod tests {
         assert!(s.remove("alpha"));
         assert!(!s.contains("alpha"));
         assert_eq!(s.len(), 1);
+    }
+
+    #[test]
+    fn retain_keeps_order() {
+        let mut s: LinkedHashSet<i32> = LinkedHashSet::from_iter([5, 1, 4, 2, 3]);
+        s.retain(|v| *v % 2 == 1);
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![5, 1, 3]);
+        assert_eq!(s.len(), 3);
+        assert!(!s.contains(&4));
+        // Reusable afterwards.
+        assert!(s.insert(4));
+        assert_eq!(s.iter().copied().collect::<Vec<_>>(), vec![5, 1, 3, 4]);
     }
 
     #[test]

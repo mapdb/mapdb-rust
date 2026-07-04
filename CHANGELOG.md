@@ -4,8 +4,17 @@ All notable changes to `mapdb-collections` are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/); this crate is pre-1.0,
 so a breaking change is a **minor** version bump.
 
-## [Unreleased] — additive: `entry` on `LinkedHashMap`
+## [Unreleased] — additive: `entry` + `retain` on `LinkedHash*`
 
+- **`LinkedHashMap::retain(|&k, &mut v| …)` / `LinkedHashSet::retain(|&t| …)`** —
+  drop the entries a predicate rejects, in a single insertion-order pass, keeping
+  survivors' positions and allowing in-place value mutation. O(n): each dropped
+  entry is unlinked and its slot recycled in O(1) (no index fix-up sweep), no
+  `K: Clone`. Removals go index-cell-first (re-deriving the stored hash from the
+  still-live key and matching the exact arena slot — the same cell-location
+  argument as `entry`'s `remove_entry`), so no user `Eq` runs during the
+  backward-shift. Closes the `retain`-on-insertion-ordered-types M1 gap
+  (`OpenHashMap`/`OpenHashSet` already had it).
 - **`LinkedHashMap::entry(key)`** — the standard `Entry` API (`or_insert`,
   `or_insert_with`, `or_insert_with_key`, `or_default`, `and_modify`, plus
   `Occupied`/`Vacant` with `key` / `get` / `get_mut` / `into_mut` / `insert` /

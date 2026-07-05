@@ -305,6 +305,30 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         }
     }
 
+    /// Returns the stored `(&K, &V)` pair for `key`, or `None`. Useful when the
+    /// stored key carries information the lookup key `Q` does not (e.g. a
+    /// case-preserving key looked up case-insensitively).
+    pub fn get_key_value<'a, Q>(&'a self, key: &Q) -> Option<(&'a K, &'a V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        if self.size == 0 {
+            return None;
+        }
+        let mask = self.mask();
+        let mut idx = (self.hash(key) as usize) & mask;
+        loop {
+            match &self.entries[idx] {
+                MapSlot::Empty => return None,
+                MapSlot::Occupied { key: k, value } if k.borrow() == key => {
+                    return Some((k, value));
+                }
+                MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
+            }
+        }
+    }
+
     pub fn get_mut<'a, Q>(&'a mut self, key: &Q) -> Option<&'a mut V>
     where
         K: Borrow<Q>,
@@ -2290,6 +2314,20 @@ mod tests {
         let s: OpenHashSet<i32, Fixed> = [1, 2, 3].into_iter().collect();
         assert_eq!(s.len(), 3);
         let _: &Fixed = s.hasher();
+    }
+
+    #[test]
+    fn openhashmap_get_key_value() {
+        let mut m: OpenHashMap<String, i32> = OpenHashMap::new();
+        m.insert("Hello".to_string(), 1);
+        // Borrow<Q> lookup by &str returns the STORED key + value.
+        let (k, v) = m.get_key_value("Hello").unwrap();
+        assert_eq!(k, "Hello");
+        assert_eq!(*v, 1);
+        assert_eq!(m.get_key_value("missing"), None);
+        // empty map
+        let e: OpenHashMap<i32, i32> = OpenHashMap::new();
+        assert_eq!(e.get_key_value(&1), None);
     }
 
     #[test]

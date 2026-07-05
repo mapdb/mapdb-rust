@@ -104,6 +104,17 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
         Some(&self.slots.get(slot).1)
     }
 
+    /// Returns the stored `(&K, &V)` pair for `key`, or `None`.
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        let slot = self.find_slot(key)?;
+        let kv = self.slots.get(slot);
+        Some((&kv.0, &kv.1))
+    }
+
     /// A mutable reference to the value for `key`, or `None`. The key is not
     /// exposed, so the hash index stays consistent.
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>

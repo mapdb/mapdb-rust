@@ -6,6 +6,13 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`get_key_value` across the map types** (blueprint T5 std parity). `OpenHashMap`,
+  `object::HashMap`, `LinkedHashMap`, and `TreeMap` gained
+  `get_key_value(&Q) -> Option<(&K, &V)>` (matching `std`), returning the *stored*
+  key alongside the value — useful when the stored key carries information the
+  lookup key does not (case-preserving keys looked up case-insensitively, custom
+  comparators/strategies that treat distinct keys as equal). Mirrors each type's
+  `get`; the hash types keep their `Borrow<Q>` generality.
 - **`Interval` iterators are now double-ended, exact-size, and fused** (blueprint
   T5). `IntervalIter` (borrowing) and `IntervalIntoIter` (owning) already reported
   an exact `size_hint`; they now also implement `DoubleEndedIterator` (`.rev()`,

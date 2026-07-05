@@ -208,6 +208,15 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
         self.inner.get(key)
     }
 
+    /// Returns the stored `(&K, &V)` pair for `key`, or `None`.
+    pub fn get_key_value<Q>(&self, key: &Q) -> Option<(&K, &V)>
+    where
+        K: Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.get_key_value(key)
+    }
+
     pub fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,

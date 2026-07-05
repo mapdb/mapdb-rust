@@ -160,6 +160,21 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
         None
     }
 
+    /// Returns the stored `(&K, &V)` pair for `key`, or `None` (the stored key
+    /// may carry information the lookup key does not, e.g. under a custom
+    /// comparator that treats distinct keys as equal).
+    pub fn get_key_value(&self, key: &K) -> Option<(&K, &V)> {
+        let mut current = &self.root;
+        while let Some(ref n) = current {
+            match self.cmp.compare(key, &n.key) {
+                Ordering::Less => current = &n.left,
+                Ordering::Greater => current = &n.right,
+                Ordering::Equal => return Some((&n.key, &n.value)),
+            }
+        }
+        None
+    }
+
     /// Returns a mutable reference to the value associated with the key, or
     /// `None`. The key (and so the sort order) cannot be changed through it.
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
@@ -2563,6 +2578,13 @@ mod tests {
         assert!(m.is_valid_llrb());
         m.assert_size_invariant();
         assert_eq!(m.len(), 10);
+    }
+
+    #[test]
+    fn get_key_value_returns_stored_pair() {
+        let m = dyn_map((0..5).map(|i| (i, i * 10)));
+        assert_eq!(m.get_key_value(&3), Some((&3, &30)));
+        assert_eq!(m.get_key_value(&99), None);
     }
 
     #[test]

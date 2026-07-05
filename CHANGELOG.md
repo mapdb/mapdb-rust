@@ -6,6 +6,10 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`VecDeque`-parity surface on `ArrayDeque`** (blueprint T5). Added
+  `peek_front_mut`/`peek_back_mut` (mutable ends), positional `get`/`get_mut`
+  (0 = front), `swap`, in-place `retain`, `truncate`, and `reserve` — all thin
+  delegations to the backing `VecDeque`. Purely additive.
 - **`Vec`-parity surface on `object::ArrayList`** (blueprint T5). Added the
   positional / mutation methods that were missing next to the existing
   by-value `remove`/`push`/`set`: `pop`, `insert(index, value)`,

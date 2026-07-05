@@ -83,6 +83,53 @@ impl<T> ArrayDeque<T> {
     pub fn iter_mut(&mut self) -> std::collections::vec_deque::IterMut<'_, T> {
         self.data.iter_mut()
     }
+
+    // ── Mutable ends / positional access (VecDeque parity) ──────────
+
+    /// Mutable reference to the front element, or `None`.
+    pub fn peek_front_mut(&mut self) -> Option<&mut T> {
+        self.data.front_mut()
+    }
+
+    /// Mutable reference to the back element, or `None`.
+    pub fn peek_back_mut(&mut self) -> Option<&mut T> {
+        self.data.back_mut()
+    }
+
+    /// The element at `index` (0 = front), or `None`.
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.data.get(index)
+    }
+
+    /// Mutable reference to the element at `index` (0 = front), or `None`.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.data.get_mut(index)
+    }
+
+    /// Swaps the elements at `a` and `b`.
+    ///
+    /// # Panics
+    /// Panics if either index is out of bounds.
+    pub fn swap(&mut self, a: usize, b: usize) {
+        self.data.swap(a, b);
+    }
+
+    /// Retains only the elements for which `keep(&elem)` returns `true`,
+    /// front-to-back (in-place).
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F) {
+        self.data.retain(keep);
+    }
+
+    /// Shortens the deque to the first `len` elements (from the front),
+    /// dropping the rest. No-op if `len >= len()`.
+    pub fn truncate(&mut self, len: usize) {
+        self.data.truncate(len);
+    }
+
+    /// Reserves capacity for at least `additional` more elements.
+    pub fn reserve(&mut self, additional: usize) {
+        self.data.reserve(additional);
+    }
 }
 
 impl<T: PartialEq> ArrayDeque<T> {
@@ -289,5 +336,29 @@ mod tests {
         assert_eq!(d.to_vec(), vec![1, 2, 3]);
         let empty: ArrayDeque<i32> = ArrayDeque::bulk_load(Vec::new());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn vecdeque_parity_mut_and_positional() {
+        let mut d: ArrayDeque<i32> = ArrayDeque::new();
+        d.push_back(2);
+        d.push_back(3);
+        d.push_front(1); // [1,2,3]
+        assert_eq!(d.get(0), Some(&1));
+        assert_eq!(d.get(2), Some(&3));
+        assert_eq!(d.get(3), None);
+
+        *d.peek_front_mut().unwrap() = 10;
+        *d.peek_back_mut().unwrap() = 30;
+        *d.get_mut(1).unwrap() = 20;
+        assert_eq!(d.to_vec(), vec![10, 20, 30]);
+
+        d.swap(0, 2);
+        assert_eq!(d.to_vec(), vec![30, 20, 10]);
+
+        d.retain(|&x| x >= 20); // [30,20]
+        assert_eq!(d.to_vec(), vec![30, 20]);
+        d.truncate(1);
+        assert_eq!(d.to_vec(), vec![30]);
     }
 }

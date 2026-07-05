@@ -333,6 +333,25 @@ impl<K: Eq + Hash, V: Eq> Default for SetMultimap<K, V> {
     }
 }
 
+/// Builds a set-multimap from `(key, value)` pairs (set semantics — duplicate
+/// `(key, value)` pairs collapse). Equivalent to
+/// [`bulk_load`](SetMultimap::bulk_load); lets `iter.collect()` work.
+impl<K: Eq + Hash, V: Eq> FromIterator<(K, V)> for SetMultimap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        SetMultimap::bulk_load(iter)
+    }
+}
+
+/// Adds `(key, value)` pairs into an existing set-multimap (set semantics),
+/// mirroring [`insert`](SetMultimap::insert) for each pair.
+impl<K: Eq + Hash, V: Eq> Extend<(K, V)> for SetMultimap<K, V> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
 /// Borrowing iteration over flattened `(&K, &V)` pairs (one per unique value).
 impl<'a, K: Eq + Hash, V: Eq> IntoIterator for &'a SetMultimap<K, V> {
     type Item = (&'a K, &'a V);
@@ -677,5 +696,20 @@ mod tests {
         let data = vec![(2, 10), (1, 20)];
         let err = SetMultimap::from_sorted_keys(natural_comparator::<i32>(), data).unwrap_err();
         assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+    }
+
+    #[test]
+    fn from_iter_and_extend() {
+        // collect() dedupes (key, value) pairs (set semantics).
+        let m: SetMultimap<i32, i32> = [(1, 10), (1, 11), (1, 10), (2, 20)].into_iter().collect();
+        assert_eq!(m.len(), 3); // duplicate (1,10) collapsed
+        assert_eq!(m.get(&1).to_vec(), vec![10, 11]);
+        assert_eq!(m.get(&2).to_vec(), vec![20]);
+
+        let mut m2: SetMultimap<i32, i32> = [(5, 1)].into_iter().collect();
+        m2.extend([(5, 1), (5, 2), (6, 3)]); // (5,1) already present → no-op
+        assert_eq!(m2.get(&5).to_vec(), vec![1, 2]);
+        assert_eq!(m2.get(&6).to_vec(), vec![3]);
+        assert_eq!(m2.len(), 3);
     }
 }

@@ -6,6 +6,13 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`FromIterator` + `Extend` on `Multimap`/`SetMultimap`** (blueprint T5 std-trait
+  parity). Both multimap types could already be iterated (`IntoIterator`,
+  borrowing + owned) and `Default`-constructed, but not built from an iterator of
+  `(K, V)` pairs via `collect()` / `.extend(...)`. `FromIterator` delegates to the
+  existing `bulk_load` (`Multimap` keeps every pair with per-key input order;
+  `SetMultimap` collapses duplicate `(key, value)` pairs); `Extend` appends via
+  `insert`. Purely additive.
 - **`#![forbid(unsafe_code)]` + crate-level documentation** (blueprint T12). The
   crate now compile-enforces its long-standing no-`unsafe` rule with a
   `#![forbid(unsafe_code)]` inner attribute (verified across all feature

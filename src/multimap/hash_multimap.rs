@@ -296,6 +296,26 @@ impl<K: Eq + Hash, V> Default for Multimap<K, V> {
     }
 }
 
+/// Builds a multimap from `(key, value)` pairs (list semantics — every pair is
+/// kept, values preserve input order per key). Equivalent to
+/// [`bulk_load`](Multimap::bulk_load); lets `iter.collect()` and
+/// `HashMap`-style construction work.
+impl<K: Eq + Hash, V> FromIterator<(K, V)> for Multimap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+        Multimap::bulk_load(iter)
+    }
+}
+
+/// Appends `(key, value)` pairs into an existing multimap (list semantics),
+/// mirroring [`insert`](Multimap::insert) for each pair.
+impl<K: Eq + Hash, V> Extend<(K, V)> for Multimap<K, V> {
+    fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
+        for (k, v) in iter {
+            self.insert(k, v);
+        }
+    }
+}
+
 /// Borrowing iteration over flattened `(&K, &V)` pairs (one per stored value).
 impl<'a, K: Eq + Hash, V> IntoIterator for &'a Multimap<K, V> {
     type Item = (&'a K, &'a V);
@@ -633,5 +653,20 @@ mod tests {
         assert!(r.is_err());
         // len() must equal the actual number of surviving (k, v) pairs.
         assert_eq!(m.len(), m.iter().count());
+    }
+
+    #[test]
+    fn from_iter_and_extend() {
+        // collect() keeps every pair (list semantics), values in input order.
+        let m: Multimap<i32, i32> = [(1, 10), (1, 11), (2, 20), (1, 10)].into_iter().collect();
+        assert_eq!(m.len(), 4); // duplicate (1,10) kept
+        assert_eq!(m.get(&1).to_vec(), vec![10, 11, 10]);
+        assert_eq!(m.get(&2).to_vec(), vec![20]);
+
+        let mut m2: Multimap<i32, i32> = [(5, 1)].into_iter().collect();
+        m2.extend([(5, 2), (6, 3)]);
+        assert_eq!(m2.get(&5).to_vec(), vec![1, 2]);
+        assert_eq!(m2.get(&6).to_vec(), vec![3]);
+        assert_eq!(m2.len(), 3);
     }
 }

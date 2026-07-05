@@ -54,8 +54,12 @@
 //! snapshots** (`Vec<K>` / `Vec<(K, V)>`), matching the convention the
 //! [`crate::object::treemap::TreeMap`] descending methods already use
 //! (`navigable-map.md`'s slice/iterator equivalence). A materialized snapshot
-//! and a lazy iterator are observably identical; the snapshot keeps that API
-//! `Copy`-bounded and trivially independent of `&self`'s lifetime.
+//! and a lazy iterator are observably identical, and the snapshot is trivially
+//! independent of `&self`'s lifetime. These snapshot methods require
+//! `K`/`V: Clone` (and the `Range<K>`-taking ones `K: Copy`, since the Guava
+//! `Range<K>` value type is itself `Copy`-bound); the rest of the surface —
+//! construction, lookup, navigation, and the lazy borrowing iterators — needs
+//! only `K: Ord`, so `String` keys and non-`Copy` values are fully supported.
 //!
 //! Alongside them, [`ImmutableSortedMap::range`] / [`ImmutableSortedSet::range`]
 //! provide the std-shape T4 counterpart: they accept any [`RangeBounds<K>`]
@@ -63,12 +67,13 @@
 //! borrowing** iterator ([`SortedRangeIter`] / [`SortedRangeElemIter`]) —
 //! [`ExactSizeIterator`], needing neither `K: Copy` nor `V: Copy`.
 //!
-//! v1 ships the `i32` surface (the cross-language validation universe). The
-//! types stay generic over `K/T: Ord + Copy` so the float / wider-integer
-//! matrix widens later exactly as [`crate::Interval`] and [`crate::Range`] did;
-//! ordering goes through [`Ord`] (binary search / `Ord::cmp`), never a bare
-//! `<` on a generic, so float keys will widen by supplying a total-order
-//! wrapper ([`crate::HashableF32`]) with no algorithm change.
+//! The cross-language validation universe is the `i32` surface, but the types
+//! are generic over `K/T: Ord` (construction/lookup) with `Clone` required only
+//! by the `Vec`-snapshot methods — so `String` keys, boxed values, and the
+//! float / wider-integer matrix all work today. Ordering goes through [`Ord`]
+//! (binary search / `Ord::cmp`), never a bare `<` on a generic, so float keys
+//! widen by supplying a total-order wrapper ([`crate::HashableF32`]) with no
+//! algorithm change.
 
 use crate::bulk::BulkError;
 use crate::range::Range;
@@ -152,18 +157,15 @@ pub struct ImmutableSortedMap<K, V> {
     values: Vec<V>,
 }
 
-impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
-    /// Build from **strictly ascending** parallel slices: `values[i]` is the
-    /// value of `keys[i]`. The input is **copied** (snapshot — independent of
-    /// the caller's slices).
-    ///
-    /// # Panics
-    ///
-    /// Traps (panics) if `keys.len() != values.len()`, if the keys are not
-    /// strictly ascending (out-of-order), or if any key is duplicated. There
-    /// is no last-wins/dedup and no silent sort — a caller who wants those
-    /// sorts/dedups first. Empty and single-element input are valid.
-    pub fn from_sorted(keys: &[K], values: &[V]) -> Self {
+impl<K: Ord, V> ImmutableSortedMap<K, V> {
+    /// Validate parallel key/value inputs by **borrow** (before any clone):
+    /// length check, then strictly-ascending key check. Shared by every
+    /// constructor — `Ord` is the only bound. Validating through a borrow lets
+    /// the slice constructors reject bad input *before* cloning it (so a
+    /// side-effecting `Clone` never runs on rejected input), while the iterator
+    /// constructors validate their owned `Vec`s in place and then move them in,
+    /// reaching non-`Clone` `K`/`V`.
+    fn check_slices(keys: &[K], values: &[V]) {
         if keys.len() != values.len() {
             panic!(
                 "ImmutableSortedMap::from_sorted: keys/values length mismatch ({} != {})",
@@ -172,6 +174,36 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
             );
         }
         assert_strictly_ascending(keys);
+    }
+
+    /// Fallible counterpart to [`check_slices`](Self::check_slices): reports the
+    /// first offending position as a [`BulkError`] instead of panicking.
+    fn try_check_slices(keys: &[K], values: &[V]) -> Result<(), BulkError> {
+        if keys.len() != values.len() {
+            return Err(BulkError::LengthMismatch {
+                keys: keys.len(),
+                values: values.len(),
+            });
+        }
+        check_strictly_ascending(keys)
+    }
+
+    /// Build from **strictly ascending** parallel slices: `values[i]` is the
+    /// value of `keys[i]`. The input is **cloned** (snapshot — independent of
+    /// the caller's slices).
+    ///
+    /// # Panics
+    ///
+    /// Traps (panics) if `keys.len() != values.len()`, if the keys are not
+    /// strictly ascending (out-of-order), or if any key is duplicated. There
+    /// is no last-wins/dedup and no silent sort — a caller who wants those
+    /// sorts/dedups first. Empty and single-element input are valid.
+    pub fn from_sorted(keys: &[K], values: &[V]) -> Self
+    where
+        K: Clone,
+        V: Clone,
+    {
+        Self::check_slices(keys, values);
         Self {
             keys: keys.to_vec(),
             values: values.to_vec(),
@@ -181,7 +213,8 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     /// Build from an iterator of `(key, value)` pairs that the caller pushes
     /// in **strictly ascending** key order (the data-pump sink shape). The
     /// pairs are materialized and validated exactly like
-    /// [`from_sorted`](Self::from_sorted).
+    /// [`from_sorted`](Self::from_sorted). Owns the yielded pairs, so it needs
+    /// no `Clone` (unlike the slice-copying [`from_sorted`](Self::from_sorted)).
     ///
     /// # Panics
     ///
@@ -189,7 +222,8 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     /// duplicate keys).
     pub fn from_sorted_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
-        Self::from_sorted(&keys, &values)
+        Self::check_slices(&keys, &values);
+        Self { keys, values }
     }
 
     /// Fallible [`from_sorted`](Self::from_sorted): validates the input and
@@ -198,14 +232,12 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     /// lengths differ, [`Duplicate`](BulkError::Duplicate) on a repeated key, or
     /// [`OutOfOrder`](BulkError::OutOfOrder) on a descending step (the `index` is
     /// the offending key's position).
-    pub fn try_from_sorted(keys: &[K], values: &[V]) -> Result<Self, BulkError> {
-        if keys.len() != values.len() {
-            return Err(BulkError::LengthMismatch {
-                keys: keys.len(),
-                values: values.len(),
-            });
-        }
-        check_strictly_ascending(keys)?;
+    pub fn try_from_sorted(keys: &[K], values: &[V]) -> Result<Self, BulkError>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        Self::try_check_slices(keys, values)?;
         Ok(Self {
             keys: keys.to_vec(),
             values: values.to_vec(),
@@ -215,11 +247,13 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     /// Fallible [`from_sorted_iter`](Self::from_sorted_iter): materializes the
     /// pairs, then validates like [`try_from_sorted`](Self::try_from_sorted)
     /// (lengths always match here, so only ordering/duplicate errors arise).
+    /// Owns its input — no `Clone` needed.
     pub fn try_from_sorted_iter<I: IntoIterator<Item = (K, V)>>(
         iter: I,
     ) -> Result<Self, BulkError> {
         let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
-        Self::try_from_sorted(&keys, &values)
+        Self::try_check_slices(&keys, &values)?;
+        Ok(Self { keys, values })
     }
 
     /// Number of entries.
@@ -406,17 +440,24 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     // ── Iteration (descending) — required, not optional ─────────────
 
     /// All keys, descending.
-    pub fn descending_keys(&self) -> Vec<K> {
-        self.keys.iter().rev().copied().collect()
+    pub fn descending_keys(&self) -> Vec<K>
+    where
+        K: Clone,
+    {
+        self.keys.iter().rev().cloned().collect()
     }
 
     /// All `(key, value)` entries, descending.
-    pub fn descending_entries(&self) -> Vec<(K, V)> {
+    pub fn descending_entries(&self) -> Vec<(K, V)>
+    where
+        K: Clone,
+        V: Clone,
+    {
         self.keys
             .iter()
             .rev()
             .zip(self.values.iter().rev())
-            .map(|(k, v)| (*k, *v))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
 
@@ -431,30 +472,44 @@ impl<K: Ord + Copy, V: Copy> ImmutableSortedMap<K, V> {
     // cut-emptiness).
 
     /// Keys whose key ∈ `range`, ascending.
-    pub fn range_keys(&self, range: Range<K>) -> Vec<K> {
+    pub fn range_keys(&self, range: Range<K>) -> Vec<K>
+    where
+        K: Copy,
+    {
         let (lo, hi) = range.bracket(&self.keys);
         self.keys[lo..hi].to_vec()
     }
 
     /// `(key, value)` entries whose key ∈ `range`, ascending.
-    pub fn range_entries(&self, range: Range<K>) -> Vec<(K, V)> {
+    pub fn range_entries(&self, range: Range<K>) -> Vec<(K, V)>
+    where
+        K: Copy,
+        V: Clone,
+    {
         let (lo, hi) = range.bracket(&self.keys);
         self.keys[lo..hi]
             .iter()
             .zip(self.values[lo..hi].iter())
-            .map(|(k, v)| (*k, *v))
+            .map(|(k, v)| (*k, v.clone()))
             .collect()
     }
 
     /// Keys whose key ∈ `range`, descending.
-    pub fn descending_range_keys(&self, range: Range<K>) -> Vec<K> {
+    pub fn descending_range_keys(&self, range: Range<K>) -> Vec<K>
+    where
+        K: Copy,
+    {
         let mut v = self.range_keys(range);
         v.reverse();
         v
     }
 
     /// `(key, value)` entries whose key ∈ `range`, descending.
-    pub fn descending_range_entries(&self, range: Range<K>) -> Vec<(K, V)> {
+    pub fn descending_range_entries(&self, range: Range<K>) -> Vec<(K, V)>
+    where
+        K: Copy,
+        V: Clone,
+    {
         let mut v = self.range_entries(range);
         v.reverse();
         v
@@ -601,29 +656,47 @@ pub struct ImmutableSortedSet<T> {
     elems: Vec<T>,
 }
 
-impl<T: Ord + Copy> ImmutableSortedSet<T> {
-    /// Build from a **strictly ascending** element slice (copied — snapshot).
+impl<T: Ord> ImmutableSortedSet<T> {
+    /// Validate an element slice by **borrow** (before any clone): the shared
+    /// strictly-ascending check for every constructor; `Ord`-only. Validating
+    /// through a borrow lets the slice constructor reject bad input *before*
+    /// cloning it, while the iterator constructor validates its owned `Vec` in
+    /// place and moves it in, reaching non-`Clone` `T`.
+    fn check_slice(elems: &[T]) {
+        assert_strictly_ascending(elems);
+    }
+
+    /// Fallible counterpart to [`check_slice`](Self::check_slice).
+    fn try_check_slice(elems: &[T]) -> Result<(), BulkError> {
+        check_strictly_ascending(elems)
+    }
+
+    /// Build from a **strictly ascending** element slice (cloned — snapshot).
     ///
     /// # Panics
     ///
     /// Traps (panics) if the elements are not strictly ascending or contain a
     /// duplicate. Empty and single-element input are valid.
-    pub fn from_sorted(elements: &[T]) -> Self {
-        assert_strictly_ascending(elements);
+    pub fn from_sorted(elements: &[T]) -> Self
+    where
+        T: Clone,
+    {
+        Self::check_slice(elements);
         Self {
             elems: elements.to_vec(),
         }
     }
 
     /// Build from an iterator of elements the caller pushes in **strictly
-    /// ascending** order (the sink shape).
+    /// ascending** order (the sink shape). Owns its input — no `Clone`.
     ///
     /// # Panics
     ///
     /// Same traps as [`from_sorted`](Self::from_sorted).
     pub fn from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let elems: Vec<T> = iter.into_iter().collect();
-        Self::from_sorted(&elems)
+        Self::check_slice(&elems);
+        Self { elems }
     }
 
     /// Fallible [`from_sorted`](Self::from_sorted): validates the elements and
@@ -631,18 +704,23 @@ impl<T: Ord + Copy> ImmutableSortedSet<T> {
     /// Errors: [`Duplicate`](BulkError::Duplicate) on a repeated element or
     /// [`OutOfOrder`](BulkError::OutOfOrder) on a descending step (`index` is the
     /// offending element's position).
-    pub fn try_from_sorted(elements: &[T]) -> Result<Self, BulkError> {
-        check_strictly_ascending(elements)?;
+    pub fn try_from_sorted(elements: &[T]) -> Result<Self, BulkError>
+    where
+        T: Clone,
+    {
+        Self::try_check_slice(elements)?;
         Ok(Self {
             elems: elements.to_vec(),
         })
     }
 
     /// Fallible [`from_sorted_iter`](Self::from_sorted_iter): materializes then
-    /// validates like [`try_from_sorted`](Self::try_from_sorted).
+    /// validates like [`try_from_sorted`](Self::try_from_sorted). Owns its
+    /// input — no `Clone`.
     pub fn try_from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, BulkError> {
         let elems: Vec<T> = iter.into_iter().collect();
-        Self::try_from_sorted(&elems)
+        Self::try_check_slice(&elems)?;
+        Ok(Self { elems })
     }
 
     /// Number of elements.
@@ -725,19 +803,28 @@ impl<T: Ord + Copy> ImmutableSortedSet<T> {
     }
 
     /// All elements, descending.
-    pub fn descending_elements(&self) -> Vec<T> {
-        self.elems.iter().rev().copied().collect()
+    pub fn descending_elements(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.elems.iter().rev().cloned().collect()
     }
 
     /// Elements ∈ `range`, ascending. Bracketed by two binary searches from
     /// the range's cut semantics (overflow-safe at the signed extremes).
-    pub fn range_elements(&self, range: Range<T>) -> Vec<T> {
+    pub fn range_elements(&self, range: Range<T>) -> Vec<T>
+    where
+        T: Copy,
+    {
         let (lo, hi) = range.bracket(&self.elems);
         self.elems[lo..hi].to_vec()
     }
 
     /// Elements ∈ `range`, descending.
-    pub fn descending_range_elements(&self, range: Range<T>) -> Vec<T> {
+    pub fn descending_range_elements(&self, range: Range<T>) -> Vec<T>
+    where
+        T: Copy,
+    {
         let mut v = self.range_elements(range);
         v.reverse();
         v

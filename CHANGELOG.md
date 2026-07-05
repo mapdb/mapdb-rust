@@ -20,6 +20,21 @@ so a breaking change is a **minor** version bump.
   std syntax flows to them directly — `set.add(2..5)`, `map.put(2..=5, v)`,
   `set.add_all([2..4, 6..8])` — with no explicit `.into()` (passing a `Range<T>`
   is unchanged).
+- **`ImmutableSortedMap`/`Set` now support non-`Copy` keys/values (e.g.
+  `String`)** (blueprint M7/T6-tail). The impl bound was loosened from
+  `K: Ord + Copy, V: Copy` to `K: Ord`, with `Clone` required only by the
+  `Vec`-snapshot methods (`descending_keys`/`descending_entries`) via per-method
+  `where` clauses; the `Range<K>`-taking snapshot methods keep `K: Copy` because
+  the Guava `Range<K>` value type is itself `Copy`-bound. Construction, lookup,
+  navigation, the lazy `range(RangeBounds)` iterator, and `IntoIterator` need only
+  `K: Ord`. The iterator constructors (`from_sorted_iter`/`try_from_sorted_iter`)
+  now own their input and need **no** `Clone` at all; the slice constructors
+  (`from_sorted`/`try_from_sorted`) require `K: Clone, V: Clone` (they copy the
+  slices) and validate the input **before** cloning it, so a side-effecting
+  `Clone` never runs on data that ordering/length validation rejects. All
+  validation, panic messages, and `BulkError` indices are unchanged —
+  `i32` behavior is byte-identical. This closes the long-standing "no `String`
+  keys" gap between these types and the rest of the crate.
 - **`IntoIterator` (borrowing + owned) on `ImmutableSortedMap`/`Set`** (blueprint
   T5 iteration triple). Both frozen sorted types now implement `IntoIterator` for
   `&Self` (yielding `(&K, &V)` / `&T` ascending — `for (k, v) in &map` works, same

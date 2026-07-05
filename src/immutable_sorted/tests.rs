@@ -343,10 +343,112 @@ fn lazy_range_inverted_and_empty_yield_nothing() {
     assert_eq!(m.range(100..200).count(), 0); // above everything
 }
 
-// NB: the lazy `range` lives in an `impl<K: Ord, V>` block (no `Copy`), so it
-// is ready for non-`Copy` keys the moment construction drops its `Copy` bound
-// (deferred T6-tail work). Until then every constructible instance is `Copy`,
-// so a non-`Copy` exercise isn't buildable here.
+#[test]
+fn non_copy_string_keys_and_values() {
+    // The whole point of the Copy→Clone/Ord loosening: String keys/values work.
+    let m = ImmutableSortedMap::from_sorted(
+        &["a".to_string(), "m".to_string(), "z".to_string()],
+        &["A".to_string(), "M".to_string(), "Z".to_string()],
+    );
+    assert_eq!(m.get(&"m".to_string()), Some(&"M".to_string()));
+    assert_eq!(m.floor_key(&"n".to_string()), Some(&"m".to_string()));
+    assert_eq!(m.ceiling_key(&"b".to_string()), Some(&"m".to_string()));
+    // Lazy range over non-Copy keys (borrowing — no clone).
+    let got: Vec<(&String, &String)> = m.range("b".to_string().."z".to_string()).collect();
+    assert_eq!(got, vec![(&"m".to_string(), &"M".to_string())]);
+    // Owned into_iter moves the Strings out (no clone).
+    let owned: Vec<(String, String)> = m.into_iter().collect();
+    assert_eq!(owned[0], ("a".to_string(), "A".to_string()));
+
+    // from_sorted_iter needs no Clone at all (owns the pairs).
+    let m2 = ImmutableSortedMap::from_sorted_iter([
+        ("x".to_string(), vec![1, 2]),
+        ("y".to_string(), vec![3]),
+    ]);
+    assert_eq!(m2.get(&"x".to_string()), Some(&vec![1, 2]));
+
+    // Set with String elements.
+    let s = ImmutableSortedSet::from_sorted(&["alpha".to_string(), "beta".to_string()]);
+    assert!(s.contains(&"beta".to_string()));
+    let elems: Vec<String> = s.into_iter().collect();
+    assert_eq!(elems, vec!["alpha".to_string(), "beta".to_string()]);
+}
+
+#[test]
+fn from_sorted_validates_before_cloning() {
+    // The slice constructors validate by borrow *before* cloning, so a
+    // side-effecting `Clone` never runs on input that validation rejects.
+    use std::cell::Cell;
+    use std::cmp::Ordering;
+    use std::rc::Rc;
+
+    #[derive(Debug)]
+    struct CloneCounter {
+        n: i32,
+        clones: Rc<Cell<usize>>,
+    }
+    impl Clone for CloneCounter {
+        fn clone(&self) -> Self {
+            self.clones.set(self.clones.get() + 1);
+            CloneCounter {
+                n: self.n,
+                clones: Rc::clone(&self.clones),
+            }
+        }
+    }
+    impl PartialEq for CloneCounter {
+        fn eq(&self, o: &Self) -> bool {
+            self.n == o.n
+        }
+    }
+    impl Eq for CloneCounter {}
+    impl PartialOrd for CloneCounter {
+        fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for CloneCounter {
+        fn cmp(&self, o: &Self) -> Ordering {
+            self.n.cmp(&o.n)
+        }
+    }
+
+    let clones = Rc::new(Cell::new(0));
+    let mk = |n| CloneCounter {
+        n,
+        clones: Rc::clone(&clones), // Rc::clone, not CloneCounter::clone — uncounted
+    };
+    let out_of_order = [mk(5), mk(1)]; // descending → rejected
+
+    clones.set(0);
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        ImmutableSortedMap::from_sorted(&out_of_order, &[10, 20]);
+    }));
+    assert!(panicked.is_err(), "out-of-order keys must panic");
+    assert_eq!(
+        clones.get(),
+        0,
+        "no key should be cloned before validation rejects the input"
+    );
+
+    // Valid input clones exactly once per key (the snapshot copy).
+    let ordered = [mk(1), mk(5)];
+    clones.set(0);
+    let _m = ImmutableSortedMap::from_sorted(&ordered, &[10, 20]);
+    assert_eq!(clones.get(), 2, "valid input clones each key once");
+}
+
+#[test]
+fn try_from_sorted_string_keys_error_paths() {
+    use crate::BulkError;
+    // Out-of-order String keys report OutOfOrder with the offending index.
+    let err = ImmutableSortedMap::try_from_sorted(&["b".to_string(), "a".to_string()], &[1, 2])
+        .unwrap_err();
+    assert!(matches!(err, BulkError::OutOfOrder { index: 1 }));
+    // Duplicate.
+    let dup = ImmutableSortedSet::try_from_sorted(&["x".to_string(), "x".to_string()]).unwrap_err();
+    assert!(matches!(dup, BulkError::Duplicate { index: 1 }));
+}
 
 #[test]
 #[allow(clippy::reversed_empty_ranges)] // intentionally inverted at the end

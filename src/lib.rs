@@ -61,7 +61,7 @@ pub use hashable_float::{HashableF32, HashableF64};
 pub use hyperloglog::{HllError, HyperLogLog};
 pub use immutable::{ImmutableHashMap, ImmutableHashSet, ImmutableList};
 pub use immutable_sorted::{
-    ImmutableSortedMap, ImmutableSortedSet, SortedRangeElemIter, SortedRangeIter,
+    ImmutableSortedMap, ImmutableSortedSet, SortedIntoIter, SortedRangeElemIter, SortedRangeIter,
 };
 pub use interval::{Interval, SignedPrimInt};
 pub use multimap::{Multimap, SetMultimap};

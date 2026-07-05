@@ -520,6 +520,76 @@ impl<K, V> DoubleEndedIterator for SortedRangeIter<'_, K, V> {
 impl<K, V> ExactSizeIterator for SortedRangeIter<'_, K, V> {}
 impl<K, V> std::iter::FusedIterator for SortedRangeIter<'_, K, V> {}
 
+// ── Iteration triple: `IntoIterator` for `&Self` (borrow) and `Self` (owned) ──
+//
+// No `iter_mut`/`IntoIterator for &mut Self`: the sorted invariant makes in-place
+// key mutation unsound (it could break the binary-search order), so — matching
+// §1.1 "iter_mut where mutation is sound" — the frozen types expose only shared
+// and owning iteration.
+
+impl<'a, K, V> IntoIterator for &'a ImmutableSortedMap<K, V> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = SortedRangeIter<'a, K, V>;
+    /// Ascending `(&K, &V)` — same as [`entries`](ImmutableSortedMap::entries),
+    /// so `for (k, v) in &map` works. Needs no `K: Ord` (whole-array walk).
+    fn into_iter(self) -> Self::IntoIter {
+        SortedRangeIter {
+            inner: self.keys.iter().zip(self.values.iter()),
+        }
+    }
+}
+
+impl<K, V> IntoIterator for ImmutableSortedMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = SortedIntoIter<K, V>;
+    /// Consuming `(K, V)` in ascending key order (`for (k, v) in map`). The
+    /// bulk ownership-transfer exit — moves the packed arrays out, no clone.
+    fn into_iter(self) -> Self::IntoIter {
+        SortedIntoIter {
+            inner: self.keys.into_iter().zip(self.values),
+        }
+    }
+}
+
+impl<K, V> ImmutableSortedMap<K, V> {
+    /// Consume the map, yielding owned keys in ascending order.
+    pub fn into_keys(self) -> std::vec::IntoIter<K> {
+        self.keys.into_iter()
+    }
+    /// Consume the map, yielding owned values in ascending-**key** order
+    /// (paired with [`into_keys`](Self::into_keys), not value-sorted).
+    pub fn into_values(self) -> std::vec::IntoIter<V> {
+        self.values.into_iter()
+    }
+}
+
+/// Consuming double-ended iterator over an [`ImmutableSortedMap`], yielding
+/// owned `(K, V)` in ascending key order. Returned by
+/// `<ImmutableSortedMap as IntoIterator>::into_iter`.
+#[derive(Clone, Debug)]
+pub struct SortedIntoIter<K, V> {
+    inner: std::iter::Zip<std::vec::IntoIter<K>, std::vec::IntoIter<V>>,
+}
+
+impl<K, V> Iterator for SortedIntoIter<K, V> {
+    type Item = (K, V);
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl<K, V> DoubleEndedIterator for SortedIntoIter<K, V> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
+    }
+}
+
+impl<K, V> ExactSizeIterator for SortedIntoIter<K, V> {}
+impl<K, V> std::iter::FusedIterator for SortedIntoIter<K, V> {}
+
 // ===========================================================================
 // ImmutableSortedSet<T>
 // ===========================================================================
@@ -714,6 +784,32 @@ impl<T> DoubleEndedIterator for SortedRangeElemIter<'_, T> {
 
 impl<T> ExactSizeIterator for SortedRangeElemIter<'_, T> {}
 impl<T> std::iter::FusedIterator for SortedRangeElemIter<'_, T> {}
+
+// ── Iteration triple (no `iter_mut`: frozen sorted order, see the map above) ──
+
+impl<'a, T> IntoIterator for &'a ImmutableSortedSet<T> {
+    type Item = &'a T;
+    type IntoIter = SortedRangeElemIter<'a, T>;
+    /// Ascending `&T` — same as [`elements`](ImmutableSortedSet::elements), so
+    /// `for x in &set` works.
+    fn into_iter(self) -> Self::IntoIter {
+        SortedRangeElemIter {
+            inner: self.elems.iter(),
+        }
+    }
+}
+
+impl<T> IntoIterator for ImmutableSortedSet<T> {
+    type Item = T;
+    /// `std::vec::IntoIter<T>` is already a full-featured named iterator
+    /// (double-ended, exact-size, fused), so no wrapper is needed.
+    type IntoIter = std::vec::IntoIter<T>;
+    /// Consuming `T` in ascending order (`for x in set`), moving the packed
+    /// array out — no clone.
+    fn into_iter(self) -> Self::IntoIter {
+        self.elems.into_iter()
+    }
+}
 
 #[cfg(test)]
 mod tests;

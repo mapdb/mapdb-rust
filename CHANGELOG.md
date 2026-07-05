@@ -20,6 +20,17 @@ so a breaking change is a **minor** version bump.
   std syntax flows to them directly — `set.add(2..5)`, `map.put(2..=5, v)`,
   `set.add_all([2..4, 6..8])` — with no explicit `.into()` (passing a `Range<T>`
   is unchanged).
+- **`IntoIterator` (borrowing + owned) on `ImmutableSortedMap`/`Set`** (blueprint
+  T5 iteration triple). Both frozen sorted types now implement `IntoIterator` for
+  `&Self` (yielding `(&K, &V)` / `&T` ascending — `for (k, v) in &map` works, same
+  as `entries()`/`elements()`) and for `Self` (the bulk ownership-transfer exit:
+  `for (k, v) in map` moves the packed arrays out, no clone). The owned map
+  iterator is the new named `SortedIntoIter<K, V>` (double-ended, exact-size,
+  fused); the owned set iterator reuses `std::vec::IntoIter<T>`. Also added
+  consuming `into_keys`/`into_values` (ascending-key order). No `iter_mut` /
+  `&mut Self` iteration — in-place key mutation would break the sorted
+  binary-search invariant, so (per §1.1 "iter_mut where mutation is sound") the
+  frozen types expose only shared and owning iteration. Additive.
 - **Lazy `RangeBounds` iterator on `ImmutableSortedMap`/`Set`** (blueprint T4).
   New `range<R: RangeBounds<K>>(r)` methods return a **lazy, double-ended,
   borrowing** iterator (`SortedRangeIter` / `SortedRangeElemIter`) — callers write

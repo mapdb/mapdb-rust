@@ -364,6 +364,65 @@ fn lazy_range_set_mirrors_map() {
     assert_eq!(s.range(40..20).count(), 0); // inverted -> empty
 }
 
+// ── Iteration triple: `IntoIterator` for `&Self` and `Self`, into_keys/values ──
+
+#[test]
+fn map_borrowing_and_owned_into_iter() {
+    let m = ImmutableSortedMap::from_sorted(&[10, 20, 30], &[100, 200, 300]);
+    // `for (k, v) in &map` (borrowing) — same as entries().
+    let mut borrowed = Vec::new();
+    for (k, v) in &m {
+        borrowed.push((*k, *v));
+    }
+    assert_eq!(borrowed, vec![(10, 100), (20, 200), (30, 300)]);
+    let via_entries: Vec<(i32, i32)> = m.entries().map(|(k, v)| (*k, *v)).collect();
+    assert_eq!(borrowed, via_entries);
+    // Owned `for (k, v) in map` consumes and yields (K, V) ascending.
+    let owned: Vec<(i32, i32)> = m.into_iter().collect();
+    assert_eq!(owned, vec![(10, 100), (20, 200), (30, 300)]);
+}
+
+#[test]
+fn map_owned_into_iter_double_ended_and_exact() {
+    let m = ImmutableSortedMap::from_sorted(&[1, 2, 3, 4], &[10, 20, 30, 40]);
+    let mut it = m.into_iter();
+    assert_eq!(it.len(), 4);
+    assert_eq!(it.next(), Some((1, 10)));
+    assert_eq!(it.next_back(), Some((4, 40)));
+    assert_eq!(it.len(), 2);
+    let rest: Vec<(i32, i32)> = it.collect();
+    assert_eq!(rest, vec![(2, 20), (3, 30)]);
+}
+
+#[test]
+fn map_into_keys_into_values() {
+    let m = ImmutableSortedMap::from_sorted(&[10, 20, 30], &[300, 100, 200]);
+    let ks: Vec<i32> = m.clone().into_keys().collect();
+    assert_eq!(ks, vec![10, 20, 30]);
+    // into_values is ascending-KEY order (not value-sorted).
+    let vs: Vec<i32> = m.into_values().collect();
+    assert_eq!(vs, vec![300, 100, 200]);
+}
+
+#[test]
+fn set_borrowing_and_owned_into_iter() {
+    let s = ImmutableSortedSet::from_sorted(&[5, 10, 15]);
+    let borrowed: Vec<i32> = (&s).into_iter().copied().collect();
+    assert_eq!(borrowed, vec![5, 10, 15]);
+    let mut sum = 0;
+    for x in &s {
+        sum += *x;
+    }
+    assert_eq!(sum, 30);
+    // Owned + double-ended (std vec::IntoIter).
+    let mut it = s.into_iter();
+    assert_eq!(it.len(), 3);
+    assert_eq!(it.next(), Some(5));
+    assert_eq!(it.next_back(), Some(15));
+    assert_eq!(it.next(), Some(10));
+    assert_eq!(it.next(), None);
+}
+
 // ── Large flat-array parity (paging-invariance is trivial for flat) ──
 
 #[test]

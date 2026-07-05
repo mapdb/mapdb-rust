@@ -221,6 +221,38 @@ impl<T: Ord + Copy> Range<T> {
         Self::from_cuts(Cut::Below(v), Cut::Above(v))
     }
 
+    /// Build a [`Range`] from any [`std::ops::RangeBounds`] — the std-syntax
+    /// counterpart to the Guava-parity factories above. Each std bound maps
+    /// onto a [`Cut`]: `Unbounded` → `BelowAll` (lower) / `AboveAll` (upper),
+    /// `Included` → `Below` (lower) / `Above` (upper), `Excluded` → `Above`
+    /// (lower) / `Below` (upper). So `a..b` is `closed_open(a, b)`, `a..=b` is
+    /// `closed(a, b)`, `a..` is `at_least(a)`, `..b` is `less_than(b)`, `..=b`
+    /// is `at_most(b)`, `..` is `all()`, and an explicit
+    /// `(Excluded(a), Included(b))` tuple is `open_closed(a, b)`. The six
+    /// concrete `From<std::ops::Range*>` impls delegate here.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the resulting lower cut exceeds the upper — a reversed range
+    /// such as `5..2` or `5..=2`, or the empty-but-invalid open `(v, v)` — the
+    /// same trap the panicking factories (`open`/`closed`/…) apply. `a..a`
+    /// (`closed_open`) is the valid empty range; `a..=a` is the singleton
+    /// `[a, a]`.
+    pub fn from_bounds<R: std::ops::RangeBounds<T>>(r: R) -> Self {
+        use std::ops::Bound;
+        let lower = match r.start_bound() {
+            Bound::Unbounded => Cut::BelowAll,
+            Bound::Included(&a) => Cut::Below(a),
+            Bound::Excluded(&a) => Cut::Above(a),
+        };
+        let upper = match r.end_bound() {
+            Bound::Unbounded => Cut::AboveAll,
+            Bound::Included(&b) => Cut::Above(b),
+            Bound::Excluded(&b) => Cut::Below(b),
+        };
+        Self::from_cuts(lower, upper)
+    }
+
     // ---- queries ----------------------------------------------------------
 
     /// Whether `x` falls within the range (normative `contains`).
@@ -419,6 +451,55 @@ impl<T: Ord + Copy + fmt::Display> fmt::Display for Range<T> {
             Cut::Above(v) => write!(f, "{}]", v),
             Cut::BelowAll => write!(f, "-\u{221e})"),
         }
+    }
+}
+
+// ---- std range-syntax interop (T4) ---------------------------------------
+//
+// Each concrete `std::ops::Range*` literal converts to the equivalent Guava
+// `Range<T>` via `from_bounds`, so callers can write `Range::from(2..5)` /
+// `(2..5).into()` instead of `Range::closed_open(2, 5)`. Reversed two-bounded
+// inputs panic (see `from_bounds`), matching the panicking factories.
+
+impl<T: Ord + Copy> From<std::ops::Range<T>> for Range<T> {
+    /// `a..b` → `closed_open(a, b)`. **Panics** if `a > b`.
+    fn from(r: std::ops::Range<T>) -> Self {
+        Self::from_bounds(r)
+    }
+}
+
+impl<T: Ord + Copy> From<std::ops::RangeInclusive<T>> for Range<T> {
+    /// `a..=b` → `closed(a, b)`. **Panics** if `a > b`.
+    fn from(r: std::ops::RangeInclusive<T>) -> Self {
+        Self::from_bounds(r)
+    }
+}
+
+impl<T: Ord + Copy> From<std::ops::RangeFrom<T>> for Range<T> {
+    /// `a..` → `at_least(a)`.
+    fn from(r: std::ops::RangeFrom<T>) -> Self {
+        Self::from_bounds(r)
+    }
+}
+
+impl<T: Ord + Copy> From<std::ops::RangeTo<T>> for Range<T> {
+    /// `..b` → `less_than(b)`.
+    fn from(r: std::ops::RangeTo<T>) -> Self {
+        Self::from_bounds(r)
+    }
+}
+
+impl<T: Ord + Copy> From<std::ops::RangeToInclusive<T>> for Range<T> {
+    /// `..=b` → `at_most(b)`.
+    fn from(r: std::ops::RangeToInclusive<T>) -> Self {
+        Self::from_bounds(r)
+    }
+}
+
+impl<T: Ord + Copy> From<std::ops::RangeFull> for Range<T> {
+    /// `..` → `all()`.
+    fn from(_: std::ops::RangeFull) -> Self {
+        Self::all()
     }
 }
 
@@ -660,5 +741,73 @@ mod tests {
         assert_eq!(format!("{}", Range::<i32>::at_least(1)), "[1, +\u{221e})");
         assert_eq!(format!("{}", Range::<i32>::less_than(5)), "(-\u{221e}, 5)");
         assert_eq!(format!("{}", Range::<i32>::all()), "(-\u{221e}, +\u{221e})");
+    }
+
+    // ---- std range-syntax interop (T4) ----
+
+    #[test]
+    fn from_std_range_shapes_map_to_guava_factories() {
+        assert_eq!(Range::<i32>::from(2..5), Range::closed_open(2, 5));
+        assert_eq!(Range::<i32>::from(2..=5), Range::closed(2, 5));
+        assert_eq!(Range::<i32>::from(2..), Range::at_least(2));
+        assert_eq!(Range::<i32>::from(..5), Range::less_than(5));
+        assert_eq!(Range::<i32>::from(..=5), Range::at_most(5));
+        assert_eq!(Range::<i32>::from(..), Range::all());
+        // `.into()` in argument position picks the right impl.
+        let r: Range<i32> = (2..5).into();
+        assert_eq!(r, Range::closed_open(2, 5));
+    }
+
+    #[test]
+    fn from_bounds_covers_excluded_lower_and_tuples() {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+        // Owned tuple bounds (avoid the &-bound E0283 ambiguity).
+        assert_eq!(
+            Range::<i32>::from_bounds((Excluded(2), Included(5))),
+            Range::open_closed(2, 5)
+        );
+        assert_eq!(
+            Range::<i32>::from_bounds((Excluded(2), Excluded(5))),
+            Range::open(2, 5)
+        );
+        assert_eq!(
+            Range::<i32>::from_bounds((Included(2), Unbounded)),
+            Range::at_least(2)
+        );
+        assert_eq!(
+            Range::<i32>::from_bounds((Excluded(2), Unbounded)),
+            Range::greater_than(2)
+        );
+        assert_eq!(
+            Range::<i32>::from_bounds::<std::ops::RangeFull>(..),
+            Range::all()
+        );
+    }
+
+    #[test]
+    fn from_std_range_edge_and_extremes() {
+        // `a..a` half-open is the valid empty range (does not panic).
+        let empty: Range<i32> = (5..5).into();
+        assert_eq!(empty, Range::closed_open(5, 5));
+        assert!(!empty.contains(5));
+        // `a..=a` is the singleton.
+        assert_eq!(Range::<i32>::from(5..=5), Range::singleton(5));
+        // Signed extremes: no `±1` arithmetic, so no overflow.
+        assert!(Range::<i32>::from(i32::MIN..i32::MAX).contains(0));
+        assert!(Range::<i32>::from(i32::MIN..=i32::MAX).contains(i32::MAX));
+    }
+
+    #[test]
+    #[should_panic(expected = "lower cut must not exceed upper cut")]
+    #[allow(clippy::reversed_empty_ranges)] // intentionally reversed — must trap
+    fn from_reversed_half_open_panics() {
+        let _: Range<i32> = (5..2).into();
+    }
+
+    #[test]
+    #[should_panic(expected = "lower cut must not exceed upper cut")]
+    #[allow(clippy::reversed_empty_ranges)] // intentionally reversed — must trap
+    fn from_reversed_inclusive_panics() {
+        let _: Range<i32> = Range::from(5..=2);
     }
 }

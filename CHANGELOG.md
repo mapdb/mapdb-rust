@@ -6,6 +6,16 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **Guava `Range<T>` gains std range-syntax interop** (blueprint T4). A new
+  `Range::from_bounds<R: RangeBounds<T>>` constructor plus six
+  `From<std::ops::Range*>` impls let callers build the value-type `Range` from std
+  syntax: `Range::from(2..5)` / `(2..5).into()` == `Range::closed_open(2, 5)`,
+  `2..=5` → `closed`, `2..` → `at_least`, `..5` → `less_than`, `..=5` → `at_most`,
+  `..` → `all`, and an owned `(Excluded(a), Included(b))` tuple → `open_closed`.
+  Each std bound maps onto a `Cut` (no `±1` arithmetic, so signed extremes are
+  safe); a reversed two-bounded input (`5..2`, `5..=2`) **panics** like the
+  existing `open`/`closed` factories, while `a..a` is the valid empty range and
+  `a..=a` the singleton. Additive.
 - **Lazy `RangeBounds` iterator on `ImmutableSortedMap`/`Set`** (blueprint T4).
   New `range<R: RangeBounds<K>>(r)` methods return a **lazy, double-ended,
   borrowing** iterator (`SortedRangeIter` / `SortedRangeElemIter`) — callers write

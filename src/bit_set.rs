@@ -227,6 +227,65 @@ impl BitSet {
         }
     }
 
+    // ── Owned set algebra ───────────────────────────────────────────
+    //
+    // The non-mutating counterparts of the `*_in_place` bit ops, returning a
+    // fresh `BitSet` (set-conceptual names, consistent with `OpenHashSet`).
+
+    /// The union `self ∪ other` — owned counterpart of
+    /// [`or_in_place`](BitSet::or_in_place).
+    pub fn union(&self, other: &BitSet) -> BitSet {
+        let mut out = self.clone();
+        out.or_in_place(other);
+        out
+    }
+
+    /// The intersection `self ∩ other` — owned counterpart of
+    /// [`and_in_place`](BitSet::and_in_place).
+    pub fn intersection(&self, other: &BitSet) -> BitSet {
+        let mut out = self.clone();
+        out.and_in_place(other);
+        out
+    }
+
+    /// The difference `self \ other` — owned counterpart of
+    /// [`and_not_in_place`](BitSet::and_not_in_place).
+    pub fn difference(&self, other: &BitSet) -> BitSet {
+        let mut out = self.clone();
+        out.and_not_in_place(other);
+        out
+    }
+
+    /// The symmetric difference `self △ other` — owned counterpart of
+    /// [`xor_in_place`](BitSet::xor_in_place).
+    pub fn symmetric_difference(&self, other: &BitSet) -> BitSet {
+        let mut out = self.clone();
+        out.xor_in_place(other);
+        out
+    }
+
+    /// `true` if every set bit of `self` is also set in `other` (`self ⊆ other`).
+    /// The empty set is a subset of everything.
+    pub fn is_subset(&self, other: &BitSet) -> bool {
+        // self ⊆ other  ⟺  (self AND NOT other) is empty. Words of `other`
+        // beyond its length are 0, so any self-bit there breaks the subset.
+        self.words.iter().enumerate().all(|(i, &sw)| {
+            let ow = other.words.get(i).copied().unwrap_or(0);
+            sw & !ow == 0
+        })
+    }
+
+    /// `true` if every set bit of `other` is also set in `self` (`self ⊇ other`).
+    pub fn is_superset(&self, other: &BitSet) -> bool {
+        other.is_subset(self)
+    }
+
+    /// `true` if `self` and `other` share no set bit (complement of
+    /// [`intersects`](BitSet::intersects)).
+    pub fn is_disjoint(&self, other: &BitSet) -> bool {
+        !self.intersects(other)
+    }
+
     /// Index of the next set bit at or after `from`, or `None` if there
     /// is no later set bit.
     pub fn next_set_bit(&self, from: usize) -> Option<usize> {
@@ -281,6 +340,25 @@ impl PartialEq for BitSet {
 }
 
 impl Eq for BitSet {}
+
+/// Builds a bit set from an iterator of bit indices (`iter.collect()`); each
+/// index is `set`. Panics on `usize::MAX` (see [`set`](BitSet::set)).
+impl FromIterator<usize> for BitSet {
+    fn from_iter<I: IntoIterator<Item = usize>>(iter: I) -> Self {
+        let mut bs = BitSet::new();
+        bs.extend(iter);
+        bs
+    }
+}
+
+/// Sets each yielded bit index into an existing bit set.
+impl Extend<usize> for BitSet {
+    fn extend<I: IntoIterator<Item = usize>>(&mut self, iter: I) {
+        for bit in iter {
+            self.set(bit);
+        }
+    }
+}
 
 /// Iterator over the indices of the set bits, ascending.
 pub struct BitSetIter<'a> {
@@ -546,5 +624,44 @@ mod tests {
         // empty.
         let e = BitSet::from_sorted_indices(Vec::<usize>::new(), DuplicatePolicy::Error).unwrap();
         assert_eq!(e.cardinality(), 0);
+    }
+
+    #[test]
+    fn from_iter_extend_and_owned_algebra() {
+        let a: BitSet = [1usize, 3, 5, 200].into_iter().collect();
+        let b: BitSet = [3usize, 5, 7].into_iter().collect();
+
+        assert_eq!(a.union(&b).to_vec(), vec![1, 3, 5, 7, 200]);
+        assert_eq!(a.intersection(&b).to_vec(), vec![3, 5]);
+        assert_eq!(a.difference(&b).to_vec(), vec![1, 200]);
+        assert_eq!(b.difference(&a).to_vec(), vec![7]);
+        assert_eq!(a.symmetric_difference(&b).to_vec(), vec![1, 7, 200]);
+
+        // Owned ops leave the operands unchanged.
+        assert_eq!(a.to_vec(), vec![1, 3, 5, 200]);
+
+        // extend adds bits.
+        let mut c = b.clone();
+        c.extend([100usize, 3]);
+        assert_eq!(c.to_vec(), vec![3, 5, 7, 100]);
+    }
+
+    #[test]
+    fn relational_predicates() {
+        let a: BitSet = [1usize, 2, 3, 300].into_iter().collect();
+        let sub: BitSet = [2usize, 3].into_iter().collect();
+        let disj: BitSet = [7usize, 8].into_iter().collect();
+        let empty = BitSet::new();
+
+        assert!(sub.is_subset(&a));
+        assert!(!a.is_subset(&sub));
+        assert!(a.is_superset(&sub));
+        assert!(a.is_disjoint(&disj));
+        assert!(!a.is_disjoint(&sub));
+        // subset check where a self-bit lies beyond other's word length.
+        assert!(!a.is_subset(&sub)); // 1 and 300 not in sub
+        assert!(empty.is_subset(&a));
+        assert!(a.is_superset(&empty));
+        assert!(empty.is_disjoint(&a));
     }
 }

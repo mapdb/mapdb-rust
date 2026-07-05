@@ -6,6 +6,14 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **Owned set algebra + relational predicates + `FromIterator`/`Extend` on
+  `BitSet`** (blueprint T5). `BitSet` had only in-place bit ops
+  (`and_in_place`/`or_in_place`/…); it gained the non-mutating owned counterparts
+  `union`/`intersection`/`difference`/`symmetric_difference` (set-conceptual names,
+  consistent with `OpenHashSet`), the relational predicates `is_subset`/
+  `is_superset`/`is_disjoint` (the last complements the existing `intersects`), and
+  `FromIterator<usize>` + `Extend<usize>` so a bit set builds from an iterator of
+  indices (`[1, 3, 5].into_iter().collect()`). Purely additive.
 - **Set algebra + relational predicates on `OpenHashSet`** (blueprint T5). The
   open-addressing set kernel gained `union`, `intersection`, `difference`,
   `symmetric_difference` (eager, owned `Self`, seeded with `self`'s cloned hasher;

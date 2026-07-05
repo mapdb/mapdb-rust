@@ -6,6 +6,12 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`object::ArrayStack` bound loosening + ergonomics** (blueprint T5/T8). The core
+  stack API (`len`/`is_empty`/`iter`/`peek`/`push`/`pop`/`clear`/`peek_at`), the
+  `Default`/`FromIterator`/`Extend`/`IntoIterator` impls, and `Eq` no longer
+  spuriously require `T: PartialEq` — only `contains` and `PartialEq` do — so a
+  stack of non-`PartialEq` values (e.g. closures) now works (bound loosening is
+  non-breaking). Added `with_capacity`, `peek_mut`, `iter_mut`, and `reserve`.
 - **`VecDeque`-parity surface on `ArrayDeque`** (blueprint T5). Added
   `peek_front_mut`/`peek_back_mut` (mutable ends), positional `get`/`get_mut`
   (0 = front), `swap`, in-place `retain`, `truncate`, and `reserve` — all thin

@@ -10,15 +10,22 @@ pub struct ArrayStack<T> {
     items: Vec<T>,
 }
 
+// ---- core stack API (formerly the trait tower) -----------------------------
+//
+// Only `contains` and the equality impls genuinely need `T: PartialEq`; the rest
+// of the surface is `T`-generic, so an `ArrayStack` of non-`PartialEq` values
+// (closures, non-comparable structs) is fully usable.
+
 impl<T> ArrayStack<T> {
     pub fn new() -> Self {
         ArrayStack { items: Vec::new() }
     }
-}
-
-// ---- core stack API (formerly the trait tower) -----------------------------
-
-impl<T: PartialEq> ArrayStack<T> {
+    /// An empty stack with room for `cap` elements before reallocating.
+    pub fn with_capacity(cap: usize) -> Self {
+        ArrayStack {
+            items: Vec::with_capacity(cap),
+        }
+    }
     /// The number of elements.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -27,17 +34,21 @@ impl<T: PartialEq> ArrayStack<T> {
     pub fn is_empty(&self) -> bool {
         self.items.is_empty()
     }
-    /// Whether `value` is present.
-    pub fn contains(&self, value: &T) -> bool {
-        self.items.contains(value)
-    }
     /// Iterate top-to-bottom (most recently pushed first).
     pub fn iter(&self) -> std::iter::Rev<std::slice::Iter<'_, T>> {
         self.items.iter().rev()
     }
+    /// Mutably iterate top-to-bottom.
+    pub fn iter_mut(&mut self) -> std::iter::Rev<std::slice::IterMut<'_, T>> {
+        self.items.iter_mut().rev()
+    }
     /// The top element without removing it.
     pub fn peek(&self) -> Option<&T> {
         self.items.last()
+    }
+    /// Mutable reference to the top element without removing it.
+    pub fn peek_mut(&mut self) -> Option<&mut T> {
+        self.items.last_mut()
     }
     /// Push `value` onto the top.
     pub fn push(&mut self, value: T) {
@@ -51,9 +62,12 @@ impl<T: PartialEq> ArrayStack<T> {
     pub fn clear(&mut self) {
         self.items.clear();
     }
-}
-
-impl<T: PartialEq> ArrayStack<T> {
+    /// Reserves capacity for at least `additional` more elements.
+    pub fn reserve(&mut self, additional: usize) {
+        self.items.reserve(additional);
+    }
+    /// The element `depth` positions below the top (`depth = 0` is the top),
+    /// or `None` if the stack is shallower than that.
     pub fn peek_at(&self, depth: usize) -> Option<&T> {
         if depth >= self.items.len() {
             return None;
@@ -62,7 +76,14 @@ impl<T: PartialEq> ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq> Default for ArrayStack<T> {
+impl<T: PartialEq> ArrayStack<T> {
+    /// Whether `value` is present.
+    pub fn contains(&self, value: &T) -> bool {
+        self.items.contains(value)
+    }
+}
+
+impl<T> Default for ArrayStack<T> {
     fn default() -> Self {
         Self::new()
     }
@@ -73,7 +94,7 @@ impl<T: PartialEq> Default for ArrayStack<T> {
 // Iteration order is top-to-bottom (matching `iter` and `peek`):
 // the most recently pushed element comes first.
 
-impl<'a, T: PartialEq> IntoIterator for &'a ArrayStack<T> {
+impl<'a, T> IntoIterator for &'a ArrayStack<T> {
     type Item = &'a T;
     type IntoIter = std::iter::Rev<std::slice::Iter<'a, T>>;
     fn into_iter(self) -> Self::IntoIter {
@@ -81,7 +102,7 @@ impl<'a, T: PartialEq> IntoIterator for &'a ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq> IntoIterator for ArrayStack<T> {
+impl<T> IntoIterator for ArrayStack<T> {
     type Item = T;
     type IntoIter = std::iter::Rev<std::vec::IntoIter<T>>;
     fn into_iter(self) -> Self::IntoIter {
@@ -89,7 +110,7 @@ impl<T: PartialEq> IntoIterator for ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq> FromIterator<T> for ArrayStack<T> {
+impl<T> FromIterator<T> for ArrayStack<T> {
     /// Pushes items in iteration order; the last item becomes the top.
     fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         ArrayStack {
@@ -98,7 +119,7 @@ impl<T: PartialEq> FromIterator<T> for ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq> Extend<T> for ArrayStack<T> {
+impl<T> Extend<T> for ArrayStack<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         self.items.extend(iter);
     }
@@ -111,7 +132,7 @@ impl<T: PartialEq> PartialEq for ArrayStack<T> {
     }
 }
 
-impl<T: PartialEq + Eq> Eq for ArrayStack<T> {}
+impl<T: Eq> Eq for ArrayStack<T> {}
 
 #[cfg(test)]
 mod tests {
@@ -176,5 +197,31 @@ mod tests {
         let c = ArrayStack::from_iter([3, 2, 1]);
         assert_eq!(a, b);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn peek_mut_and_iter_mut() {
+        let mut s: ArrayStack<i32> = ArrayStack::with_capacity(4);
+        s.extend([1, 2, 3]); // top = 3
+        *s.peek_mut().unwrap() = 30;
+        assert_eq!(s.peek(), Some(&30));
+        // iter_mut is top-to-bottom; double each.
+        for v in s.iter_mut() {
+            *v *= 10;
+        }
+        let v: Vec<i32> = s.iter().copied().collect();
+        assert_eq!(v, vec![300, 20, 10]);
+    }
+
+    #[test]
+    fn works_for_non_partialeq_element() {
+        // A stack of closures (not `PartialEq`) must compile and operate — the
+        // core API no longer over-requires `T: PartialEq`.
+        let mut s: ArrayStack<Box<dyn Fn() -> i32>> = ArrayStack::new();
+        s.push(Box::new(|| 1));
+        s.push(Box::new(|| 2));
+        assert_eq!(s.len(), 2);
+        assert_eq!((s.peek().unwrap())(), 2);
+        assert_eq!((s.pop().unwrap())(), 2);
     }
 }

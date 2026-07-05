@@ -15,7 +15,11 @@ so a breaking change is a **minor** version bump.
   Each std bound maps onto a `Cut` (no `±1` arithmetic, so signed extremes are
   safe); a reversed two-bounded input (`5..2`, `5..=2`) **panics** like the
   existing `open`/`closed` factories, while `a..a` is the valid empty range and
-  `a..=a` the singleton. Additive.
+  `a..=a` the singleton. Additive. `RangeSet::add`/`add_all`/`remove` and
+  `RangeMap::put`/`put_coalescing`/`remove` now take `impl Into<Range<T>>`, so the
+  std syntax flows to them directly — `set.add(2..5)`, `map.put(2..=5, v)`,
+  `set.add_all([2..4, 6..8])` — with no explicit `.into()` (passing a `Range<T>`
+  is unchanged).
 - **Lazy `RangeBounds` iterator on `ImmutableSortedMap`/`Set`** (blueprint T4).
   New `range<R: RangeBounds<K>>(r)` methods return a **lazy, double-ended,
   borrowing** iterator (`SortedRangeIter` / `SortedRangeElemIter`) — callers write

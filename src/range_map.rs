@@ -53,7 +53,11 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
     /// value); the new `(range, value)` is then inserted. A **cut-empty**
     /// `range` is a **no-op**. `put` does **not** coalesce — an adjacent equal
     /// value stays a distinct entry.
-    pub fn put(&mut self, range: Range<T>, value: V) {
+    ///
+    /// `range` may be anything convertible into a [`Range<T>`], so std range
+    /// syntax works: `map.put(2..5, v)`, `map.put(2..=5, v)`.
+    pub fn put(&mut self, range: impl Into<Range<T>>, value: V) {
+        let range = range.into();
         if range.is_empty() {
             return;
         }
@@ -66,7 +70,8 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
     /// **equals** `value`, producing one entry spanning the union. Neighbours
     /// with a different value are left untouched (clipped by the `put` step as
     /// usual).
-    pub fn put_coalescing(&mut self, range: Range<T>, value: V) {
+    pub fn put_coalescing(&mut self, range: impl Into<Range<T>>, value: V) {
+        let range = range.into();
         if range.is_empty() {
             return;
         }
@@ -116,7 +121,10 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
 
     /// Unmap `range`, **splitting** any entry straddling either boundary (both
     /// fragments keep the old value). A cut-empty `range` is a **no-op**.
-    pub fn remove(&mut self, range: Range<T>) {
+    ///
+    /// `range` may be anything convertible into a [`Range<T>`] (`map.remove(2..5)`).
+    pub fn remove(&mut self, range: impl Into<Range<T>>) {
+        let range = range.into();
         if range.is_empty() {
             return;
         }
@@ -301,6 +309,30 @@ mod tests {
         assert_eq!(m.get(3), Some(&100));
         assert_eq!(m.get(6), None);
         assert_eq!(m.get(8), Some(&200));
+    }
+
+    #[test]
+    fn accepts_std_range_syntax_via_into() {
+        let mut m: RangeMap<i32, i32> = RangeMap::new();
+        m.put(1..5, 100); // half-open std literal
+        m.put(8..=9, 200); // inclusive
+        assert_eq!(
+            collected(&m),
+            vec![(Range::closed_open(1, 5), 100), (Range::closed(8, 9), 200)]
+        );
+        assert_eq!(m.get(3), Some(&100));
+        assert_eq!(m.get(8), Some(&200));
+        // put_coalescing via std syntax merges an equal-valued abutter.
+        m.put_coalescing(5..8, 100);
+        m.put_coalescing(0..1, 100);
+        assert_eq!(m.get(6), Some(&100));
+        // remove via std syntax.
+        m.remove(2..4);
+        assert_eq!(m.get(3), None);
+        assert_eq!(m.get(1), Some(&100));
+        // Explicit `Range<T>` still accepted.
+        m.put(Range::closed(20, 22), 999);
+        assert_eq!(m.get(21), Some(&999));
     }
 
     #[test]

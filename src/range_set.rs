@@ -64,7 +64,11 @@ impl<T: Ord + Copy> RangeSet<T> {
     /// `add(open(1, 2))` over `i32` **stores** the range. The merged range
     /// keeps the **outer** cuts of every connected member (the cut `min`/`max`,
     /// no `±1` math).
-    pub fn add(&mut self, range: Range<T>) {
+    ///
+    /// Accepts anything convertible into a [`Range<T>`], so std range syntax
+    /// works directly: `set.add(2..5)`, `set.add(2..=5)`, `set.add(2..)`.
+    pub fn add(&mut self, range: impl Into<Range<T>>) {
+        let range = range.into();
         // Empty-range no-op (cut-empty), per the normative empty-range rule.
         if range.is_empty() {
             return;
@@ -90,8 +94,9 @@ impl<T: Ord + Copy> RangeSet<T> {
     }
 
     /// [`add`](RangeSet::add) each range; the final normal form is
-    /// order-independent.
-    pub fn add_all<I: IntoIterator<Item = Range<T>>>(&mut self, ranges: I) {
+    /// order-independent. Each item may be anything convertible into a
+    /// [`Range<T>`], so `set.add_all([2..5, 7..=9])` works.
+    pub fn add_all<R: Into<Range<T>>, I: IntoIterator<Item = R>>(&mut self, ranges: I) {
         for r in ranges {
             self.add(r);
         }
@@ -101,7 +106,10 @@ impl<T: Ord + Copy> RangeSet<T> {
     /// boundary. A cut-empty `range` is a **no-op**. The split is pure cut
     /// arithmetic — the boundary cuts flip (`remove([4, 7))` from `[1, 9]`
     /// leaves `[1, 4)` and `[7, 9]`), never `±1`.
-    pub fn remove(&mut self, range: Range<T>) {
+    ///
+    /// Accepts anything convertible into a [`Range<T>`] (`set.remove(2..5)`).
+    pub fn remove(&mut self, range: impl Into<Range<T>>) {
+        let range = range.into();
         if range.is_empty() {
             return;
         }
@@ -327,6 +335,35 @@ mod tests {
         assert!(s.contains(4));
         assert!(!s.contains(10));
         assert_eq!(s.span(), Some(Range::closed(1, 9)));
+    }
+
+    #[test]
+    fn accepts_std_range_syntax_via_into() {
+        let mut s: RangeSet<i32> = RangeSet::new();
+        // std half-open literal flows straight into `add` (no `.into()`).
+        s.add(1..5);
+        s.add(10..=12); // inclusive
+        assert_eq!(
+            collected(&s),
+            vec![Range::closed_open(1, 5), Range::closed(10, 12)]
+        );
+        // `add_all` with heterogeneous-shaped std ranges.
+        let mut s2: RangeSet<i32> = RangeSet::new();
+        s2.add_all([2..4, 6..8]);
+        assert_eq!(
+            collected(&s2),
+            vec![Range::closed_open(2, 4), Range::closed_open(6, 8)]
+        );
+        // `remove` via std syntax splits as usual.
+        let mut s3 = rs(&[Range::closed(1, 9)]);
+        s3.remove(4..7);
+        assert_eq!(
+            collected(&s3),
+            vec![Range::closed_open(1, 4), Range::closed(7, 9)]
+        );
+        // Passing an explicit `Range<T>` still works unchanged.
+        s3.add(Range::closed(20, 22));
+        assert!(s3.contains(21));
     }
 
     #[test]

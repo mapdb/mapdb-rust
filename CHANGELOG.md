@@ -6,6 +6,14 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`Vec`-parity surface on `object::ArrayList`** (blueprint T5). Added the
+  positional / mutation methods that were missing next to the existing
+  by-value `remove`/`push`/`set`: `pop`, `insert(index, value)`,
+  `remove_at(index)` (positional), `swap_remove`, `swap`, `truncate`, `retain`
+  (in-place, vs the `Vec`-returning `select`/`reject`), `split_off`, `get_mut`,
+  `first`, `last`, `as_mut_slice`, `reserve`, `binary_search` (`T: Ord`), and
+  `Index<usize>`/`IndexMut<usize>` so `list[i]` and `list[i] = v` work. All thin
+  delegations to the backing `Vec`; purely additive.
 - **Set algebra + relational predicates on `TreeSet`** (blueprint T5), plus a new
   `TreeMap::comparator_ref(&self) -> &C` accessor. `TreeSet` gained `union`,
   `intersection`, `difference`, `symmetric_difference` (owned `Self` ordered by a

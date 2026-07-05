@@ -40,6 +40,95 @@ impl<T> ArrayList<T> {
     pub fn as_slice(&self) -> &[T] {
         &self.items
     }
+
+    // ── Vec-parity positional / mutation surface ────────────────────
+
+    /// Mutable view of the backing storage.
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        &mut self.items
+    }
+
+    /// Removes and returns the last element, or `None` if empty.
+    pub fn pop(&mut self) -> Option<T> {
+        self.items.pop()
+    }
+
+    /// First element, or `None`.
+    pub fn first(&self) -> Option<&T> {
+        self.items.first()
+    }
+
+    /// Last element, or `None`.
+    pub fn last(&self) -> Option<&T> {
+        self.items.last()
+    }
+
+    /// Mutable reference to the element at `index`, if any.
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        self.items.get_mut(index)
+    }
+
+    /// Inserts `value` at `index`, shifting later elements right.
+    ///
+    /// # Panics
+    /// Panics if `index > len()` (matches [`Vec::insert`]).
+    pub fn insert(&mut self, index: usize, value: T) {
+        self.items.insert(index, value);
+    }
+
+    /// Removes and returns the element at `index`, shifting later elements
+    /// left (positional remove — the counterpart to the by-value `remove`).
+    ///
+    /// # Panics
+    /// Panics if `index >= len()` (matches [`Vec::remove`]).
+    pub fn remove_at(&mut self, index: usize) -> T {
+        self.items.remove(index)
+    }
+
+    /// Removes the element at `index` by swapping in the last element (O(1),
+    /// does not preserve order).
+    ///
+    /// # Panics
+    /// Panics if `index >= len()` (matches [`Vec::swap_remove`]).
+    pub fn swap_remove(&mut self, index: usize) -> T {
+        self.items.swap_remove(index)
+    }
+
+    /// Swaps the elements at `a` and `b`.
+    ///
+    /// # Panics
+    /// Panics if either index is out of bounds.
+    pub fn swap(&mut self, a: usize, b: usize) {
+        self.items.swap(a, b);
+    }
+
+    /// Shortens the list to `len` elements, dropping the rest. No-op if
+    /// `len >= len()`.
+    pub fn truncate(&mut self, len: usize) {
+        self.items.truncate(len);
+    }
+
+    /// Retains only the elements for which `keep(&elem)` returns `true`,
+    /// in order (in-place — unlike `select`/`reject`, which return a new `Vec`).
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, keep: F) {
+        self.items.retain(keep);
+    }
+
+    /// Reserves capacity for at least `additional` more elements.
+    pub fn reserve(&mut self, additional: usize) {
+        self.items.reserve(additional);
+    }
+
+    /// Splits the list in two at `at`, returning a new list with the elements
+    /// `[at, len)` and leaving `self` with `[0, at)`.
+    ///
+    /// # Panics
+    /// Panics if `at > len()` (matches [`Vec::split_off`]).
+    pub fn split_off(&mut self, at: usize) -> Self {
+        ArrayList {
+            items: self.items.split_off(at),
+        }
+    }
 }
 
 // ---- core + functional API (formerly the trait tower) ----------------------
@@ -160,6 +249,14 @@ impl<T: PartialEq + Ord> ArrayList<T> {
     pub fn sort(&mut self) {
         self.items.sort();
     }
+
+    /// Binary-searches a **sorted** list for `x`. Returns `Ok(i)` if found at
+    /// index `i`, or `Err(i)` with the insertion point that keeps it sorted
+    /// (matches [`slice::binary_search`]). The result is meaningful only if the
+    /// list is sorted ascending.
+    pub fn binary_search(&self, x: &T) -> Result<usize, usize> {
+        self.items.binary_search(x)
+    }
 }
 
 impl<T: PartialEq + Clone> ArrayList<T> {
@@ -193,6 +290,21 @@ impl<T: std::fmt::Display + PartialEq> std::fmt::Display for ArrayList<T> {
             write!(f, "{}", v)?;
         }
         write!(f, "]")
+    }
+}
+
+/// `list[i]` indexing (panics on out-of-bounds, like `Vec`).
+impl<T> std::ops::Index<usize> for ArrayList<T> {
+    type Output = T;
+    fn index(&self, index: usize) -> &T {
+        &self.items[index]
+    }
+}
+
+/// `list[i] = v` mutable indexing (panics on out-of-bounds, like `Vec`).
+impl<T> std::ops::IndexMut<usize> for ArrayList<T> {
+    fn index_mut(&mut self, index: usize) -> &mut T {
+        &mut self.items[index]
     }
 }
 
@@ -343,5 +455,53 @@ mod tests {
         assert_eq!(list.to_vec(), vec![3, 1, 2, 1]);
         let empty: ArrayList<i32> = ArrayList::bulk_load(Vec::new());
         assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn vec_parity_positional_ops() {
+        let mut a: ArrayList<i32> = [10, 20, 30, 40].into_iter().collect();
+        assert_eq!(a.first(), Some(&10));
+        assert_eq!(a.last(), Some(&40));
+
+        a.insert(1, 15); // [10,15,20,30,40]
+        assert_eq!(a.as_slice(), &[10, 15, 20, 30, 40]);
+        assert_eq!(a.remove_at(0), 10); // [15,20,30,40]
+        assert_eq!(a.as_slice(), &[15, 20, 30, 40]);
+        assert_eq!(a.pop(), Some(40)); // [15,20,30]
+        assert_eq!(a.swap_remove(0), 15); // [30,20] (last swapped in)
+        assert_eq!(a.as_slice(), &[30, 20]);
+
+        a.swap(0, 1); // [20,30]
+        assert_eq!(a.as_slice(), &[20, 30]);
+        *a.get_mut(0).unwrap() = 99;
+        assert_eq!(a[0], 99);
+        a[1] = 88; // IndexMut
+        assert_eq!(a.as_slice(), &[99, 88]);
+
+        a.truncate(1);
+        assert_eq!(a.as_slice(), &[99]);
+
+        let mut b: ArrayList<i32> = (0..6).collect();
+        b.retain(|&x| x % 2 == 0);
+        assert_eq!(b.as_slice(), &[0, 2, 4]);
+        let tail = b.split_off(1);
+        assert_eq!(b.as_slice(), &[0]);
+        assert_eq!(tail.as_slice(), &[2, 4]);
+    }
+
+    #[test]
+    fn vec_parity_binary_search() {
+        let a: ArrayList<i32> = [1, 3, 5, 7].into_iter().collect();
+        assert_eq!(a.binary_search(&5), Ok(2));
+        assert_eq!(a.binary_search(&4), Err(2));
+        assert_eq!(a.binary_search(&0), Err(0));
+        assert_eq!(a.binary_search(&9), Err(4));
+    }
+
+    #[test]
+    #[should_panic]
+    fn insert_out_of_bounds_panics() {
+        let mut a: ArrayList<i32> = ArrayList::new();
+        a.insert(5, 1);
     }
 }

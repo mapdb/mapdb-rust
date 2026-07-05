@@ -127,38 +127,31 @@ impl<T: Eq + std::hash::Hash + Clone> HashSet<T> {
             .collect()
     }
 
+    /// The union `self ∪ other`. Delegates to the kernel.
     pub fn union(&self, other: &Self) -> Self {
-        let mut out = self.clone();
-        for v in other.inner.iter() {
-            out.inner.insert(v.clone());
+        HashSet {
+            inner: self.inner.union(&other.inner),
         }
-        out
     }
+    /// The intersection `self ∩ other`. Delegates to the kernel (iterates the
+    /// smaller set). Named `intersect` for Guava parity; the kernel method is
+    /// `OpenHashSet::intersection`.
     pub fn intersect(&self, other: &Self) -> Self {
-        let mut out = HashSet::new();
-        for v in self.inner.iter() {
-            if other.inner.contains(v) {
-                out.inner.insert(v.clone());
-            }
+        HashSet {
+            inner: self.inner.intersection(&other.inner),
         }
-        out
     }
+    /// The difference `self \ other`. Delegates to the kernel.
     pub fn difference(&self, other: &Self) -> Self {
-        let mut out = HashSet::new();
-        for v in self.inner.iter() {
-            if !other.inner.contains(v) {
-                out.inner.insert(v.clone());
-            }
+        HashSet {
+            inner: self.inner.difference(&other.inner),
         }
-        out
     }
+    /// The symmetric difference `self △ other`. Delegates to the kernel.
     pub fn symmetric_difference(&self, other: &Self) -> Self {
-        let mut out = self.difference(other);
-        let rev = other.difference(self);
-        for v in rev.inner.iter() {
-            out.inner.insert(v.clone());
+        HashSet {
+            inner: self.inner.symmetric_difference(&other.inner),
         }
-        out
     }
 }
 
@@ -174,6 +167,21 @@ impl<T: Eq + Hash> HashSet<T> {
     /// Borrowed `&T` iterator, so `for x in &set` and `set.iter()` both work.
     pub fn iter(&self) -> crate::hash_table::OpenHashSetIter<'_, T> {
         self.inner.iter()
+    }
+
+    /// `true` if every element of `self` is also in `other` (`self ⊆ other`).
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.inner.is_subset(&other.inner)
+    }
+
+    /// `true` if every element of `other` is also in `self` (`self ⊇ other`).
+    pub fn is_superset(&self, other: &Self) -> bool {
+        self.inner.is_superset(&other.inner)
+    }
+
+    /// `true` if `self` and `other` share no element.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        self.inner.is_disjoint(&other.inner)
     }
 
     /// Membership test by any borrowed form of the element (`T: Borrow<Q>`),
@@ -266,6 +274,18 @@ mod tests {
         assert!(diff.contains(&1));
         let sym = a.symmetric_difference(&b);
         assert_eq!(sym.len(), 2);
+    }
+
+    #[test]
+    fn test_relational_predicates() {
+        let a = HashSet::from_iter([1, 2, 3]);
+        let sub = HashSet::from_iter([2, 3]);
+        let disj = HashSet::from_iter([7, 8]);
+        assert!(sub.is_subset(&a));
+        assert!(a.is_superset(&sub));
+        assert!(!a.is_subset(&sub));
+        assert!(a.is_disjoint(&disj));
+        assert!(!a.is_disjoint(&sub));
     }
 
     #[test]

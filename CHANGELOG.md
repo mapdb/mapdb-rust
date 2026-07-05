@@ -6,6 +6,15 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **Set algebra + relational predicates on `OpenHashSet`** (blueprint T5). The
+  open-addressing set kernel gained `union`, `intersection`, `difference`,
+  `symmetric_difference` (eager, owned `Self`, seeded with `self`'s cloned hasher;
+  `where K: Clone, S: Clone`), and `is_subset`, `is_superset`, `is_disjoint`
+  (no `Clone`). Intersection and disjointness iterate the smaller set for fewer
+  probes. `object::HashSet`'s existing `union`/`intersect`/`difference`/
+  `symmetric_difference` now delegate to the kernel (removing ~25 lines of
+  duplicated logic, behavior unchanged) and it gained the three relational
+  predicates. codex-reviewed: no bugs.
 - **`Borrow<Q>` lookups on `Multimap`/`SetMultimap`** (blueprint T5). `get`,
   `contains_key`, `remove_all` (and `SetMultimap::contains_key_value`) now accept
   any borrowed form `&Q` where `K: Borrow<Q>`, so a `Multimap<String, _>` can be

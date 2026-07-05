@@ -971,6 +971,98 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         }
     }
 
+    // ── Set algebra ─────────────────────────────────────────────────
+    //
+    // The four combining operations return an **owned** new set (eager, like
+    // the sibling `object::HashSet`, not std's lazy iterators) seeded with a
+    // clone of `self`'s hasher, so the result hashes identically to `self`.
+
+    /// `true` if every element of `self` is also in `other` (`self ⊆ other`).
+    /// The empty set is a subset of everything.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.len() <= other.len() && self.iter().all(|k| other.contains(k))
+    }
+
+    /// `true` if every element of `other` is also in `self` (`self ⊇ other`).
+    pub fn is_superset(&self, other: &Self) -> bool {
+        other.is_subset(self)
+    }
+
+    /// `true` if `self` and `other` share no element. Iterates the smaller set.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        let (small, big) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        small.iter().all(|k| !big.contains(k))
+    }
+
+    /// The union `self ∪ other` (every element of either set).
+    pub fn union(&self, other: &Self) -> Self
+    where
+        K: Clone,
+        S: Clone,
+    {
+        let mut out =
+            Self::with_capacity_and_hasher(self.len() + other.len(), self.hasher().clone());
+        for k in self.iter().chain(other.iter()) {
+            out.insert(k.clone());
+        }
+        out
+    }
+
+    /// The intersection `self ∩ other` (elements in both sets).
+    pub fn intersection(&self, other: &Self) -> Self
+    where
+        K: Clone,
+        S: Clone,
+    {
+        // Iterate the smaller set, probe the larger — fewer lookups.
+        let (small, big) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let mut out = Self::with_capacity_and_hasher(small.len(), self.hasher().clone());
+        for k in small.iter() {
+            if big.contains(k) {
+                out.insert(k.clone());
+            }
+        }
+        out
+    }
+
+    /// The difference `self \ other` (elements in `self` but not `other`).
+    pub fn difference(&self, other: &Self) -> Self
+    where
+        K: Clone,
+        S: Clone,
+    {
+        let mut out = Self::with_capacity_and_hasher(self.len(), self.hasher().clone());
+        for k in self.iter() {
+            if !other.contains(k) {
+                out.insert(k.clone());
+            }
+        }
+        out
+    }
+
+    /// The symmetric difference `self △ other` (elements in exactly one set).
+    pub fn symmetric_difference(&self, other: &Self) -> Self
+    where
+        K: Clone,
+        S: Clone,
+    {
+        let mut out = self.difference(other);
+        for k in other.iter() {
+            if !self.contains(k) {
+                out.insert(k.clone());
+            }
+        }
+        out
+    }
+
     fn rehash_from(&mut self, deleted: usize) {
         let mask = self.mask();
         let mut gap = deleted;
@@ -2198,5 +2290,43 @@ mod tests {
         let s: OpenHashSet<i32, Fixed> = [1, 2, 3].into_iter().collect();
         assert_eq!(s.len(), 3);
         let _: &Fixed = s.hasher();
+    }
+
+    #[test]
+    fn openhashset_set_algebra() {
+        let sorted = |s: &OpenHashSet<i32>| {
+            let mut v: Vec<i32> = s.iter().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        let a: OpenHashSet<i32> = [1, 2, 3, 4].into_iter().collect();
+        let b: OpenHashSet<i32> = [3, 4, 5, 6].into_iter().collect();
+
+        assert_eq!(sorted(&a.union(&b)), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(sorted(&a.intersection(&b)), vec![3, 4]);
+        assert_eq!(sorted(&a.difference(&b)), vec![1, 2]);
+        assert_eq!(sorted(&b.difference(&a)), vec![5, 6]);
+        assert_eq!(sorted(&a.symmetric_difference(&b)), vec![1, 2, 5, 6]);
+
+        // Intersection is order-independent (iterates the smaller set).
+        assert_eq!(sorted(&b.intersection(&a)), vec![3, 4]);
+    }
+
+    #[test]
+    fn openhashset_relational_predicates() {
+        let a: OpenHashSet<i32> = [1, 2, 3].into_iter().collect();
+        let sub: OpenHashSet<i32> = [2, 3].into_iter().collect();
+        let disjoint: OpenHashSet<i32> = [7, 8].into_iter().collect();
+        let empty: OpenHashSet<i32> = OpenHashSet::new();
+
+        assert!(sub.is_subset(&a));
+        assert!(!a.is_subset(&sub));
+        assert!(a.is_superset(&sub));
+        assert!(a.is_disjoint(&disjoint));
+        assert!(!a.is_disjoint(&sub));
+        // Empty set edge cases.
+        assert!(empty.is_subset(&a));
+        assert!(a.is_superset(&empty));
+        assert!(empty.is_disjoint(&a));
     }
 }

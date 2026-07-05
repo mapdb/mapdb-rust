@@ -502,6 +502,38 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
         self.iter_mut().map(|(_, v)| v)
     }
 
+    /// Returns an iterator over `(&K, &mut V)` pairs whose key lies in `range`,
+    /// ascending, allowing in-place mutation of each in-range value. Keys are
+    /// shared (immutable), so the sorted order is preserved. Double-ended and
+    /// exact-size — the mutable counterpart of [`range`](Self::range).
+    ///
+    /// The in-range window is exactly the one [`range`](Self::range) selects
+    /// (bounds compared through the map's own comparator `C`; inverted/empty
+    /// bounds yield nothing), and only the in-range subtrees are visited
+    /// (`O(log n + k)`) via the subtree-size augmentation.
+    pub fn range_mut<R: RangeBounds<K>>(&mut self, range: R) -> TreeMapIterMut<'_, K, V> {
+        // Convert the bounds to the [lo, hi) sorted-index window — identical to
+        // `range`. `rank`/`count_le` borrow `&self` and finish before the
+        // `&mut self.root` collection below.
+        let lo = match range.start_bound() {
+            StdBound::Unbounded => 0,
+            StdBound::Included(q) => self.rank(q),
+            StdBound::Excluded(q) => self.count_le(q),
+        };
+        let hi = match range.end_bound() {
+            StdBound::Unbounded => self.size,
+            StdBound::Included(q) => self.count_le(q),
+            StdBound::Excluded(q) => self.rank(q),
+        };
+        let mut out = Vec::new();
+        if lo < hi {
+            collect_range_mut(&mut self.root, lo, hi, &mut out);
+        }
+        TreeMapIterMut {
+            inner: out.into_iter(),
+        }
+    }
+
     /// Calls `f` for each key-value pair in sorted order.
     pub fn for_each(&self, mut f: impl FnMut(&K, &V)) {
         in_order(&self.root, &mut f);
@@ -1195,6 +1227,46 @@ fn collect_in_order_mut<'a, K, V>(
         collect_in_order_mut(left, out);
         out.push((key, value));
         collect_in_order_mut(right, out);
+    }
+}
+
+/// Collects `(&K, &mut V)` for the nodes whose 0-based in-order index lies in
+/// `[lo, hi)`, ascending. Uses the subtree-size augmentation to prune subtrees
+/// entirely outside the window, so it visits `O(log n + k)` nodes rather than
+/// all `n`. Same disjoint-`&mut`-field-borrow (no `unsafe`) as
+/// [`collect_in_order_mut`].
+fn collect_range_mut<'a, K, V>(
+    node: &'a mut Option<Box<Node<K, V>>>,
+    lo: usize,
+    hi: usize,
+    out: &mut Vec<(&'a K, &'a mut V)>,
+) {
+    if lo >= hi {
+        return;
+    }
+    if let Some(n) = node {
+        let Node {
+            key,
+            value,
+            left,
+            right,
+            ..
+        } = &mut **n;
+        let left_size = node_size(left);
+        // Left subtree occupies local indices [0, left_size).
+        if lo < left_size {
+            collect_range_mut(left, lo, hi.min(left_size), out);
+        }
+        // This node is index `left_size`.
+        if lo <= left_size && left_size < hi {
+            out.push((key, value));
+        }
+        // Right subtree occupies local indices [left_size + 1, subtree_size);
+        // shift the window down by that base.
+        let base = left_size + 1;
+        if hi > base {
+            collect_range_mut(right, lo.saturating_sub(base), hi - base, out);
+        }
     }
 }
 
@@ -2533,6 +2605,62 @@ mod tests {
             m.values().copied().collect::<Vec<_>>(),
             (1..9).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn range_mut_mutates_only_in_range() {
+        let mut m: TreeMap<i32, i32> = (0..10).map(|i| (i, i)).collect();
+        // Keys in [3, 7): multiply their values by 100.
+        for (k, v) in m.range_mut(3..7) {
+            assert!((3..7).contains(k));
+            *v *= 100;
+        }
+        let got: Vec<(i32, i32)> = m.iter().map(|(k, v)| (*k, *v)).collect();
+        let expect: Vec<(i32, i32)> = (0..10)
+            .map(|i| (i, if (3..7).contains(&i) { i * 100 } else { i }))
+            .collect();
+        assert_eq!(got, expect);
+    }
+
+    #[test]
+    fn range_mut_matches_range_selection() {
+        let fresh = || -> TreeMap<i32, i32> { (0..20).map(|i| (i, i)).collect() };
+        // For several bound shapes, range_mut visits exactly range()'s keys.
+        let mut m = fresh();
+        let r = fresh();
+        assert_eq!(
+            m.range_mut(5..15).map(|(k, _)| *k).collect::<Vec<_>>(),
+            r.range(5..15).map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            m.range_mut(..5).map(|(k, _)| *k).collect::<Vec<_>>(),
+            r.range(..5).map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            m.range_mut(15..=17).map(|(k, _)| *k).collect::<Vec<_>>(),
+            r.range(15..=17).map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            m.range_mut(..).map(|(k, _)| *k).collect::<Vec<_>>(),
+            r.range(..).map(|(k, _)| *k).collect::<Vec<_>>()
+        );
+        // inverted/empty → nothing
+        assert_eq!(m.range_mut(10..10).count(), 0);
+        #[allow(clippy::reversed_empty_ranges)]
+        let inverted = m.range_mut(15..5).count();
+        assert_eq!(inverted, 0);
+    }
+
+    #[test]
+    fn range_mut_double_ended_and_exact_size() {
+        let mut m: TreeMap<i32, i32> = (0..10).map(|i| (i, i)).collect();
+        let mut it = m.range_mut(2..8);
+        assert_eq!(it.len(), 6);
+        assert_eq!(it.next().map(|(k, _)| *k), Some(2));
+        assert_eq!(it.next_back().map(|(k, _)| *k), Some(7));
+        assert_eq!(it.len(), 4);
+        let rest: Vec<i32> = it.map(|(k, _)| *k).collect();
+        assert_eq!(rest, vec![3, 4, 5, 6]);
     }
 
     #[test]

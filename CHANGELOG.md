@@ -6,6 +6,15 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`TreeMap::range_mut`** (blueprint T5) — the mutable-value counterpart of
+  `range`. `range_mut<R: RangeBounds<K>>(&mut self, r)` yields `(&K, &mut V)` for
+  the keys in `r`, ascending, allowing in-place value mutation over a key range
+  (keys stay shared so order can't desync). It reuses `range`'s exact `[lo, hi)`
+  sorted-index window (bounds compared through the map's comparator `C`;
+  inverted/empty → nothing) and a new subtree-size-pruned collector that visits
+  only the in-range subtrees (`O(log n + k)`), via the same no-`unsafe`
+  disjoint-`&mut`-field-borrow used by `iter_mut`. Returns the existing
+  `TreeMapIterMut` (double-ended, exact-size, fused). codex-reviewed: no bugs.
 - **`object::ArrayStack` bound loosening + ergonomics** (blueprint T5/T8). The core
   stack API (`len`/`is_empty`/`iter`/`peek`/`push`/`pop`/`clear`/`peek_at`), the
   `Default`/`FromIterator`/`Extend`/`IntoIterator` impls, and `Eq` no longer

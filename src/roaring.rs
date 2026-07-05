@@ -543,6 +543,59 @@ impl RoaringU32 {
         self.combine(other, true, true, |a, b| sorted_xor(&a.lows(), &b.lows()))
     }
 
+    /// `true` if `self` and `other` share no element. A short-circuiting
+    /// two-pointer walk over the (high-key-sorted) chunks — only chunks with a
+    /// matching high key can overlap, and it returns as soon as one does.
+    pub fn is_disjoint(&self, other: &RoaringU32) -> bool {
+        let (mut i, mut j) = (0, 0);
+        while i < self.chunks.len() && j < other.chunks.len() {
+            let (ha, ca) = &self.chunks[i];
+            let (hb, cb) = &other.chunks[j];
+            match ha.cmp(hb) {
+                Ordering::Less => i += 1,
+                Ordering::Greater => j += 1,
+                Ordering::Equal => {
+                    if !sorted_intersect(&ca.lows(), &cb.lows()).is_empty() {
+                        return false;
+                    }
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        true
+    }
+
+    /// `true` if every element of `self` is also in `other` (`self ⊆ other`).
+    /// The empty set is a subset of everything. Two-pointer walk: every
+    /// `self` chunk must have a matching-high `other` chunk whose low set
+    /// contains all of the `self` chunk's lows. Relies on the canonical
+    /// invariant that no chunk is empty (`remove` drops emptied chunks,
+    /// `combine` never pushes an empty one), so a present `self` chunk always
+    /// carries ≥1 element that `other` must also hold.
+    pub fn is_subset(&self, other: &RoaringU32) -> bool {
+        let (mut i, mut j) = (0, 0);
+        while i < self.chunks.len() {
+            let (ha, ca) = &self.chunks[i];
+            // Advance `other` to the first chunk with high key >= ha.
+            while j < other.chunks.len() && other.chunks[j].0 < *ha {
+                j += 1;
+            }
+            // If `other` has no chunk at `ha`, `self` holds keys it can't.
+            if j >= other.chunks.len() || other.chunks[j].0 > *ha {
+                return false;
+            }
+            let cb = &other.chunks[j].1;
+            // self-chunk's lows must be a subset of other-chunk's lows.
+            if !sorted_and_not(&ca.lows(), &cb.lows()).is_empty() {
+                return false;
+            }
+            i += 1;
+            j += 1;
+        }
+        true
+    }
+
     /// In-place union: `self |= other`.
     pub fn or_in_place(&mut self, other: &RoaringU32) {
         *self = self.or(other);
@@ -1414,5 +1467,35 @@ mod tests {
         assert_eq!(s.cardinality(), 65536);
         // cardinality returns u64, so no narrowing — type-level guarantee.
         let _c: u64 = s.cardinality();
+    }
+
+    #[test]
+    fn is_subset_and_is_disjoint() {
+        // Values spanning two chunks (0 and 100_000 → high keys 0 and 1).
+        let a = build(&[1, 2, 100_000]);
+        let sub = build(&[2, 100_000]);
+        let disjoint = build(&[3, 200_000]);
+        let empty = RoaringU32::new();
+
+        assert!(sub.is_subset(&a));
+        assert!(!a.is_subset(&sub)); // a has 1, not in sub
+        assert!(empty.is_subset(&a));
+        assert!(!a.is_subset(&empty));
+        assert!(a.is_subset(&a)); // reflexive
+
+        assert!(a.is_disjoint(&disjoint));
+        assert!(!a.is_disjoint(&sub)); // share 2 and 100_000
+        assert!(a.is_disjoint(&empty));
+        assert!(empty.is_disjoint(&a));
+
+        // Same high chunk, disjoint lows.
+        let x = build(&[1, 2, 3]);
+        let y = build(&[4, 5, 6]);
+        assert!(x.is_disjoint(&y));
+        assert!(!x.is_subset(&y));
+
+        // self has a high chunk other lacks → not subset.
+        let hi_only = build(&[300_000]);
+        assert!(!hi_only.is_subset(&x));
     }
 }

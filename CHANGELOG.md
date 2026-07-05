@@ -6,6 +6,11 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`RoaringU32::is_subset` / `is_disjoint`** (blueprint T5). The compressed
+  bitmap already had the combining algebra (`or`/`and`/`and_not`/`xor`); it gained
+  the two relational predicates as short-circuiting two-pointer walks over the
+  high-key-sorted chunks (no full-result allocation), completing the
+  `is_subset`/`is_superset`/`is_disjoint` surface across every set-like type.
 - **`get_key_value` across the map types** (blueprint T5 std parity). `OpenHashMap`,
   `object::HashMap`, `LinkedHashMap`, and `TreeMap` gained
   `get_key_value(&Q) -> Option<(&K, &V)>` (matching `std`), returning the *stored*

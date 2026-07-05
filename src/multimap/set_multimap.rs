@@ -17,6 +17,7 @@
 use crate::bulk::BulkError;
 use crate::hash_table::OpenHashMap;
 use crate::object::strategy::Comparator;
+use std::borrow::Borrow;
 use std::cmp::Ordering;
 use std::fmt;
 use std::hash::Hash;
@@ -193,22 +194,38 @@ impl<K: Eq + Hash, V: Eq> SetMultimap<K, V> {
     /// backing multimap through `&[V]`, and the borrow is tied to `self`.
     /// Call `.to_vec()` on the returned slice when an owned snapshot is
     /// needed.
-    pub fn get(&self, key: &K) -> &[V] {
+    pub fn get<Q>(&self, key: &Q) -> &[V]
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         self.data.get(key).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         self.data.contains_key(key)
     }
 
-    pub fn contains_key_value(&self, key: &K, value: &V) -> bool {
+    pub fn contains_key_value<Q>(&self, key: &Q, value: &V) -> bool
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         self.data
             .get(key)
             .map(|vs| vs.iter().any(|v| v == value))
             .unwrap_or(false)
     }
 
-    pub fn remove_all(&mut self, key: &K) -> Vec<V> {
+    pub fn remove_all<Q>(&mut self, key: &Q) -> Vec<V>
+    where
+        K: Borrow<Q>,
+        Q: Eq + Hash + ?Sized,
+    {
         if let Some(values) = self.data.remove(key) {
             self.size -= values.len();
             values
@@ -711,5 +728,19 @@ mod tests {
         assert_eq!(m2.get(&5).to_vec(), vec![1, 2]);
         assert_eq!(m2.get(&6).to_vec(), vec![3]);
         assert_eq!(m2.len(), 3);
+    }
+
+    #[test]
+    fn borrow_q_lookup_str_on_string_keys() {
+        let mut m: SetMultimap<String, i32> = SetMultimap::new();
+        m.insert("a".to_string(), 1);
+        m.insert("a".to_string(), 2);
+        m.insert("b".to_string(), 3);
+        assert_eq!(m.get("a").to_vec(), vec![1, 2]);
+        assert!(m.contains_key("b"));
+        assert!(m.contains_key_value("a", &2));
+        assert!(!m.contains_key_value("a", &9));
+        assert_eq!(m.remove_all("a"), vec![1, 2]);
+        assert_eq!(m.len(), 1);
     }
 }

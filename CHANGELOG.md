@@ -6,6 +6,13 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`Borrow<Q>` lookups on `Multimap`/`SetMultimap`** (blueprint T5). `get`,
+  `contains_key`, `remove_all` (and `SetMultimap::contains_key_value`) now accept
+  any borrowed form `&Q` where `K: Borrow<Q>`, so a `Multimap<String, _>` can be
+  queried with `&str` (`m.get("a")`) instead of requiring an owned `String` — the
+  same ergonomics the hash family already had. Delegates to the underlying
+  `OpenHashMap`'s `Borrow`-generic methods; existing `&K` call sites are unaffected
+  (`K: Borrow<K>`).
 - **`FromIterator` + `Extend` on `Multimap`/`SetMultimap`** (blueprint T5 std-trait
   parity). Both multimap types could already be iterated (`IntoIterator`,
   borrowing + owned) and `Default`-constructed, but not built from an iterator of

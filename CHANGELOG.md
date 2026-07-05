@@ -6,6 +6,15 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`#![forbid(unsafe_code)]` + crate-level documentation** (blueprint T12). The
+  crate now compile-enforces its long-standing no-`unsafe` rule with a
+  `#![forbid(unsafe_code)]` inner attribute (verified across all feature
+  combinations — the open-addressing hash kernel, LLRB tree, slot-arena /
+  index-table kernels, and every mutable/consuming iterator are built entirely
+  without `unsafe`). Added a crate-level `//!` doc header (previously absent) that
+  gives `docs.rs` a front page: the no-`unsafe` guarantee, the type-family map,
+  and the `parallel`/`validation` feature flags. Documentation/lint only — no API
+  or behavior change.
 - **Guava `Range<T>` gains std range-syntax interop** (blueprint T4). A new
   `Range::from_bounds<R: RangeBounds<T>>` constructor plus six
   `From<std::ops::Range*>` impls let callers build the value-type `Range` from std

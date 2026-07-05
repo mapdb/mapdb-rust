@@ -4,6 +4,51 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
+//! `mapdb-collections` — a dependency-free Rust collections library, ported from
+//! [Eclipse Collections](https://www.eclipse.org/collections/) and Guava with a
+//! Rust-idiomatic surface (std traits, borrowing iterators, `Result` bulk errors,
+//! monomorphised strategy/policy type parameters instead of boxed callbacks).
+//!
+//! # No `unsafe`
+//!
+//! The entire crate is `#![forbid(unsafe_code)]` — every collection, including the
+//! open-addressing hash kernel, the LLRB tree, the slot-arena / index-table
+//! kernels, and all mutable and consuming iterators, is built without a single
+//! `unsafe` block. Mutable in-order iteration is achieved by splitting `&mut`
+//! struct borrows into disjoint field borrows and materialising, never by raw
+//! pointers.
+//!
+//! # Type families
+//!
+//! - **Hash maps/sets:** [`OpenHashMap`] / [`OpenHashSet`] (the open-addressing
+//!   kernel), plus the object-module [`object::HashMap`]/[`object::HashSet`],
+//!   [`object::LinkedHashMap`]/[`object::LinkedHashSet`] (insertion-ordered),
+//!   [`object::HashBag`] (multiset), [`object::HashBiMap`], and the
+//!   strategy-parametric [`object::HashMapWithStrategy`].
+//! - **Sorted maps/sets:** [`object::TreeMap`] / [`object::TreeSet`] (LLRB, generic
+//!   comparator `C: Compare<K>`), and the compact frozen
+//!   [`ImmutableSortedMap`] / [`ImmutableSortedSet`] (packed sorted array).
+//! - **Ranges:** the Guava-style [`Range`] value type with [`RangeSet`] /
+//!   [`RangeMap`], and [`Interval`].
+//! - **Immutable wrappers:** the generic [`Frozen<C>`](Frozen), plus
+//!   [`ImmutableList`] / [`ImmutableHashMap`] / [`ImmutableHashSet`].
+//! - **Bounded / eviction:** [`BoundedMap`] (value-generic, policy + TTL type
+//!   parameters) and the frozen `i32`-only [`BoundedLruMap`].
+//! - **Probabilistic sketches (`i32`):** [`Bloom`], [`CountMin`], [`HyperLogLog`],
+//!   [`SpaceSaving`], [`RoaringU32`], [`FenwickTree`], [`BitSet`].
+//! - **Sequences:** [`ArrayDeque`], [`object::ArrayList`], [`object::ArrayStack`],
+//!   [`PriorityQueue`], [`Multimap`] / [`SetMultimap`].
+//! - **Vocabulary:** the [`RichIterator`] blanket extension trait adds the Eclipse
+//!   iteration verbs (`detect`, `select`, `partition_into`, `group_by`, …) to every
+//!   [`Iterator`].
+//!
+//! # Feature flags
+//!
+//! - `parallel` — a rayon bridge for the zero-dependency [`Spliterator`] /
+//!   [`BatchIterable`] parallel kernel (off by default).
+//! - `validation` — enables the cross-language JSON oracle test harness.
+
+#![forbid(unsafe_code)]
 #![allow(
     clippy::needless_borrow,
     clippy::unnecessary_cast,

@@ -6,6 +6,12 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`Interval` iterators are now double-ended, exact-size, and fused** (blueprint
+  T5). `IntervalIter` (borrowing) and `IntervalIntoIter` (owning) already reported
+  an exact `size_hint`; they now also implement `DoubleEndedIterator` (`.rev()`,
+  `next_back` yielding from the high end via O(1) indexed `get`),
+  `ExactSizeIterator`, and `FusedIterator` — matching the iterator convention used
+  by the rest of the crate's iterators.
 - **`TreeMap::range_mut`** (blueprint T5) — the mutable-value counterpart of
   `range`. `range_mut<R: RangeBounds<K>>(&mut self, r)` yields `(&K, &mut V)` for
   the keys in `r`, ascending, allowing in-place value mutation over a key range

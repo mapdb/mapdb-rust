@@ -283,6 +283,19 @@ impl<'a, T: SignedPrimInt> Iterator for IntervalIter<'a, T> {
     }
 }
 
+impl<T: SignedPrimInt> DoubleEndedIterator for IntervalIter<'_, T> {
+    fn next_back(&mut self) -> Option<T> {
+        if self.index >= self.size {
+            return None;
+        }
+        self.size -= 1;
+        self.interval.get(self.size)
+    }
+}
+
+impl<T: SignedPrimInt> ExactSizeIterator for IntervalIter<'_, T> {}
+impl<T: SignedPrimInt> std::iter::FusedIterator for IntervalIter<'_, T> {}
+
 // ---- idiomatic std-style additions ----------------------------------------
 
 impl<'a, T: SignedPrimInt> IntoIterator for &'a Interval<T> {
@@ -316,6 +329,19 @@ impl<T: SignedPrimInt> Iterator for IntervalIntoIter<T> {
         (remaining, Some(remaining))
     }
 }
+
+impl<T: SignedPrimInt> DoubleEndedIterator for IntervalIntoIter<T> {
+    fn next_back(&mut self) -> Option<T> {
+        if self.index >= self.size {
+            return None;
+        }
+        self.size -= 1;
+        self.interval.get(self.size)
+    }
+}
+
+impl<T: SignedPrimInt> ExactSizeIterator for IntervalIntoIter<T> {}
+impl<T: SignedPrimInt> std::iter::FusedIterator for IntervalIntoIter<T> {}
 
 impl<T: SignedPrimInt> IntoIterator for Interval<T> {
     type Item = T;
@@ -533,5 +559,24 @@ mod tests {
         assert_eq!(borrowed, vec![1, 2, 3, 4]);
         let owned: Vec<i32> = iv.into_iter().collect();
         assert_eq!(owned, vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn iter_double_ended_and_exact_size() {
+        let iv = Interval::from_to_by(0, 10, 2); // 0,2,4,6,8,10 (`to` inclusive)
+        let mut it = iv.all();
+        assert_eq!(it.len(), 6);
+        assert_eq!(it.next(), Some(0));
+        assert_eq!(it.next_back(), Some(10));
+        assert_eq!(it.len(), 4);
+        assert_eq!(it.next_back(), Some(8));
+        let rest: Vec<i32> = it.collect();
+        assert_eq!(rest, vec![2, 4, 6]);
+
+        // .rev() now works (DoubleEnded) on both borrowing and owning iterators.
+        let rev: Vec<i32> = iv.all().rev().collect();
+        assert_eq!(rev, vec![10, 8, 6, 4, 2, 0]);
+        let rev_owned: Vec<i32> = iv.into_iter().rev().collect();
+        assert_eq!(rev_owned, vec![10, 8, 6, 4, 2, 0]);
     }
 }

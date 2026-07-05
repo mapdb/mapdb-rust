@@ -1596,6 +1596,16 @@ impl<K: Ord, V> FromIterator<(K, V)> for TreeMap<K, V, Natural> {
     }
 }
 
+/// `map[&key]` indexing (std `BTreeMap` parity). Panics if the key is absent.
+/// Keyed by `&K` (comparator descent), not a borrowed `&Q`, since `C: Compare<K>`
+/// compares full keys.
+impl<K, V, C: Compare<K>> std::ops::Index<&K> for TreeMap<K, V, C> {
+    type Output = V;
+    fn index(&self, key: &K) -> &V {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
 impl<K: Ord, V> Extend<(K, V)> for TreeMap<K, V, Natural> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {
@@ -2585,6 +2595,19 @@ mod tests {
         let m = dyn_map((0..5).map(|i| (i, i * 10)));
         assert_eq!(m.get_key_value(&3), Some((&3, &30)));
         assert_eq!(m.get_key_value(&99), None);
+    }
+
+    #[test]
+    fn index_by_key() {
+        let m: TreeMap<i32, i32> = (0..5).map(|i| (i, i * 10)).collect();
+        assert_eq!(m[&3], 30);
+    }
+
+    #[test]
+    #[should_panic(expected = "no entry found for key")]
+    fn index_absent_panics() {
+        let m: TreeMap<i32, i32> = (0..5).map(|i| (i, i)).collect();
+        let _ = m[&99];
     }
 
     #[test]

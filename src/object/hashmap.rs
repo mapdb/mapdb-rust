@@ -274,6 +274,18 @@ impl<K: Eq + Hash, V> FromIterator<(K, V)> for HashMap<K, V> {
     }
 }
 
+/// `map[&key]` indexing (std `HashMap` parity). Panics if the key is absent.
+impl<K, Q, V> std::ops::Index<&Q> for HashMap<K, V>
+where
+    K: Hash + Eq + Borrow<Q>,
+    Q: Hash + Eq + ?Sized,
+{
+    type Output = V;
+    fn index(&self, key: &Q) -> &V {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
 impl<K: Eq + Hash, V> Extend<(K, V)> for HashMap<K, V> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {

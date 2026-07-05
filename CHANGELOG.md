@@ -6,6 +6,11 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`Index` on the map types** (blueprint T5 std parity). `OpenHashMap`,
+  `object::HashMap`, `LinkedHashMap` (all `Index<&Q>` where `K: Borrow<Q>`), and
+  `TreeMap` (`Index<&K>`, comparator descent) now support `map[&key] -> &V`
+  indexing, matching `std::collections::HashMap`/`BTreeMap`. Panics with
+  `"no entry found for key"` when the key is absent (like `std`).
 - **`RoaringU32::is_subset` / `is_disjoint`** (blueprint T5). The compressed
   bitmap already had the combining algebra (`or`/`and`/`and_not`/`xor`); it gained
   the two relational predicates as short-circuiting two-pointer walks over the

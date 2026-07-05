@@ -1374,6 +1374,19 @@ impl<K: Hash + Eq, V, S: BuildHasher + Default> FromIterator<(K, V)> for OpenHas
     }
 }
 
+/// `map[&key]` indexing (std `HashMap` parity). Panics if the key is absent.
+impl<K, Q, V, S> std::ops::Index<&Q> for OpenHashMap<K, V, S>
+where
+    K: Hash + Eq + Borrow<Q>,
+    Q: Hash + Eq + ?Sized,
+    S: BuildHasher,
+{
+    type Output = V;
+    fn index(&self, key: &Q) -> &V {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
 impl<K: Hash + Eq, V, S: BuildHasher> Extend<(K, V)> for OpenHashMap<K, V, S> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {
@@ -2314,6 +2327,21 @@ mod tests {
         let s: OpenHashSet<i32, Fixed> = [1, 2, 3].into_iter().collect();
         assert_eq!(s.len(), 3);
         let _: &Fixed = s.hasher();
+    }
+
+    #[test]
+    fn openhashmap_index() {
+        let mut m: OpenHashMap<String, i32> = OpenHashMap::new();
+        m.insert("a".to_string(), 10);
+        // Index by &str (Borrow<Q>).
+        assert_eq!(m["a"], 10);
+    }
+
+    #[test]
+    #[should_panic(expected = "no entry found for key")]
+    fn openhashmap_index_absent_panics() {
+        let m: OpenHashMap<i32, i32> = OpenHashMap::new();
+        let _ = m[&5];
     }
 
     #[test]

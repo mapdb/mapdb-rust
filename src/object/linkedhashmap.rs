@@ -399,6 +399,19 @@ impl<K: Eq + Hash, V, S: BuildHasher + Default> FromIterator<(K, V)> for LinkedH
     }
 }
 
+/// `map[&key]` indexing (std `HashMap` parity). Panics if the key is absent.
+impl<K, Q, V, S> std::ops::Index<&Q> for LinkedHashMap<K, V, S>
+where
+    K: Hash + Eq + Borrow<Q>,
+    Q: Hash + Eq + ?Sized,
+    S: BuildHasher,
+{
+    type Output = V;
+    fn index(&self, key: &Q) -> &V {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
 impl<K: Eq + Hash, V, S: BuildHasher> Extend<(K, V)> for LinkedHashMap<K, V, S> {
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         for (k, v) in iter {

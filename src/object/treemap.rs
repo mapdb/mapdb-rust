@@ -1447,6 +1447,16 @@ impl<K, V, C> IntoIterator for TreeMap<K, V, C> {
 }
 
 impl<K, V, C> TreeMap<K, V, C> {
+    /// Borrows this map's comparator value (the generic `C`). Useful for
+    /// building a new map/set that must order identically — e.g. a `TreeSet`
+    /// set-algebra result clones it via `comparator_ref().clone()`. (The
+    /// [`comparator`](TreeMap::comparator) accessor, defined only on the
+    /// `Comparator<K>` instantiation, type-erases into the runtime form; this
+    /// one preserves the concrete `C`.)
+    pub fn comparator_ref(&self) -> &C {
+        &self.cmp
+    }
+
     /// Consumes the map, yielding keys in ascending order.
     pub fn into_keys(
         self,

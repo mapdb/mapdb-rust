@@ -6,6 +6,16 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **Set algebra + relational predicates on `TreeSet`** (blueprint T5), plus a new
+  `TreeMap::comparator_ref(&self) -> &C` accessor. `TreeSet` gained `union`,
+  `intersection`, `difference`, `symmetric_difference` (owned `Self` ordered by a
+  clone of `self`'s comparator; `where T: Clone, C: Clone`) and `is_subset`/
+  `is_superset`/`is_disjoint` (no `Clone`) — completing the set-algebra surface
+  across every set type (`OpenHashSet`, `object::HashSet`, `BitSet`, `TreeSet`).
+  Results order by `self`'s comparator; for a `DynTreeSet` the caller must ensure
+  both operands carry an equivalent runtime comparator. The `comparator_ref`
+  accessor borrows the concrete `C` (the pre-existing `comparator()` exists only
+  on the `Comparator<K>` instantiation and type-erases). codex-reviewed: no bugs.
 - **Owned set algebra + relational predicates + `FromIterator`/`Extend` on
   `BitSet`** (blueprint T5). `BitSet` had only in-place bit ops
   (`and_in_place`/`or_in_place`/…); it gained the non-mutating owned counterparts

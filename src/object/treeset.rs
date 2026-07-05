@@ -73,6 +73,109 @@ impl<T, C: Compare<T>> TreeSet<T, C> {
         self.tree.contains_key(value)
     }
 
+    // ── Set algebra ─────────────────────────────────────────────────
+    //
+    // The four combining operations return an owned new `TreeSet<T, C>` ordered
+    // by a clone of `self`'s comparator. They build via `insert`, so they need
+    // `T: Clone` and `C: Clone`. The relational predicates need neither.
+    //
+    // Membership against `other` uses `other`'s own comparator, so results are
+    // well-defined when both operands order/deduplicate elements the same way
+    // (always true for a static `C` like `Natural`; for a `DynTreeSet` whose
+    // comparator identity is erased, the caller must ensure both sets carry an
+    // equivalent runtime comparator).
+
+    /// `true` if every element of `self` is also in `other` (`self ⊆ other`).
+    /// The empty set is a subset of everything.
+    pub fn is_subset(&self, other: &Self) -> bool {
+        self.len() <= other.len() && self.iter().all(|x| other.contains(x))
+    }
+
+    /// `true` if every element of `other` is also in `self` (`self ⊇ other`).
+    pub fn is_superset(&self, other: &Self) -> bool {
+        other.is_subset(self)
+    }
+
+    /// `true` if `self` and `other` share no element. Iterates the smaller set.
+    pub fn is_disjoint(&self, other: &Self) -> bool {
+        let (small, big) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        small.iter().all(|x| !big.contains(x))
+    }
+
+    /// The union `self ∪ other` (every element of either set), ordered by
+    /// `self`'s comparator.
+    pub fn union(&self, other: &Self) -> Self
+    where
+        T: Clone,
+        C: Clone,
+    {
+        let mut out = TreeSet::with_comparator(self.tree.comparator_ref().clone());
+        for x in self.iter() {
+            out.insert(x.clone());
+        }
+        for x in other.iter() {
+            out.insert(x.clone());
+        }
+        out
+    }
+
+    /// The intersection `self ∩ other` (elements in both), ordered by `self`'s
+    /// comparator. Iterates the smaller set.
+    pub fn intersection(&self, other: &Self) -> Self
+    where
+        T: Clone,
+        C: Clone,
+    {
+        let (small, big) = if self.len() <= other.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let mut out = TreeSet::with_comparator(self.tree.comparator_ref().clone());
+        for x in small.iter() {
+            if big.contains(x) {
+                out.insert(x.clone());
+            }
+        }
+        out
+    }
+
+    /// The difference `self \ other` (elements in `self` but not `other`),
+    /// ordered by `self`'s comparator.
+    pub fn difference(&self, other: &Self) -> Self
+    where
+        T: Clone,
+        C: Clone,
+    {
+        let mut out = TreeSet::with_comparator(self.tree.comparator_ref().clone());
+        for x in self.iter() {
+            if !other.contains(x) {
+                out.insert(x.clone());
+            }
+        }
+        out
+    }
+
+    /// The symmetric difference `self △ other` (elements in exactly one set),
+    /// ordered by `self`'s comparator.
+    pub fn symmetric_difference(&self, other: &Self) -> Self
+    where
+        T: Clone,
+        C: Clone,
+    {
+        let mut out = self.difference(other);
+        for x in other.iter() {
+            if !self.contains(x) {
+                out.insert(x.clone());
+            }
+        }
+        out
+    }
+
     /// Retains only the elements for which `keep(&elem)` returns `true`,
     /// visiting them in ascending comparator order; rejected elements are
     /// dropped. If `keep` panics, the set is left holding exactly the elements
@@ -897,5 +1000,85 @@ mod tests {
         }
         assert_eq!(s.len(), 0);
         assert!(s.is_empty());
+    }
+
+    #[test]
+    fn set_algebra_natural_order() {
+        let a: TreeSet<i32, Natural> = [1, 2, 3, 4].into_iter().collect();
+        let b: TreeSet<i32, Natural> = [3, 4, 5, 6].into_iter().collect();
+
+        // Results are ascending (comparator preserved) — collect keeps order.
+        assert_eq!(
+            a.union(&b).iter().copied().collect::<Vec<_>>(),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(
+            a.intersection(&b).iter().copied().collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+        assert_eq!(
+            a.difference(&b).iter().copied().collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            b.difference(&a).iter().copied().collect::<Vec<_>>(),
+            vec![5, 6]
+        );
+        assert_eq!(
+            a.symmetric_difference(&b)
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![1, 2, 5, 6]
+        );
+        assert_eq!(
+            b.intersection(&a).iter().copied().collect::<Vec<_>>(),
+            vec![3, 4]
+        );
+    }
+
+    #[test]
+    fn set_algebra_reverse_comparator_preserved() {
+        // The result must keep self's comparator order (descending here).
+        let a: DynTreeSet<i32> = {
+            let mut s = TreeSet::with_comparator(reverse_comparator::<i32>());
+            for x in [1, 2, 3, 4] {
+                s.insert(x);
+            }
+            s
+        };
+        let b: DynTreeSet<i32> = {
+            let mut s = TreeSet::with_comparator(reverse_comparator::<i32>());
+            for x in [3, 4, 5, 6] {
+                s.insert(x);
+            }
+            s
+        };
+        // union ordered by self's reverse comparator → descending.
+        assert_eq!(
+            a.union(&b).iter().copied().collect::<Vec<_>>(),
+            vec![6, 5, 4, 3, 2, 1]
+        );
+        assert_eq!(
+            a.intersection(&b).iter().copied().collect::<Vec<_>>(),
+            vec![4, 3]
+        );
+    }
+
+    #[test]
+    fn relational_predicates() {
+        let a: TreeSet<i32, Natural> = [1, 2, 3].into_iter().collect();
+        let sub: TreeSet<i32, Natural> = [2, 3].into_iter().collect();
+        let disj: TreeSet<i32, Natural> = [7, 8].into_iter().collect();
+        let empty: TreeSet<i32, Natural> = TreeSet::new();
+
+        assert!(sub.is_subset(&a));
+        assert!(!a.is_subset(&sub));
+        assert!(a.is_superset(&sub));
+        assert!(a.is_disjoint(&disj));
+        assert!(!a.is_disjoint(&sub));
+        assert!(empty.is_subset(&a));
+        assert!(a.is_superset(&empty));
+        assert!(empty.is_disjoint(&a));
     }
 }

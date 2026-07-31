@@ -7,12 +7,23 @@
 //! [`RangeMap`] — a mutable piecewise mapping from disjoint non-empty
 //! [`Range`]s to values (v1 ships the `i32 -> i32` specialisation).
 //!
-//! **Unlike [`RangeSet`](crate::range_set::RangeSet), a `RangeMap` does NOT
-//! coalesce across different values.** [`put`](RangeMap::put) is
-//! last-writer-wins: it clips/splits every overlapping prior entry and inserts
-//! the new `(range, value)`, but leaves adjacent equal-valued entries
-//! **distinct**. [`put_coalescing`](RangeMap::put_coalescing) is the variant
-//! that merges connected neighbours holding an **equal** value.
+//! Like [`RangeSet`](crate::range_set::RangeSet), a `RangeMap` is **always
+//! maximally merged** — but per value: [`put`](RangeMap::put) is
+//! last-writer-wins (it clips/splits every overlapping prior entry) and then
+//! **coalesces** the inserted entry with connected neighbours holding an
+//! **equal** value. A **different** value is a barrier and is never absorbed or
+//! crossed. The normal form therefore carries a global invariant: *no two
+//! connected entries hold an equal value*.
+//!
+//! ## Divergence from Guava
+//!
+//! `TreeRangeMap::put` does not coalesce; coalescing lives in a separate
+//! `putCoalescing`. We fold it into `put` and do **not** expose
+//! `put_coalescing`. Guava's split is a compatibility retrofit (`RangeMap` is
+//! `@since 14.0`, `putCoalescing` `@since 22.0`, by which point `put`'s
+//! behaviour was observable through `asMapOfRanges()` and could not be
+//! changed); we have no such constraint. See
+//! `spec/features/range-set-map.md` §Coalescing.
 //!
 //! Every clip / split / merge / ordering decision reduces to the side-aware
 //! cut comparisons of [`crate::range`]; there is **no `±1` endpoint
@@ -31,8 +42,8 @@ use std::cmp::Ordering;
 
 /// A mutable piecewise mapping from disjoint ranges to values.
 ///
-/// See the [module docs](crate::range_map) for the put / put-coalescing
-/// semantics and the normal-form invariant.
+/// See the [module docs](crate::range_map) for the put / coalescing semantics
+/// and the normal-form invariant.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RangeMap<T, V> {
     /// Normal form: non-empty, pairwise disjoint, ascending by lower cut.
@@ -50,39 +61,48 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
     /// Assign `value` to **every** point of `range`, **last-writer-wins** over
     /// any prior overlap. Existing entries are clipped to the parts outside
     /// `range` (a straddling entry **splits into two**, both keeping the old
-    /// value); the new `(range, value)` is then inserted. A **cut-empty**
-    /// `range` is a **no-op**. `put` does **not** coalesce — an adjacent equal
-    /// value stays a distinct entry.
+    /// value); the new `(range, value)` is then **coalesced** with any connected
+    /// neighbour holding an **equal** value and inserted. A **different** value
+    /// is a barrier. A **cut-empty** `range` is a **no-op**, decided before any
+    /// clipping.
     pub fn put(&mut self, range: Range<T>, value: V) {
         if range.is_empty() {
             return;
         }
         self.clip_out(&range);
-        self.insert_entry(range, value);
-    }
 
-    /// Like [`put`](RangeMap::put), then **merge** the inserted entry with any
-    /// **connected** (overlapping *or* abutting) neighbour whose value
-    /// **equals** `value`, producing one entry spanning the union. Neighbours
-    /// with a different value are left untouched (clipped by the `put` step as
-    /// usual).
-    pub fn put_coalescing(&mut self, range: Range<T>, value: V) {
-        if range.is_empty() {
-            return;
-        }
-        self.clip_out(&range);
-        // Span over every connected entry with an EQUAL value, dropping them.
+        // Coalesce outward from the insertion position. Because the normal form
+        // is maintained by every put, AT MOST ONE entry per side is absorbable:
+        // if the neighbour is absorbed, the entry beyond it was already either
+        // disconnected from it or differently-valued, and stays so against the
+        // grown range. Each loop therefore runs at most once. They are loops
+        // rather than ifs so a normal form violated by a bug elsewhere degrades
+        // into a correct (if slower) result instead of a malformed map.
+        let pos = self.insertion_point(&range);
         let mut merged = range;
-        let mut out: Vec<(Range<T>, V)> = Vec::with_capacity(self.entries.len() + 1);
-        for (r, v) in self.entries.drain(..) {
-            if v == value && r.is_connected(&merged) {
-                merged = r.span(&merged);
-            } else {
-                out.push((r, v));
+
+        let mut lo = pos;
+        while lo > 0 {
+            let (r, v) = &self.entries[lo - 1];
+            if *v != value || !r.is_connected(&merged) {
+                break;
             }
+            merged = r.span(&merged);
+            lo -= 1;
         }
-        self.entries = out;
-        self.insert_entry(merged, value);
+
+        let mut hi = pos;
+        while hi < self.entries.len() {
+            let (r, v) = &self.entries[hi];
+            if *v != value || !r.is_connected(&merged) {
+                break;
+            }
+            merged = r.span(&merged);
+            hi += 1;
+        }
+
+        self.entries
+            .splice(lo..hi, std::iter::once((merged, value)));
     }
 
     /// The value mapped at `value`, or `None` if uncovered.
@@ -183,16 +203,16 @@ impl<T: Ord + Copy, V: Copy + PartialEq> RangeMap<T, V> {
         self.entries = out;
     }
 
-    /// Insert `(range, value)` at its ascending-by-lower-cut position. Callers
-    /// must have already cleared the overlap (via [`clip_out`]); `range` is
-    /// disjoint from every remaining entry.
-    fn insert_entry(&mut self, range: Range<T>, value: V) {
-        let pos = self
-            .entries
+    /// The ascending-by-lower-cut index at which `range` belongs: the first
+    /// index whose lower cut is above `range`'s. Callers must have already
+    /// cleared the overlap (via [`clip_out`]), so `range` is disjoint from every
+    /// remaining entry and every entry below the returned index lies strictly to
+    /// its left.
+    fn insertion_point(&self, range: &Range<T>) -> usize {
+        self.entries
             .iter()
             .position(|(r, _)| r.lower_cut().cmp_cut(&range.lower_cut()) == Ordering::Greater)
-            .unwrap_or(self.entries.len());
-        self.entries.insert(pos, (range, value));
+            .unwrap_or(self.entries.len())
     }
 }
 
@@ -262,34 +282,21 @@ mod tests {
     }
 
     #[test]
-    fn put_does_not_coalesce() {
+    fn put_coalesces_equal_value_abut() {
         let mut m = RangeMap::new();
         m.put(Range::closed_open(1, 5), 100);
         m.put(Range::closed_open(5, 9), 100);
-        // TWO entries even though value equal and they abut.
-        assert_eq!(
-            collected(&m),
-            vec![
-                (Range::closed_open(1, 5), 100),
-                (Range::closed_open(5, 9), 100)
-            ]
-        );
+        // ONE entry: equal value and abutting, so plain put merges them.
+        // Guava's TreeRangeMap leaves two here; this is the divergence.
+        assert_eq!(collected(&m), vec![(Range::closed_open(1, 9), 100)]);
         assert_eq!(m.get(5), Some(&100));
     }
 
     #[test]
-    fn put_coalescing_equal_value_abut() {
+    fn put_different_value_no_merge() {
         let mut m = RangeMap::new();
         m.put(Range::closed_open(1, 5), 100);
-        m.put_coalescing(Range::closed_open(5, 9), 100);
-        assert_eq!(collected(&m), vec![(Range::closed_open(1, 9), 100)]);
-    }
-
-    #[test]
-    fn put_coalescing_different_value_no_merge() {
-        let mut m = RangeMap::new();
-        m.put(Range::closed_open(1, 5), 100);
-        m.put_coalescing(Range::closed_open(5, 9), 200);
+        m.put(Range::closed_open(5, 9), 200);
         assert_eq!(
             collected(&m),
             vec![
@@ -300,12 +307,97 @@ mod tests {
     }
 
     #[test]
-    fn put_coalescing_both_sides() {
+    fn put_coalesces_both_sides() {
         let mut m = RangeMap::new();
         m.put(Range::closed_open(1, 5), 100);
         m.put(Range::closed_open(9, 12), 100);
-        m.put_coalescing(Range::closed_open(5, 9), 100);
+        m.put(Range::closed_open(5, 9), 100);
         assert_eq!(collected(&m), vec![(Range::closed_open(1, 12), 100)]);
+    }
+
+    #[test]
+    fn put_coalesces_chain_ascending_order() {
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 2), 7);
+        m.put(Range::closed_open(2, 3), 7);
+        // A chain never forms: the map is already [1,3) here.
+        assert_eq!(collected(&m), vec![(Range::closed_open(1, 3), 7)]);
+        m.put(Range::closed_open(3, 4), 7);
+        assert_eq!(collected(&m), vec![(Range::closed_open(1, 4), 7)]);
+    }
+
+    #[test]
+    fn put_coalesces_order_independent() {
+        // Mirror of put_coalesces_chain_ascending_order: same three puts,
+        // inserted so the existing entries lie to the RIGHT of the last one.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(2, 3), 7);
+        m.put(Range::closed_open(3, 4), 7);
+        m.put(Range::closed_open(1, 2), 7);
+        assert_eq!(collected(&m), vec![(Range::closed_open(1, 4), 7)]);
+    }
+
+    #[test]
+    fn put_different_value_is_a_hard_barrier() {
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 2), 7);
+        m.put(Range::closed_open(2, 3), 8);
+        m.put(Range::closed_open(3, 4), 7);
+        // The 8 entry is neither absorbed nor crossed, so the far [1,2) -> 7 is
+        // unreachable even though both hold 7.
+        assert_eq!(
+            collected(&m),
+            vec![
+                (Range::closed_open(1, 2), 7),
+                (Range::closed_open(2, 3), 8),
+                (Range::closed_open(3, 4), 7)
+            ]
+        );
+    }
+
+    #[test]
+    fn put_split_fragments_do_not_rejoin_across_the_insert() {
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 9), 100);
+        m.put(Range::closed_open(3, 5), 200);
+        // The two 100 fragments are separated by the 200 entry, so they are not
+        // connected and must not be re-merged by the coalescing step.
+        assert_eq!(
+            collected(&m),
+            vec![
+                (Range::closed_open(1, 3), 100),
+                (Range::closed_open(3, 5), 200),
+                (Range::closed_open(5, 9), 100)
+            ]
+        );
+    }
+
+    #[test]
+    fn normal_form_has_no_connected_equal_valued_pair() {
+        // The global invariant that the old put/put_coalescing split could not
+        // state: after every operation, no two connected entries hold an equal
+        // value.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 2), 7);
+        m.put(Range::closed_open(2, 3), 7);
+        m.put(Range::closed_open(3, 4), 8);
+        m.put(Range::closed_open(4, 5), 8);
+        m.put(Range::closed_open(5, 6), 7);
+        let v = collected(&m);
+        for w in v.windows(2) {
+            assert!(
+                !(w[0].0.is_connected(&w[1].0) && w[0].1 == w[1].1),
+                "connected entries must not hold an equal value"
+            );
+        }
+        assert_eq!(
+            v,
+            vec![
+                (Range::closed_open(1, 3), 7),
+                (Range::closed_open(3, 5), 8),
+                (Range::closed_open(5, 6), 7)
+            ]
+        );
     }
 
     #[test]
@@ -380,7 +472,7 @@ mod tests {
         m.put(Range::closed_open(1, 10), 1);
         m.put(Range::closed_open(3, 5), 2);
         m.put(Range::closed_open(7, 20), 3);
-        m.put_coalescing(Range::closed_open(20, 25), 3);
+        m.put(Range::closed_open(20, 25), 3);
         let v = collected(&m);
         for w in v.windows(2) {
             assert_eq!(

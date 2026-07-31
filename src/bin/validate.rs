@@ -2863,7 +2863,6 @@ fn run_immutable_sorted_set(
 //   RangeSet: {"op":"add","range":{...}} / {"op":"remove_range","range":{...}}
 //             / {"op":"clear"}
 //   RangeMap: {"op":"put","range":{...},"value":N}
-//             / {"op":"put_coalescing","range":{...},"value":N}
 //             / {"op":"remove_range","range":{...}} / {"op":"clear"}
 // An optional top-level `query` (same builder shape) supplies the range for
 // `encloses_query`/`intersects_query`/`sub_range_set_ranges`/
@@ -3010,10 +3009,6 @@ fn run_range_map(
             "put" => {
                 let value = op["value"].as_i64().expect("put needs value") as i32;
                 map.put(build_range_obj(&op["range"]), value);
-            }
-            "put_coalescing" => {
-                let value = op["value"].as_i64().expect("put_coalescing needs value") as i32;
-                map.put_coalescing(build_range_obj(&op["range"]), value);
             }
             "remove_range" => map.remove(build_range_obj(&op["range"])),
             "clear" => map.clear(),

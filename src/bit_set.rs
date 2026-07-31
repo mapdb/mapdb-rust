@@ -233,7 +233,7 @@ impl BitSet {
     /// Indices of the set bits, ascending.
     pub fn to_vec(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.cardinality());
-        out.extend(self.into_iter());
+        out.extend(self);
         out
     }
 }

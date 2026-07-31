@@ -115,7 +115,10 @@ fn scenario_bitset(n: usize, rounds: u32) {
         i += 1;
     }
     let composites = sieve.cardinality();
-    println!("    sieve built: {composites} composite bits set ({:.1}%)", 100.0 * composites as f64 / n as f64);
+    println!(
+        "    sieve built: {composites} composite bits set ({:.1}%)",
+        100.0 * composites as f64 / n as f64
+    );
 
     let (d_rescan, c1) = bench(rounds, || rescan_sum(black_box(&sieve)));
     let (d_stream, c2) = bench(rounds, || stream_sum(black_box(&sieve)));
@@ -174,7 +177,10 @@ fn scenario_arraylist(n: usize, rounds: u32) {
     let (d_opaque, co) = bench(rounds, || {
         let cnt = opaque_boxed(&list).filter(|v| **v >= threshold).count() as u64;
         let sum = opaque_boxed(&list).fold(0i64, |a, v| a + *v) as u64;
-        let det = opaque_boxed(&list).find(|v| **v == 999).copied().unwrap_or(-1) as u64;
+        let det = opaque_boxed(&list)
+            .find(|v| **v == 999)
+            .copied()
+            .unwrap_or(-1) as u64;
         cnt ^ sum ^ det
     });
     assert_eq!(cf, cb, "fast vs boxed must agree");
@@ -197,7 +203,9 @@ fn scenario_pipeline(n: usize, rounds: u32) {
     println!("\n[3] end-to-end: dedup -> membership filter -> aggregate  (n = {n})");
     let mut rng = Rng(0xD1B54A32D192ED03);
     // A stream of ids with heavy duplication (mod keeps the key space small).
-    let ids: ArrayList<i64> = (0..n).map(|_| (rng.next() % (n as u64 / 4).max(1)) as i64).collect();
+    let ids: ArrayList<i64> = (0..n)
+        .map(|_| (rng.next() % (n as u64 / 4).max(1)) as i64)
+        .collect();
     // A membership mask: ids that pass some upstream filter.
     let mut allowed = BitSet::new();
     let mut r2 = Rng(0x123456789);
@@ -231,7 +239,9 @@ fn main() {
     println!(
         "perf_suite — mapdb-collections workload benchmarks\n\
          cores={}  (build with RUSTFLAGS=\"-C target-cpu=native\" for widest SIMD)",
-        std::thread::available_parallelism().map(|x| x.get()).unwrap_or(0)
+        std::thread::available_parallelism()
+            .map(|x| x.get())
+            .unwrap_or(0)
     );
 
     for &n in &[1_000_000usize, 8_000_000] {

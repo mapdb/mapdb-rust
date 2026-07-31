@@ -89,13 +89,21 @@ impl<T: PartialEq> Collection<T> for ArrayList<T> {
     where
         T: Clone,
     {
-        self.items.iter().filter(|v| predicate(v)).cloned().collect()
+        self.items
+            .iter()
+            .filter(|v| predicate(v))
+            .cloned()
+            .collect()
     }
     fn reject(&self, predicate: impl Fn(&T) -> bool) -> Vec<T>
     where
         T: Clone,
     {
-        self.items.iter().filter(|v| !predicate(v)).cloned().collect()
+        self.items
+            .iter()
+            .filter(|v| !predicate(v))
+            .cloned()
+            .collect()
     }
     fn inject_into<R>(&self, initial: R, f: impl FnMut(R, &T) -> R) -> R {
         self.items.iter().fold(initial, f)

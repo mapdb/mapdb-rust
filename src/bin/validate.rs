@@ -139,6 +139,9 @@ fn render_expected(v: &Value, key: &str, mode: FloatMode) -> String {
                 .map(|e| match mode {
                     FloatMode::None => match e {
                         Value::Number(n) => n.to_string(),
+                        // Fenwick `tree` is an i64 decimal-string array in JSON;
+                        // the runner emits a bare-decimal array. Unquote to match.
+                        Value::String(s) if key == "tree" => s.clone(),
                         _ => e.to_string(),
                     },
                     FloatMode::F32Keyed => format!("\"{}\"", format_f32(element_to_f32(e))),
@@ -3301,5 +3304,29 @@ fn eval_lru_assertion(
             map.contains_key(&k).to_string()
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
+#[cfg(test)]
+mod render_expected_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn fenwick_tree_unquotes_i64_decimal_strings() {
+        let v = json!(["5", "5", "0", "7", "0", "0", "0", "16"]);
+        assert_eq!(
+            render_expected(&v, "tree", FloatMode::None),
+            "[5,5,0,7,0,0,0,16]"
+        );
+    }
+
+    #[test]
+    fn non_tree_string_array_stays_quoted() {
+        let v = json!(["9007199254740993"]);
+        assert_eq!(
+            render_expected(&v, "sorted_keys", FloatMode::None),
+            "[\"9007199254740993\"]"
+        );
     }
 }

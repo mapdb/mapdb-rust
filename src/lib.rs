@@ -49,6 +49,11 @@
 //! - `validation` — enables the cross-language JSON oracle test harness.
 
 #![forbid(unsafe_code)]
+// `clippy.toml`'s `disallowed-types` list exists for the conformance runner
+// (`src/bin/validate.rs`, which denies the lint): the validator must drive mapdb
+// collections, never a std oracle. The library's own internal use of std
+// containers is legitimate, so the lint is allowed crate-wide here.
+#![allow(clippy::disallowed_types)]
 #![allow(
     clippy::needless_borrow,
     clippy::unnecessary_cast,

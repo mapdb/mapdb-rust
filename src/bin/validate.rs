@@ -4,14 +4,21 @@
 // See LICENSE-EPL-1.0.txt and LICENSE-EDL-1.0.txt.
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
+// The conformance runner MUST exercise mapdb collections, never std ones:
+// `clippy.toml` lists the banned std containers and this denies the lint.
+#![deny(clippy::disallowed_types)]
+
 //! Cross-language validation runner. Reads a JSON scenario file, runs the
 //! described operations through Rust collections, and prints the assertion
 //! outputs in the canonical per-line `<key>: <value>` format consumed by
 //! the cross-language validation harness.
 //!
-//! Routed through the generic collections (OpenHashMap, OpenHashSet, Vec,
-//! BTreeMap, BTreeSet) — same observable behaviour as the old per-primitive
-//! types but a single algorithm body.
+//! Every runner drives a PRODUCTION `mapdb_collections` type (OpenHashMap,
+//! OpenHashSet, `object::ArrayList`, `object::TreeMap`, `object::TreeSet`, …)
+//! and obtains each assertion value from the production method the assertion
+//! names. Standard-library containers are banned here — see `clippy.toml`'s
+//! `disallowed-types` list and the `deny(clippy::disallowed_types)` below —
+//! because a std oracle silently stops testing mapdb.
 
 use mapdb_collections::bloom::Bloom;
 use mapdb_collections::bounded_lru::{BoundedLruMap, EvictionCause};
@@ -23,7 +30,7 @@ use mapdb_collections::hyperloglog::HyperLogLog;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::TreeMap as ObjectTreeMap;
-use mapdb_collections::object::{natural_comparator, DynTreeSet, TreeSet};
+use mapdb_collections::object::{natural_comparator, Compare, DynTreeSet, TreeSet};
 use mapdb_collections::range::{BoundType, Range};
 use mapdb_collections::roaring::RoaringU32;
 use mapdb_collections::space_saving::SpaceSaving;
@@ -33,7 +40,6 @@ use mapdb_collections::{
 };
 use serde_json::Value;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1597,7 +1603,11 @@ fn run_arraylist(
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
 ) {
-    let mut list: Vec<i32> = Vec::new();
+    // Routes through the PRODUCTION object::ArrayList<i32>. Every assertion is
+    // answered by the list method the assertion names (select/reject/detect/
+    // count_where/any_satisfy/all_satisfy/none_satisfy/inject_into/sort/
+    // contains/get) — never a runner-local loop standing in for one.
+    let mut list: ArrayList<i32> = ArrayList::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
             "add" => list.push(op["value"].as_i64().unwrap() as i32),
@@ -1607,10 +1617,8 @@ fn run_arraylist(
                 list.insert(idx, v);
             }
             "remove" => {
-                let v = op["value"].as_i64().unwrap() as i32;
-                if let Some(i) = list.iter().position(|x| *x == v) {
-                    list.remove(i);
-                }
+                // Production remove-by-value: drops the first occurrence.
+                list.remove(&(op["value"].as_i64().unwrap() as i32));
             }
             "clear" => list.clear(),
             other => panic!("unknown arraylist op: {}", other),
@@ -1625,7 +1633,16 @@ fn run_arraylist(
     }
 }
 
-fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
+/// Sort a COPY through the production `ArrayList::sort` so an assertion can
+/// read sorted output without mutating the list under test. The ordering is
+/// the production comparison, never a runner-side sort of a `Vec`.
+fn sorted_copy(list: &ArrayList<i32>) -> ArrayList<i32> {
+    let mut sorted = ArrayList::from_iter(list.iter().copied());
+    sorted.sort();
+    sorted
+}
+
+fn eval_list_assertion(key: &str, list: &ArrayList<i32>) -> String {
     match key {
         "size" => list.len().to_string(),
         "is_empty" => list.is_empty().to_string(),
@@ -1634,50 +1651,36 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
             // parity) and does NOT wrap at i32 — see algorithms.md "Integer
             // overflow contract" and scenarios/06-overflow/i32_sum_overflow.json.
             // Routed through the production ArrayList::inject_into fold.
-            let al = ArrayList::from_iter(list.iter().copied());
-            al.inject_into(0i64, |a, &v| a + v as i64).to_string()
+            list.inject_into(0i64, |a, &v| a + v as i64).to_string()
         }
-        "inject_into_wrapping_product" | "product" => {
-            let mut acc: i32 = 1;
-            for &v in list {
-                acc = acc.wrapping_mul(v);
+        "inject_into_wrapping_product" | "product" => list
+            .inject_into(1i32, |a, &v| a.wrapping_mul(v))
+            .to_string(),
+        "max_minus_min" => {
+            let sorted = sorted_copy(list);
+            match (sorted.first(), sorted.last()) {
+                (Some(min), Some(max)) => max.wrapping_sub(*min).to_string(),
+                _ => "null".to_string(),
             }
-            acc.to_string()
         }
-        "max_minus_min" => match (list.iter().min(), list.iter().max()) {
-            (Some(min), Some(max)) => max.wrapping_sub(*min).to_string(),
-            _ => "null".to_string(),
-        },
-        "min" => list
-            .iter()
-            .min()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".into()),
-        "max" => list
-            .iter()
-            .max()
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".into()),
-        "to_sorted_array" => {
-            let mut v = list.clone();
-            v.sort();
-            format_array(&v)
-        }
+        // min/max come off the ends of the production sort — object::ArrayList
+        // has no min()/max() of its own, so this is the production ordering
+        // rather than a runner-side comparison (same shape as run_f32_arraylist).
+        "min" => opt_i32_str(sorted_copy(list).first().copied()),
+        "max" => opt_i32_str(sorted_copy(list).last().copied()),
+        "to_sorted_array" => format_array(&sorted_copy(list).to_vec()),
         "inject_into_sum" => {
             // injectInto with a + reduction accumulates in the i32 seed type
             // and wraps two's-complement at i32 — via the production fold.
-            let al = ArrayList::from_iter(list.iter().copied());
-            al.inject_into(0i32, |a, &v| a.wrapping_add(v)).to_string()
+            list.inject_into(0i32, |a, &v| a.wrapping_add(v))
+                .to_string()
         }
-        "inject_into_product" => {
-            let al = ArrayList::from_iter(list.iter().copied());
-            al.inject_into(1i32, |a, &v| a.wrapping_mul(v)).to_string()
-        }
+        "inject_into_product" => list
+            .inject_into(1i32, |a, &v| a.wrapping_mul(v))
+            .to_string(),
         _ if key.starts_with("get_at_") => {
             let idx: usize = key[7..].parse().unwrap();
-            list.get(idx)
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "null".into())
+            opt_i32_str(list.get(idx).copied())
         }
         _ if key.starts_with("contains_") => {
             let v: i32 = key[9..].parse().unwrap();
@@ -1685,52 +1688,47 @@ fn eval_list_assertion(key: &str, list: &Vec<i32>) -> String {
         }
         _ if key.starts_with("select_gt_") => {
             let t: i32 = key[10..].parse().unwrap();
-            let mut v: Vec<i32> = list.iter().copied().filter(|x| *x > t).collect();
-            v.sort();
-            format_array(&v)
+            let picked = ArrayList::from_iter(list.select(|x| *x > t));
+            format_array(&sorted_copy(&picked).to_vec())
         }
         _ if key.starts_with("reject_gt_") => {
             let t: i32 = key[10..].parse().unwrap();
-            let mut v: Vec<i32> = list.iter().copied().filter(|x| *x <= t).collect();
-            v.sort();
-            format_array(&v)
+            let kept = ArrayList::from_iter(list.reject(|x| *x > t));
+            format_array(&sorted_copy(&kept).to_vec())
         }
         _ if key.starts_with("detect_gt_") => {
             let t: i32 = key[10..].parse().unwrap();
-            list.iter()
-                .find(|&&v| v > t)
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "null".into())
+            opt_i32_str(list.detect(|x| *x > t).copied())
         }
         _ if key.starts_with("count_gt_") => {
             let t: i32 = key[9..].parse().unwrap();
-            list.iter().filter(|&&v| v > t).count().to_string()
+            list.count_where(|x| *x > t).to_string()
         }
         _ if key.starts_with("count_lt_") => {
             let t: i32 = key[9..].parse().unwrap();
-            list.iter().filter(|&&v| v < t).count().to_string()
+            list.count_where(|x| *x < t).to_string()
         }
-        "count_even" => list.iter().filter(|&&v| v % 2 == 0).count().to_string(),
-        "count_odd" => list.iter().filter(|&&v| v % 2 != 0).count().to_string(),
+        "count_even" => list.count_where(|x| x % 2 == 0).to_string(),
+        "count_odd" => list.count_where(|x| x % 2 != 0).to_string(),
         _ if key.starts_with("any_satisfy_gt_") => {
             let t: i32 = key[15..].parse().unwrap();
-            list.iter().any(|&v| v > t).to_string()
+            list.any_satisfy(|x| *x > t).to_string()
         }
         _ if key.starts_with("all_satisfy_gt_") => {
             let t: i32 = key[15..].parse().unwrap();
-            list.iter().all(|&v| v > t).to_string()
+            list.all_satisfy(|x| *x > t).to_string()
         }
         _ if key.starts_with("none_satisfy_gt_") => {
             let t: i32 = key[16..].parse().unwrap();
-            (!list.iter().any(|&v| v > t)).to_string()
+            list.none_satisfy(|x| *x > t).to_string()
         }
         _ if key.starts_with("none_satisfy_lt_") => {
             let t: i32 = key[16..].parse().unwrap();
-            (!list.iter().any(|&v| v < t)).to_string()
+            list.none_satisfy(|x| *x < t).to_string()
         }
-        "any_satisfy_even" => list.iter().any(|&v| v % 2 == 0).to_string(),
-        "all_satisfy_even" => list.iter().all(|&v| v % 2 == 0).to_string(),
-        "none_satisfy_odd" => (!list.iter().any(|&v| v % 2 != 0)).to_string(),
+        "any_satisfy_even" => list.any_satisfy(|x| x % 2 == 0).to_string(),
+        "all_satisfy_even" => list.all_satisfy(|x| x % 2 == 0).to_string(),
+        "none_satisfy_odd" => list.none_satisfy(|x| x % 2 != 0).to_string(),
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }
 }
@@ -1955,7 +1953,14 @@ fn run_treeset(
     assertions: &serde_json::Map<String, Value>,
     scenario_obj: &Value,
 ) {
-    let mut set: BTreeSet<i32> = BTreeSet::new();
+    // Routes through the PRODUCTION object::TreeSet<i32> in natural order (its
+    // `Natural` comparator is the i32 `Ord`, which is also what the
+    // `Range<i32>`-argument methods below select membership by). Every
+    // assertion is answered by the method it names — floor/ceiling/lower/
+    // higher, rank/select, first/last/min/max, poll_first/poll_last,
+    // remove_range, sub_set — and sorted/descending output is the tree's own
+    // in-order / reversed-range traversal, never a runner-side sort or oracle.
+    let mut set: TreeSet<i32> = TreeSet::new();
     let mut log = NavLog::default();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -1966,36 +1971,23 @@ fn run_treeset(
                 set.remove(&(op["value"].as_i64().unwrap() as i32));
             }
             "clear" => set.clear(),
-            "poll_first" => {
-                let e = set.iter().next().copied();
-                if let Some(x) = e {
-                    set.remove(&x);
-                }
-                log.poll_first_keys.push(e);
-            }
-            "poll_last" => {
-                let e = set.iter().next_back().copied();
-                if let Some(x) = e {
-                    set.remove(&x);
-                }
-                log.poll_last_keys.push(e);
-            }
+            "poll_first" => log.poll_first_keys.push(set.poll_first()),
+            "poll_last" => log.poll_last_keys.push(set.poll_last()),
             "remove_range" => {
                 let range = build_range_obj(&op["range"]);
-                let victims: Vec<i32> =
-                    set.iter().copied().filter(|x| range.contains(*x)).collect();
-                let count = victims.len() as i32;
-                for x in &victims {
-                    set.remove(x);
-                }
-                log.remove_range_counts.push(count);
+                log.remove_range_counts.push(set.remove_range(range) as i32);
             }
             // Forward-compat: an unknown op must not crash an older/newer
             // runner mix; skip it (mirrors unknown-collection/assertion skip).
             _ => {}
         }
     }
-    let query = scenario_obj.get("query").map(build_range_obj);
+    // Range assertions read a production `sub_set` snapshot — membership is
+    // `Range::contains` inside the collection, not a filter in the runner.
+    let range_view = scenario_obj
+        .get("query")
+        .map(build_range_obj)
+        .map(|r| set.sub_set(r));
     for (key, expected) in assertions {
         if key == "comment" {
             continue;
@@ -2003,45 +1995,24 @@ fn run_treeset(
         let v = match key.as_str() {
             "size" => set.len().to_string(),
             "is_empty" => set.is_empty().to_string(),
-            "min" | "first" => set
-                .iter()
-                .next()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "null".into()),
-            "max" | "last" => set
-                .iter()
-                .next_back()
-                .map(|v| v.to_string())
-                .unwrap_or_else(|| "null".into()),
-            "to_sorted_array" => {
-                let v: Vec<i32> = set.iter().copied().collect();
-                format_array(&v)
-            }
+            "min" => opt_i32_str(set.min().copied()),
+            "max" => opt_i32_str(set.max().copied()),
+            "first" => opt_i32_str(set.first().copied()),
+            "last" => opt_i32_str(set.last().copied()),
+            "to_sorted_array" => format_array(&set.iter().copied().collect::<Vec<i32>>()),
             "descending_elements" => {
-                let v: Vec<i32> = set.iter().rev().copied().collect();
-                format_array(&v)
+                format_array(&set.range(..).rev().copied().collect::<Vec<i32>>())
             }
-            "range_elements" => match &query {
-                Some(r) => format_array(
-                    &set.iter()
-                        .copied()
-                        .filter(|x| r.contains(*x))
-                        .collect::<Vec<i32>>(),
-                ),
+            "range_elements" => match &range_view {
+                Some(sub) => format_array(&sub.iter().copied().collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_elements_desc" => match &query {
-                Some(r) => format_array(
-                    &set.iter()
-                        .rev()
-                        .copied()
-                        .filter(|x| r.contains(*x))
-                        .collect::<Vec<i32>>(),
-                ),
+            "range_elements_desc" => match &range_view {
+                Some(sub) => format_array(&sub.range(..).rev().copied().collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_size" => match &query {
-                Some(r) => set.iter().filter(|x| r.contains(**x)).count().to_string(),
+            "range_size" => match &range_view {
+                Some(sub) => sub.len().to_string(),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
             "poll_first_keys" => opt_array(&log.poll_first_keys),
@@ -2049,11 +2020,17 @@ fn run_treeset(
             "remove_range_counts" => format_array(&log.remove_range_counts),
             _ if nav_key_prefix(key).is_some() => {
                 let (kind, n) = nav_key_prefix(key).unwrap();
-                opt_i32_str(set_nav(&set, kind, n))
+                let hit = match kind {
+                    "floor" => set.floor(&n),
+                    "ceiling" => set.ceiling(&n),
+                    "lower" => set.lower(&n),
+                    _ => set.higher(&n),
+                };
+                opt_i32_str(hit.copied())
             }
-            _ if rank_key(key).is_some() => set_rank(&set, rank_key(key).unwrap()).to_string(),
+            _ if rank_key(key).is_some() => set.rank(&rank_key(key).unwrap()).to_string(),
             _ if select_index(key).is_some() => {
-                opt_i32_str(set_select(&set, select_index(key).unwrap()))
+                opt_i32_str(set.select(select_index(key).unwrap()).copied())
             }
             _ if key.starts_with("contains_") => {
                 let k: i32 = key[9..].parse().unwrap();
@@ -2115,29 +2092,6 @@ fn select_index(key: &str) -> Option<usize> {
     rest.parse().ok()
 }
 
-/// `rank` over a sorted-int oracle: count of elements strictly less than `k`.
-fn set_rank(set: &BTreeSet<i32>, k: i32) -> usize {
-    set.range(..k).count()
-}
-
-/// `select(i)`: i-th smallest element (0-based), or `None` if `i >= len`.
-fn set_select(set: &BTreeSet<i32>, i: usize) -> Option<i32> {
-    set.iter().nth(i).copied()
-}
-
-fn set_nav(set: &BTreeSet<i32>, kind: &str, k: i32) -> Option<i32> {
-    match kind {
-        "floor" => set.range(..=k).next_back().copied(),
-        "ceiling" => set.range(k..).next().copied(),
-        "lower" => set.range(..k).next_back().copied(),
-        "higher" => set
-            .range((std::ops::Bound::Excluded(k), std::ops::Bound::Unbounded))
-            .next()
-            .copied(),
-        _ => None,
-    }
-}
-
 // ---- TreeMap<i32, i32> ----------------------------------------------------
 
 fn run_treemap(
@@ -2147,63 +2101,72 @@ fn run_treemap(
     scenario_obj: &Value,
     construction: Option<&str>,
 ) {
-    let mut map: BTreeMap<i32, i32> = BTreeMap::new();
-    let mut log = NavLog::default();
     if construction == Some("fromSorted") {
+        // Assert against the bulk-pumped tree ITSELF — no copy into a second
+        // map. rank/select here are exactly what proves the sink kept the
+        // subtree-size augmentation.
         let pumped = ObjectTreeMap::from_sorted(
             natural_comparator::<i32>(),
             i32_pairs(operations),
             DuplicatePolicy::Error,
         )
         .expect("fromSorted failed");
-        for (k, v) in &pumped {
-            map.insert(*k, *v);
-        }
-    } else {
-        for op in operations {
-            match op["op"].as_str().unwrap() {
-                "put" => {
-                    let k = op["key"].as_i64().unwrap() as i32;
-                    let v = op["value"].as_i64().unwrap() as i32;
-                    map.insert(k, v);
-                }
-                "remove" => {
-                    let k = op["key"].as_i64().unwrap() as i32;
-                    map.remove(&k);
-                }
-                "clear" => map.clear(),
-                "poll_first" => {
-                    let e = map.iter().next().map(|(k, v)| (*k, *v));
-                    if let Some((k, _)) = e {
-                        map.remove(&k);
-                    }
-                    log.poll_first_keys.push(e.map(|(k, _)| k));
-                    log.poll_first_values.push(e.map(|(_, v)| v));
-                }
-                "poll_last" => {
-                    let e = map.iter().next_back().map(|(k, v)| (*k, *v));
-                    if let Some((k, _)) = e {
-                        map.remove(&k);
-                    }
-                    log.poll_last_keys.push(e.map(|(k, _)| k));
-                    log.poll_last_values.push(e.map(|(_, v)| v));
-                }
-                "remove_range" => {
-                    let range = build_range_obj(&op["range"]);
-                    let victims: Vec<i32> =
-                        map.keys().copied().filter(|k| range.contains(*k)).collect();
-                    let count = victims.len() as i32;
-                    for k in &victims {
-                        map.remove(k);
-                    }
-                    log.remove_range_counts.push(count);
-                }
-                // Forward-compat: skip unknown ops.
-                _ => {}
+        emit_treemap_assertions(scenario, assertions, &pumped, None, &NavLog::default());
+        return;
+    }
+    // Routes through the PRODUCTION object::TreeMap<i32, i32> in natural order.
+    let mut map: ObjectTreeMap<i32, i32> = ObjectTreeMap::new();
+    let mut log = NavLog::default();
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "put" => {
+                let k = op["key"].as_i64().unwrap() as i32;
+                let v = op["value"].as_i64().unwrap() as i32;
+                map.insert(k, v);
             }
+            "remove" => {
+                let k = op["key"].as_i64().unwrap() as i32;
+                map.remove(&k);
+            }
+            "clear" => map.clear(),
+            "poll_first" => {
+                let e = map.poll_first_entry();
+                log.poll_first_keys.push(e.map(|(k, _)| k));
+                log.poll_first_values.push(e.map(|(_, v)| v));
+            }
+            "poll_last" => {
+                let e = map.poll_last_entry();
+                log.poll_last_keys.push(e.map(|(k, _)| k));
+                log.poll_last_values.push(e.map(|(_, v)| v));
+            }
+            "remove_range" => {
+                let range = build_range_obj(&op["range"]);
+                log.remove_range_counts.push(map.remove_range(range) as i32);
+            }
+            // Forward-compat: skip unknown ops.
+            _ => {}
         }
     }
-    let query = scenario_obj.get("query").map(build_range_obj);
+    // Range assertions read a production `sub_map` snapshot — membership is
+    // `Range::contains` inside the collection, not a filter in the runner.
+    let range_view = scenario_obj
+        .get("query")
+        .map(build_range_obj)
+        .map(|r| map.sub_map(r));
+    emit_treemap_assertions(scenario, assertions, &map, range_view.as_ref(), &log);
+}
+
+/// Emit every TreeMap assertion straight off the production map. Generic over
+/// the comparator so the `fromSorted` tree (built by the bulk sink, hence a
+/// runtime `Comparator`) and the incrementally built natural map share one
+/// body — and neither is copied into an oracle first.
+fn emit_treemap_assertions<C: Compare<i32>>(
+    scenario: &str,
+    assertions: &serde_json::Map<String, Value>,
+    map: &ObjectTreeMap<i32, i32, C>,
+    range_view: Option<&ObjectTreeMap<i32, i32>>,
+    log: &NavLog,
+) {
     for (key, expected) in assertions {
         if key == "comment" {
             continue;
@@ -2211,49 +2174,27 @@ fn run_treemap(
         let v = match key.as_str() {
             "size" => map.len().to_string(),
             "is_empty" => map.is_empty().to_string(),
-            "min" | "first_key" => map
-                .iter()
-                .next()
-                .map(|(k, _)| k.to_string())
-                .unwrap_or_else(|| "null".into()),
-            "max" | "last_key" => map
-                .iter()
-                .next_back()
-                .map(|(k, _)| k.to_string())
-                .unwrap_or_else(|| "null".into()),
-            "sorted_keys" => {
-                let v: Vec<i32> = map.keys().copied().collect();
-                format_array(&v)
-            }
-            "sorted_values" => {
-                let v: Vec<i32> = map.values().copied().collect();
-                format_array(&v)
-            }
+            "min" => opt_i32_str(map.min().map(|(k, _)| *k)),
+            "max" => opt_i32_str(map.max().map(|(k, _)| *k)),
+            "first_key" => opt_i32_str(map.first_key().copied()),
+            "last_key" => opt_i32_str(map.last_key().copied()),
+            "sorted_keys" => format_array(&map.keys().copied().collect::<Vec<i32>>()),
+            "sorted_values" => format_array(&map.values().copied().collect::<Vec<i32>>()),
             "descending_keys" => {
-                let v: Vec<i32> = map.keys().rev().copied().collect();
-                format_array(&v)
+                format_array(&map.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
             }
-            "range_keys" => match &query {
-                Some(r) => format_array(
-                    &map.keys()
-                        .copied()
-                        .filter(|k| r.contains(*k))
-                        .collect::<Vec<i32>>(),
-                ),
+            "range_keys" => match range_view {
+                Some(sub) => format_array(&sub.keys().copied().collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_keys_desc" => match &query {
-                Some(r) => format_array(
-                    &map.keys()
-                        .rev()
-                        .copied()
-                        .filter(|k| r.contains(*k))
-                        .collect::<Vec<i32>>(),
-                ),
+            "range_keys_desc" => match range_view {
+                Some(sub) => {
+                    format_array(&sub.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
+                }
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_size" => match &query {
-                Some(r) => map.keys().filter(|k| r.contains(**k)).count().to_string(),
+            "range_size" => match range_view {
+                Some(sub) => sub.len().to_string(),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
             "poll_first_keys" => opt_array(&log.poll_first_keys),
@@ -2263,20 +2204,21 @@ fn run_treemap(
             "remove_range_counts" => format_array(&log.remove_range_counts),
             _ if nav_key_prefix(key).is_some() => {
                 let (kind, n) = nav_key_prefix(key).unwrap();
-                opt_i32_str(map_nav(&map, kind, n))
+                let hit = match kind {
+                    "floor" => map.floor_entry(&n),
+                    "ceiling" => map.ceiling_entry(&n),
+                    "lower" => map.lower_entry(&n),
+                    _ => map.higher_entry(&n),
+                };
+                opt_i32_str(hit.map(|(k, _)| *k))
             }
-            _ if rank_key(key).is_some() => {
-                let k = rank_key(key).unwrap();
-                map.range(..k).count().to_string()
-            }
+            _ if rank_key(key).is_some() => map.rank(&rank_key(key).unwrap()).to_string(),
             _ if select_index(key).is_some() => {
-                opt_i32_str(map.keys().nth(select_index(key).unwrap()).copied())
+                opt_i32_str(map.select_key(select_index(key).unwrap()).copied())
             }
             _ if key.starts_with("get_") => {
                 let k: i32 = key[4..].parse().unwrap();
-                map.get(&k)
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "null".into())
+                opt_i32_str(map.get(&k).copied())
             }
             _ if key.starts_with("contains_") => {
                 let k: i32 = key[9..].parse().unwrap();
@@ -2285,19 +2227,6 @@ fn run_treemap(
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
         emit(scenario, key, &v, expected, FloatMode::None);
-    }
-}
-
-fn map_nav(map: &BTreeMap<i32, i32>, kind: &str, k: i32) -> Option<i32> {
-    match kind {
-        "floor" => map.range(..=k).next_back().map(|(k, _)| *k),
-        "ceiling" => map.range(k..).next().map(|(k, _)| *k),
-        "lower" => map.range(..k).next_back().map(|(k, _)| *k),
-        "higher" => map
-            .range((std::ops::Bound::Excluded(k), std::ops::Bound::Unbounded))
-            .next()
-            .map(|(k, _)| *k),
-        _ => None,
     }
 }
 

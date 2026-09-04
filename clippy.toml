@@ -1,0 +1,16 @@
+# Conformance rule: the cross-language validation runner (`src/bin/validate.rs`)
+# must obtain every assertion value from a mapdb production collection, never
+# from a standard-library container acting as an oracle. A std oracle makes the
+# scenario green while testing none of this crate's code (todo/iso2 E17/G2).
+#
+# The library itself is unaffected: `src/lib.rs` carries a crate-level
+# `allow(clippy::disallowed_types)`, so only the binary (which denies the lint)
+# is bound by this list.
+disallowed-types = [
+    { path = "std::collections::BTreeSet", reason = "use mapdb_collections::object::TreeSet — the validator must test mapdb, not std" },
+    { path = "std::collections::BTreeMap", reason = "use mapdb_collections::object::TreeMap — the validator must test mapdb, not std" },
+    { path = "std::collections::HashMap", reason = "use mapdb_collections::OpenHashMap / object::HashMap — the validator must test mapdb, not std" },
+    { path = "std::collections::HashSet", reason = "use mapdb_collections::OpenHashSet / object::HashSet — the validator must test mapdb, not std" },
+    { path = "std::collections::VecDeque", reason = "use a mapdb deque — the validator must test mapdb, not std" },
+    { path = "std::collections::BinaryHeap", reason = "use a mapdb heap/priority structure — the validator must test mapdb, not std" },
+]

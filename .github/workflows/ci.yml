@@ -42,3 +42,11 @@ jobs:
 
       - name: Build validation harness
         run: cargo build --features validation --bins
+
+      # The conformance runner lives behind the `validation` feature, so the
+      # clippy step above never sees it. This one does — and it is what makes
+      # `clippy.toml`'s `disallowed-types` guard real: a std container smuggled
+      # back into `src/bin/validate.rs` (which denies `disallowed_types`) fails
+      # the build instead of silently un-testing 57 scenarios (todo/iso2 E17).
+      - name: Clippy (validation harness)
+        run: cargo clippy --features validation --bins -- -D warnings

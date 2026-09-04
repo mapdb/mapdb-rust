@@ -396,6 +396,12 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
     /// in-place scan — over the backward-shift kernel a live scan index can be
     /// invalidated when a surviving key is relocated into an already-visited
     /// slot, so a rebuild is the correct primitive. O(n), no `K: Clone`.
+    ///
+    /// **Not panic-safe:** the old table is swapped out before the first call,
+    /// so if `keep` panics the entries it had not yet visited are dropped and
+    /// the map keeps only the survivors decided so far. `std`'s `retain` and
+    /// [`crate::BoundedMap::retain`] decide first and remove second, and do not have
+    /// this property.
     pub fn retain<F>(&mut self, mut keep: F)
     where
         F: FnMut(&K, &mut V) -> bool,

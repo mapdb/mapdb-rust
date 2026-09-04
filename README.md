@@ -98,10 +98,8 @@ src/
 ├── synchronized.rs      — Synchronized<C> + SyncGuard + factory
 ├── immutable.rs         — ImmutableHashMap / ImmutableHashSet / ImmutableList
 ├── pair.rs              — Pair<A, B>
-├── traits.rs            — PrimitiveCollection<T>, PrimitiveList, PrimitiveMap, …
 ├── multimap/            — Multimap<K, V>
 ├── object/              — HashMap / HashSet / ArrayList / TreeMap / …
-├── stream/              — Stream-style generators + collectors
 └── bin/
     ├── nanprobe.rs      — NaN-semantics probe (cross-language harness)
     └── validate.rs      — JSON scenario runner (cross-language harness)

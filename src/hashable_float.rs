@@ -5,10 +5,14 @@
 // USE AT YOUR OWN RISK — THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY KIND.
 
 //! Newtype wrappers for `f32`/`f64` that implement `Hash + Eq + Ord` via
-//! bit-pattern semantics (Java `Float.floatToIntBits` / Go `math.Float32bits`).
+//! bit-pattern semantics (Java `Float.floatToRawIntBits` / Go
+//! `math.Float32bits`).
 //!
-//! - `Hash`/`Eq` use the raw IEEE-754 bit pattern, so NaN keys are findable
-//!   (NaN-of-same-bits == NaN-of-same-bits) and `+0.0` is distinct from `-0.0`.
+//! - `Hash`/`Eq` use the raw IEEE-754 bit pattern — `to_bits()`, which does
+//!   **not** canonicalize NaN, so distinct NaN payloads are distinct keys
+//!   (Java's `floatToIntBits` would collapse them; `floatToRawIntBits` is the
+//!   equivalent). A NaN key is findable only from the same bit pattern, and
+//!   `+0.0` is distinct from `-0.0`.
 //! - `Ord` uses `total_cmp` (IEEE total ordering), which orders NaNs at the
 //!   extremes and is total even in the presence of NaN.
 //!

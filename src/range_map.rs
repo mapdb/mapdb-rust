@@ -634,4 +634,258 @@ mod tests {
         }
         assert!(v.iter().all(|(r, _)| !r.is_empty()), "non-empty");
     }
+
+    #[test]
+    fn put_unbounded_chains_on_both_sides_collapse_to_all() {
+        // No ±1 endpoint arithmetic: sentinel cuts span straight through.
+        // Each unbounded pair merges as it lands, then the middle piece bridges
+        // the two tails into all().
+        let mut m = RangeMap::new();
+        m.put(Range::less_than(-5), 7);
+        m.put(Range::closed_open(-5, 0), 7);
+        m.put(Range::closed_open(5, 10), 7);
+        m.put(Range::at_least(10), 7);
+        assert_eq!(
+            collected(&m),
+            vec![(Range::less_than(0), 7), (Range::at_least(5), 7)]
+        );
+        m.put(Range::closed_open(0, 5), 7);
+        assert_eq!(collected(&m), vec![(Range::all(), 7)]);
+        assert_eq!(m.get(i32::MIN), Some(&7));
+        assert_eq!(m.get(0), Some(&7));
+        assert_eq!(m.get(i32::MAX), Some(&7));
+    }
+
+    #[test]
+    fn put_rejoins_clipped_fragment_and_chain_beyond_it() {
+        // The insert overlaps the tail of an equal-valued entry and the head of
+        // a different-valued one: the equal fragment rejoins, the other is
+        // clipped and stays a barrier.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(0, 10), 7);
+        m.put(Range::closed_open(10, 12), 9);
+        m.put(Range::closed_open(6, 11), 7);
+        assert_eq!(
+            collected(&m),
+            vec![
+                (Range::closed_open(0, 11), 7),
+                (Range::closed_open(11, 12), 9)
+            ]
+        );
+        assert_eq!(m.get(0), Some(&7));
+        assert_eq!(m.get(10), Some(&7));
+        assert_eq!(m.get(11), Some(&9));
+    }
+
+    #[test]
+    fn put_rejoins_both_clip_fragments_of_a_straddled_equal_entry() {
+        // An insert strictly inside an equal-valued entry splits it into two
+        // fragments; both must rejoin so the map is unchanged.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(0, 20), 7);
+        m.put(Range::closed_open(6, 14), 7);
+        assert_eq!(collected(&m), vec![(Range::closed_open(0, 20), 7)]);
+        // Same shape with different-valued neighbours on both sides: they are
+        // barriers and stay put.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(0, 2), 1);
+        m.put(Range::closed_open(2, 18), 7);
+        m.put(Range::closed_open(18, 20), 1);
+        let before = collected(&m);
+        m.put(Range::closed_open(6, 14), 7);
+        assert_eq!(collected(&m), before);
+        assert_eq!(
+            collected(&m),
+            vec![
+                (Range::closed_open(0, 2), 1),
+                (Range::closed_open(2, 18), 7),
+                (Range::closed_open(18, 20), 1)
+            ]
+        );
+    }
+
+    #[test]
+    fn put_cut_empty_range_at_an_abutment_is_noop() {
+        // The empty check must precede clip_out — otherwise a cut-empty range
+        // sitting exactly on the abutment (either form) or strictly inside an
+        // entry could still disturb its host.
+        let mut m = RangeMap::new();
+        m.put(Range::closed_open(1, 5), 100);
+        m.put(Range::closed_open(5, 9), 200);
+        let before = vec![
+            (Range::closed_open(1, 5), 100),
+            (Range::closed_open(5, 9), 200),
+        ];
+        assert_eq!(collected(&m), before);
+        m.put(Range::closed_open(5, 5), 100);
+        assert_eq!(collected(&m), before, "[5,5) on the abutment");
+        m.put(Range::open_closed(5, 5), 200);
+        assert_eq!(collected(&m), before, "(5,5] on the abutment");
+        m.put(Range::closed_open(3, 3), 999);
+        assert_eq!(collected(&m), before, "[3,3) inside an entry");
+    }
+
+    #[test]
+    fn put_no_integer_range_is_a_stored_barrier() {
+        // `(1, 2)` is cut-non-empty but holds no i32. It must still be stored,
+        // split the enclosing entry, and act as a barrier between the two
+        // equal-valued fragments — no point-level test can see this, which is
+        // why the dense oracle needs it pinned exactly.
+        let mut m = RangeMap::new();
+        m.put(Range::all(), 1);
+        m.put(Range::open(1, 2), 2);
+        assert_eq!(
+            collected(&m),
+            vec![
+                (Range::at_most(1), 1),
+                (Range::open(1, 2), 2),
+                (Range::at_least(2), 1)
+            ]
+        );
+        // Removing it leaves the two fragments apart: `(1, 2)` is a real gap.
+        m.remove(Range::open(1, 2));
+        assert_eq!(
+            collected(&m),
+            vec![(Range::at_most(1), 1), (Range::at_least(2), 1)]
+        );
+    }
+
+    #[test]
+    fn remove_unbounded_clips_to_exact_sentinel_cut() {
+        // The surviving fragment starts at exactly the removed range's upper
+        // cut — Below(0) or Above(0) — with no ±1 endpoint arithmetic.
+        let mut m = RangeMap::new();
+        m.put(Range::all(), 1);
+        m.remove(Range::less_than(0));
+        assert_eq!(collected(&m), vec![(Range::at_least(0), 1)]);
+
+        let mut m = RangeMap::new();
+        m.put(Range::all(), 1);
+        m.remove(Range::at_most(0));
+        assert_eq!(collected(&m), vec![(Range::greater_than(0), 1)]);
+    }
+
+    #[test]
+    fn put_remove_random_ops_match_dense_oracle() {
+        // Differential test over a small dense domain, checked after EVERY op
+        // against a naive per-point oracle: the mapping (get / get_entry), the
+        // normal form (ascending, cut-non-empty, pairwise disjoint, no two
+        // connected entries with an equal value) and a full reconstruction of
+        // the dense array from the entries. Endpoints are drawn from a band
+        // narrower than the domain, and the unbounded factories are drawn too,
+        // so the BelowAll / AboveAll sentinels are exercised at the edges.
+        const LO: i32 = -12;
+        const HI: i32 = 12;
+        const OPS: usize = 400;
+        let points = || LO..=HI;
+        let idx = |p: i32| (p - LO) as usize;
+
+        for seed in [0x1234_5678u64, 0xdead_beef, 0x0bad_cafe] {
+            let mut m: RangeMap<i32, i32> = RangeMap::new();
+            let mut oracle: Vec<Option<i32>> = vec![None; idx(HI) + 1];
+            let mut x = seed;
+            let mut next = move || {
+                x = x
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (x >> 33) as i32
+            };
+            for step in 0..OPS {
+                // Endpoint band -8..8; cut-empty draws are let through and
+                // must be no-ops (the oracle sees no point inside them).
+                let a = next().rem_euclid(17) - 8;
+                let b = next().rem_euclid(17) - 8;
+                let (a, b) = (a.min(b), a.max(b));
+                let r = match next().rem_euclid(9) {
+                    0 => Range::closed(a, b),
+                    1 if a < b => Range::open(a, b),
+                    1 => Range::closed_open(a, b), // open(v, v) is invalid
+                    2 => Range::closed_open(a, b),
+                    3 => Range::open_closed(a, b),
+                    4 => Range::less_than(a),
+                    5 => Range::at_most(a),
+                    6 => Range::greater_than(b),
+                    7 => Range::at_least(b),
+                    _ => Range::all(),
+                };
+                let v = next().rem_euclid(3) + 1;
+                let is_put = next().rem_euclid(10) < 7;
+                if is_put {
+                    m.put(r, v);
+                } else {
+                    m.remove(r);
+                }
+                for p in points() {
+                    if r.contains(p) {
+                        oracle[idx(p)] = if is_put { Some(v) } else { None };
+                    }
+                }
+
+                // (a) + (b): pointwise lookup and the entry it comes from.
+                for p in points() {
+                    let want = oracle[idx(p)];
+                    assert_eq!(
+                        m.get(p).copied(),
+                        want,
+                        "seed {seed:#x} step {step} get({p})"
+                    );
+                    match (m.get_entry(p), want) {
+                        (None, None) => {}
+                        (Some((er, ev)), Some(w)) => {
+                            assert!(
+                                er.contains(p),
+                                "seed {seed:#x} step {step} entry {er:?} at {p}"
+                            );
+                            assert_eq!(*ev, w, "seed {seed:#x} step {step} get_entry({p})");
+                        }
+                        (got, want) => {
+                            panic!("seed {seed:#x} step {step} get_entry({p}): {got:?} vs {want:?}")
+                        }
+                    }
+                }
+
+                // (c): normal form over the entry iterator.
+                let entries = collected(&m);
+                assert!(
+                    entries.iter().all(|(r, _)| !r.is_empty()),
+                    "seed {seed:#x} step {step} cut-empty entry"
+                );
+                for w in entries.windows(2) {
+                    assert_eq!(
+                        w[0].0.lower_cut().cmp_cut(&w[1].0.lower_cut()),
+                        Ordering::Less,
+                        "seed {seed:#x} step {step} ascending"
+                    );
+                    assert!(
+                        w[0].0
+                            .intersection(&w[1].0)
+                            .map(|i| i.is_empty())
+                            .unwrap_or(true),
+                        "seed {seed:#x} step {step} disjoint"
+                    );
+                    assert!(
+                        !(w[0].0.is_connected(&w[1].0) && w[0].1 == w[1].1),
+                        "seed {seed:#x} step {step} connected equal-valued pair {:?} / {:?}",
+                        w[0],
+                        w[1]
+                    );
+                }
+
+                // (d): the entries reproduce the dense array exactly.
+                let mut rebuilt: Vec<Option<i32>> = vec![None; oracle.len()];
+                for (er, ev) in &entries {
+                    for p in points() {
+                        if er.contains(p) {
+                            assert!(
+                                rebuilt[idx(p)].is_none(),
+                                "seed {seed:#x} step {step} point {p} covered twice"
+                            );
+                            rebuilt[idx(p)] = Some(*ev);
+                        }
+                    }
+                }
+                assert_eq!(rebuilt, oracle, "seed {seed:#x} step {step} reconstruction");
+            }
+        }
+    }
 }

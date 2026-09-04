@@ -655,4 +655,39 @@ mod tests {
         }
         assert!(v.iter().all(|r| !r.is_empty()), "non-empty");
     }
+
+    #[test]
+    fn add_coalesces_whole_run_from_either_direction() {
+        // A single ascending pass is enough for a set: the three abutting
+        // pieces collapse to one run whichever order they land in.
+        let asc = rs(&[
+            Range::closed_open(1, 2),
+            Range::closed_open(2, 3),
+            Range::closed_open(3, 4),
+        ]);
+        let mixed = rs(&[
+            Range::closed_open(2, 3),
+            Range::closed_open(3, 4),
+            Range::closed_open(1, 2),
+        ]);
+        assert_eq!(collected(&asc), vec![Range::closed_open(1, 4)]);
+        assert_eq!(collected(&mixed), collected(&asc));
+        // Bridging piece joins both neighbours in one add.
+        let mut s = rs(&[Range::closed_open(1, 3), Range::closed_open(5, 7)]);
+        assert_eq!(collected(&s).len(), 2);
+        s.add(Range::closed_open(3, 5));
+        assert_eq!(collected(&s), vec![Range::closed_open(1, 7)]);
+    }
+
+    #[test]
+    fn add_rejoins_fragments_left_behind_by_remove() {
+        let mut s = rs(&[Range::closed_open(0, 10)]);
+        s.remove(Range::closed_open(3, 7));
+        assert_eq!(
+            collected(&s),
+            vec![Range::closed_open(0, 3), Range::closed_open(7, 10)]
+        );
+        s.add(Range::closed_open(3, 7));
+        assert_eq!(collected(&s), vec![Range::closed_open(0, 10)]);
+    }
 }

@@ -37,6 +37,7 @@ use mapdb_collections::hash;
 use mapdb_collections::hyperloglog::HyperLogLog;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object::ArrayList;
+use mapdb_collections::object::HashBag;
 use mapdb_collections::object::TreeMap as ObjectTreeMap;
 use mapdb_collections::object::{natural_comparator, Compare, DynTreeSet, TreeSet};
 use mapdb_collections::range::{BoundType, Range};
@@ -1785,6 +1786,16 @@ fn run_hashset(
     }
 }
 
+/// Render an unordered production set ascending. A hash set has no order, so
+/// the sort is presentation only — the SET ITSELF (including every union /
+/// intersection / difference result rendered through here) is produced by
+/// production code.
+fn sorted_render(set: &OpenHashSet<i32>) -> String {
+    let mut v: Vec<i32> = set.iter().copied().collect();
+    v.sort();
+    format_array(&v)
+}
+
 fn eval_set_assertion(
     key: &str,
     set: &OpenHashSet<i32>,
@@ -1793,67 +1804,23 @@ fn eval_set_assertion(
     match key {
         "size" => set.len().to_string(),
         "is_empty" => set.is_empty().to_string(),
-        "to_sorted_array" => {
-            let mut v: Vec<i32> = set.iter().copied().collect();
-            v.sort();
-            format_array(&v)
-        }
-        "union_sorted" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set.iter().chain(o.iter()).copied().collect();
-            v.sort();
-            v.dedup();
-            format_array(&v)
-        }
-        "intersect_sorted" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set.iter().copied().filter(|x| o.contains(x)).collect();
-            v.sort();
-            format_array(&v)
-        }
-        "difference_sorted" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set.iter().copied().filter(|x| !o.contains(x)).collect();
-            v.sort();
-            format_array(&v)
-        }
+        "to_sorted_array" => sorted_render(set),
+        // Set algebra comes from the PRODUCTION kernel methods
+        // (OpenHashSet::union/intersection/difference/symmetric_difference),
+        // never from a runner-local chain over the two sets. Only the final
+        // ascending RENDER is done here: a hash set has no order of its own, so
+        // sorting the result is presentation, not computation.
+        "union_sorted" if other.is_some() => sorted_render(&set.union(other.unwrap())),
+        "intersect_sorted" if other.is_some() => sorted_render(&set.intersection(other.unwrap())),
+        "difference_sorted" if other.is_some() => sorted_render(&set.difference(other.unwrap())),
         "symmetric_difference_sorted" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set
-                .iter()
-                .copied()
-                .filter(|x| !o.contains(x))
-                .chain(o.iter().copied().filter(|x| !set.contains(x)))
-                .collect();
-            v.sort();
-            format_array(&v)
+            sorted_render(&set.symmetric_difference(other.unwrap()))
         }
-        "union_size" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set.iter().chain(o.iter()).copied().collect();
-            v.sort();
-            v.dedup();
-            v.len().to_string()
-        }
-        "intersect_size" if other.is_some() => {
-            let o = other.unwrap();
-            set.iter().filter(|x| o.contains(x)).count().to_string()
-        }
-        "difference_size" if other.is_some() => {
-            let o = other.unwrap();
-            set.iter().filter(|x| !o.contains(x)).count().to_string()
-        }
+        "union_size" if other.is_some() => set.union(other.unwrap()).len().to_string(),
+        "intersect_size" if other.is_some() => set.intersection(other.unwrap()).len().to_string(),
+        "difference_size" if other.is_some() => set.difference(other.unwrap()).len().to_string(),
         "symmetric_difference_size" if other.is_some() => {
-            let o = other.unwrap();
-            let mut v: Vec<i32> = set
-                .iter()
-                .copied()
-                .filter(|x| !o.contains(x))
-                .chain(o.iter().copied().filter(|x| !set.contains(x)))
-                .collect();
-            v.sort();
-            v.dedup();
-            v.len().to_string()
+            set.symmetric_difference(other.unwrap()).len().to_string()
         }
         "other_size" if other.is_some() => other.unwrap().len().to_string(),
         _ if key.starts_with("contains_") => {
@@ -1864,34 +1831,28 @@ fn eval_set_assertion(
     }
 }
 
-// ---- HashBag<i32>  → modelled as OpenHashMap<i32, usize> -----------------
+// ---- HashBag<i32> ---------------------------------------------------------
 
+// Routes through the PRODUCTION object::HashBag<i32>. The bag used to be
+// hand-rolled here as an `OpenHashMap<i32, usize>` plus a runner-maintained
+// `total` counter. That backing was a mapdb type, but the OCCURRENCE
+// BOOKKEEPING under test was the runner's own, so `size`/`size_distinct`/
+// `occurrences_*` proved nothing about HashBag — the same oracle-bypass defect
+// as the old i32 tree and list runners (todo/iso2 E17), one layer subtler.
 fn run_hashbag(scenario: &str, operations: &[Value], assertions: &serde_json::Map<String, Value>) {
-    let mut bag: OpenHashMap<i32, usize> = OpenHashMap::new();
-    let mut total: usize = 0;
+    let mut bag: HashBag<i32> = HashBag::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
-            "add" => {
+            "add" => bag.insert(op["value"].as_i64().unwrap() as i32),
+            "add_occurrences" => {
                 let v = op["value"].as_i64().unwrap() as i32;
-                let next = bag.get(&v).copied().unwrap_or(0) + 1;
-                bag.insert(v, next);
-                total += 1;
+                let n = op["count"].as_u64().unwrap() as usize;
+                bag.add_occurrences(v, n);
             }
             "remove" => {
-                let v = op["value"].as_i64().unwrap() as i32;
-                if let Some(&cur) = bag.get(&v) {
-                    if cur <= 1 {
-                        bag.remove(&v);
-                    } else {
-                        bag.insert(v, cur - 1);
-                    }
-                    total -= 1;
-                }
+                bag.remove_one(&(op["value"].as_i64().unwrap() as i32));
             }
-            "clear" => {
-                bag.clear();
-                total = 0;
-            }
+            "clear" => bag.clear(),
             other => panic!("unknown hashbag op: {}", other),
         }
     }
@@ -1899,39 +1860,39 @@ fn run_hashbag(scenario: &str, operations: &[Value], assertions: &serde_json::Ma
         if key == "comment" {
             continue;
         }
-        let computed = eval_bag_assertion(key, &bag, total);
+        let computed = eval_bag_assertion(key, &bag);
         emit(scenario, key, &computed, expected, FloatMode::None);
     }
 }
 
-fn eval_bag_assertion(key: &str, bag: &OpenHashMap<i32, usize>, total: usize) -> String {
+fn eval_bag_assertion(key: &str, bag: &HashBag<i32>) -> String {
     match key {
-        "size" => total.to_string(),
-        "size_distinct" => bag.len().to_string(),
-        "is_empty" => (total == 0).to_string(),
+        // Total occurrences and distinct count are the bag's OWN accounting.
+        "size" => bag.len().to_string(),
+        "size_distinct" => bag.distinct_len().to_string(),
+        "is_empty" => bag.is_empty().to_string(),
         "sorted_distinct" => {
-            let mut keys: Vec<i32> = bag.iter().map(|(k, _)| *k).collect();
+            // Distinct elements from the production distinct-view walk; a bag
+            // is unordered, so only the ascending render happens here.
+            let mut keys: Vec<i32> = Vec::with_capacity(bag.distinct_len());
+            bag.for_each_with_occurrences(|k, _| keys.push(*k));
             keys.sort();
             format_array(&keys)
         }
         "to_sorted_array" => {
-            // Flatten the bag back to a sorted array including duplicates.
-            let mut flat: Vec<i32> = Vec::with_capacity(total);
-            for (&k, &count) in bag.iter() {
-                for _ in 0..count {
-                    flat.push(k);
-                }
-            }
+            // `HashBag::iter` yields each element once per occurrence — the
+            // flattening is the bag's, not the runner's.
+            let mut flat: Vec<i32> = bag.iter().copied().collect();
             flat.sort();
             format_array(&flat)
         }
         _ if key.starts_with("occurrences_") => {
             let v: i32 = key[12..].parse().unwrap();
-            bag.get(&v).copied().unwrap_or(0).to_string()
+            bag.occurrences_of(&v).to_string()
         }
         _ if key.starts_with("contains_") => {
             let v: i32 = key[9..].parse().unwrap();
-            bag.contains_key(&v).to_string()
+            bag.contains(&v).to_string()
         }
         _ => format!("UNKNOWN_ASSERTION:{}", key),
     }

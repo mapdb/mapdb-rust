@@ -135,9 +135,7 @@ impl<S> IndexTable<S> {
 
     /// Empty every cell (keeps the current capacity).
     pub(crate) fn clear(&mut self) {
-        for s in &mut self.slots {
-            *s = IdxSlot::Empty;
-        }
+        self.slots.fill(IdxSlot::Empty);
         self.len = 0;
     }
 

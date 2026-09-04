@@ -16,9 +16,17 @@
 //! Every runner drives a PRODUCTION `mapdb_collections` type (OpenHashMap,
 //! OpenHashSet, `object::ArrayList`, `object::TreeMap`, `object::TreeSet`, …)
 //! and obtains each assertion value from the production method the assertion
-//! names. Standard-library containers are banned here — see `clippy.toml`'s
-//! `disallowed-types` list and the `deny(clippy::disallowed_types)` below —
-//! because a std oracle silently stops testing mapdb.
+//! names — or, where the assertion vocabulary has no same-named Rust method
+//! (list `min`/`max`/`sum`/`product`), by composing production operations only
+//! (`sort` + `first`/`last`, `inject_into`). What is forbidden is a
+//! runner-local loop that re-derives a value the collection can compute.
+//!
+//! The std containers most likely to be pressed into service as an oracle are
+//! banned here — see `clippy.toml`'s `disallowed-types` list and the
+//! `deny(clippy::disallowed_types)` below. That list cannot cover `Vec` (this
+//! file legitimately builds `Vec`s of rendered strings), so it stops the
+//! `BTreeSet`/`BTreeMap` shape of the bug, not every shape of it: the reviewer
+//! rule stands on its own.
 
 use mapdb_collections::bloom::Bloom;
 use mapdb_collections::bounded_lru::{BoundedLruMap, EvictionCause};
@@ -1603,10 +1611,12 @@ fn run_arraylist(
     operations: &[Value],
     assertions: &serde_json::Map<String, Value>,
 ) {
-    // Routes through the PRODUCTION object::ArrayList<i32>. Every assertion is
-    // answered by the list method the assertion names (select/reject/detect/
-    // count_where/any_satisfy/all_satisfy/none_satisfy/inject_into/sort/
-    // contains/get) — never a runner-local loop standing in for one.
+    // Routes through the PRODUCTION object::ArrayList<i32>. Assertions with a
+    // same-named list method call it (select/reject/detect/count_where/
+    // any_satisfy/all_satisfy/none_satisfy/contains/get); the aggregate
+    // assertions that object::ArrayList has no method for (min/max/sum/product)
+    // are composed from production operations (`sort` + `first`/`last`,
+    // `inject_into`). No runner-local loop stands in for a method that exists.
     let mut list: ArrayList<i32> = ArrayList::new();
     for op in operations {
         match op["op"].as_str().unwrap() {
@@ -1663,9 +1673,10 @@ fn eval_list_assertion(key: &str, list: &ArrayList<i32>) -> String {
                 _ => "null".to_string(),
             }
         }
-        // min/max come off the ends of the production sort — object::ArrayList
-        // has no min()/max() of its own, so this is the production ordering
-        // rather than a runner-side comparison (same shape as run_f32_arraylist).
+        // object::ArrayList has no min()/max(); these come off the ends of a
+        // production-sorted copy, so the ORDER is production even though the
+        // aggregate is composed here (same shape as run_f32_arraylist). If the
+        // list surface ever grows min()/max(), call them instead.
         "min" => opt_i32_str(sorted_copy(list).first().copied()),
         "max" => opt_i32_str(sorted_copy(list).last().copied()),
         "to_sorted_array" => format_array(&sorted_copy(list).to_vec()),
@@ -1958,7 +1969,7 @@ fn run_treeset(
     // `Range<i32>`-argument methods below select membership by). Every
     // assertion is answered by the method it names — floor/ceiling/lower/
     // higher, rank/select, first/last/min/max, poll_first/poll_last,
-    // remove_range, sub_set — and sorted/descending output is the tree's own
+    // remove_range, range — and sorted/descending output is the tree's own
     // in-order / reversed-range traversal, never a runner-side sort or oracle.
     let mut set: TreeSet<i32> = TreeSet::new();
     let mut log = NavLog::default();
@@ -1982,12 +1993,11 @@ fn run_treeset(
             _ => {}
         }
     }
-    // Range assertions read a production `sub_set` snapshot — membership is
-    // `Range::contains` inside the collection, not a filter in the runner.
-    let range_view = scenario_obj
-        .get("query")
-        .map(build_range_obj)
-        .map(|r| set.sub_set(r));
+    // Range assertions run the production lazy `range()` iterator (bounds
+    // compared by the set's own comparator, count precomputed from the
+    // subtree-size augmentation) — never a filter in the runner.
+    let query = scenario_obj.get("query").map(build_range_obj);
+    let bounds = query.as_ref().map(range_bounds);
     for (key, expected) in assertions {
         if key == "comment" {
             continue;
@@ -2003,16 +2013,16 @@ fn run_treeset(
             "descending_elements" => {
                 format_array(&set.range(..).rev().copied().collect::<Vec<i32>>())
             }
-            "range_elements" => match &range_view {
-                Some(sub) => format_array(&sub.iter().copied().collect::<Vec<i32>>()),
+            "range_elements" => match bounds {
+                Some(b) => format_array(&set.range(b).copied().collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_elements_desc" => match &range_view {
-                Some(sub) => format_array(&sub.range(..).rev().copied().collect::<Vec<i32>>()),
+            "range_elements_desc" => match bounds {
+                Some(b) => format_array(&set.range(b).rev().copied().collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_size" => match &range_view {
-                Some(sub) => sub.len().to_string(),
+            "range_size" => match bounds {
+                Some(b) => set.range(b).len().to_string(),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
             "poll_first_keys" => opt_array(&log.poll_first_keys),
@@ -2111,7 +2121,13 @@ fn run_treemap(
             DuplicatePolicy::Error,
         )
         .expect("fromSorted failed");
-        emit_treemap_assertions(scenario, assertions, &pumped, None, &NavLog::default());
+        // The query is built for BOTH construction paths: a `fromSorted`
+        // scenario carrying a `query` block must answer its range assertions
+        // too, not silently skip them.
+        let bounds = scenario_obj
+            .get("query")
+            .map(|q| range_bounds(&build_range_obj(q)));
+        emit_treemap_assertions(scenario, assertions, &pumped, bounds, &NavLog::default());
         return;
     }
     // Routes through the PRODUCTION object::TreeMap<i32, i32> in natural order.
@@ -2147,13 +2163,10 @@ fn run_treemap(
             _ => {}
         }
     }
-    // Range assertions read a production `sub_map` snapshot — membership is
-    // `Range::contains` inside the collection, not a filter in the runner.
-    let range_view = scenario_obj
+    let bounds = scenario_obj
         .get("query")
-        .map(build_range_obj)
-        .map(|r| map.sub_map(r));
-    emit_treemap_assertions(scenario, assertions, &map, range_view.as_ref(), &log);
+        .map(|q| range_bounds(&build_range_obj(q)));
+    emit_treemap_assertions(scenario, assertions, &map, bounds, &log);
 }
 
 /// Emit every TreeMap assertion straight off the production map. Generic over
@@ -2164,7 +2177,7 @@ fn emit_treemap_assertions<C: Compare<i32>>(
     scenario: &str,
     assertions: &serde_json::Map<String, Value>,
     map: &ObjectTreeMap<i32, i32, C>,
-    range_view: Option<&ObjectTreeMap<i32, i32>>,
+    bounds: Option<(std::ops::Bound<i32>, std::ops::Bound<i32>)>,
     log: &NavLog,
 ) {
     for (key, expected) in assertions {
@@ -2183,18 +2196,16 @@ fn emit_treemap_assertions<C: Compare<i32>>(
             "descending_keys" => {
                 format_array(&map.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
             }
-            "range_keys" => match range_view {
-                Some(sub) => format_array(&sub.keys().copied().collect::<Vec<i32>>()),
+            "range_keys" => match bounds {
+                Some(b) => format_array(&map.range(b).map(|(k, _)| *k).collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_keys_desc" => match range_view {
-                Some(sub) => {
-                    format_array(&sub.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
-                }
+            "range_keys_desc" => match bounds {
+                Some(b) => format_array(&map.range(b).rev().map(|(k, _)| *k).collect::<Vec<i32>>()),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
-            "range_size" => match range_view {
-                Some(sub) => sub.len().to_string(),
+            "range_size" => match bounds {
+                Some(b) => map.range(b).len().to_string(),
                 None => format!("UNKNOWN_ASSERTION:{}", key),
             },
             "poll_first_keys" => opt_array(&log.poll_first_keys),
@@ -2516,6 +2527,27 @@ fn bound_type_str(bt: Option<BoundType>) -> String {
         Some(BoundType::Closed) => "closed".to_string(),
         None => "null".to_string(),
     }
+}
+
+/// Translate a production `Range<i32>` into the `RangeBounds` pair that the
+/// collections' own `range()` iterator takes. This is a bound translation, not
+/// a membership test: selection is still performed inside the tree, through its
+/// own comparator and subtree-size augmentation. `TreeMap::range` treats an
+/// inverted or cut-empty range as empty (never a panic), matching
+/// `Range::contains`.
+fn range_bounds(r: &Range<i32>) -> (std::ops::Bound<i32>, std::ops::Bound<i32>) {
+    use std::ops::Bound;
+    let lower = match (r.lower_endpoint(), r.lower_bound_type()) {
+        (Some(v), Some(BoundType::Closed)) => Bound::Included(v),
+        (Some(v), Some(BoundType::Open)) => Bound::Excluded(v),
+        _ => Bound::Unbounded,
+    };
+    let upper = match (r.upper_endpoint(), r.upper_bound_type()) {
+        (Some(v), Some(BoundType::Closed)) => Bound::Included(v),
+        (Some(v), Some(BoundType::Open)) => Bound::Excluded(v),
+        _ => Bound::Unbounded,
+    };
+    (lower, upper)
 }
 
 fn opt_i32_str(v: Option<i32>) -> String {

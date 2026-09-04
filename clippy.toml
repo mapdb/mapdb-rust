@@ -3,9 +3,17 @@
 # from a standard-library container acting as an oracle. A std oracle makes the
 # scenario green while testing none of this crate's code (todo/iso2 E17/G2).
 #
-# The library itself is unaffected: `src/lib.rs` carries a crate-level
-# `allow(clippy::disallowed_types)`, so only the binary (which denies the lint)
-# is bound by this list.
+# Scope, precisely: `src/lib.rs` carries a crate-level
+# `allow(clippy::disallowed_types)` because the library's own internal use of
+# std containers is legitimate, so the library and its inline `mod tests` are
+# exempt. Every OTHER target is a separate crate and is NOT exempt — the
+# validator binary (which additionally `deny`s the lint), `src/bin/nanprobe.rs`,
+# the integration tests and examples all inherit the warn-by-default lint, which
+# CI's `-D warnings` turns into an error. Accepted limitation: the crate-level
+# allow also exempts future library code, and no `disallowed-types` entry can
+# ban `Vec` (the original `ArrayList<i32>`-on-`Vec` shape of this bug), so the
+# reviewer rule -- a runner must call the production method -- is still the
+# primary defence.
 disallowed-types = [
     { path = "std::collections::BTreeSet", reason = "use mapdb_collections::object::TreeSet — the validator must test mapdb, not std" },
     { path = "std::collections::BTreeMap", reason = "use mapdb_collections::object::TreeMap — the validator must test mapdb, not std" },

@@ -148,13 +148,15 @@ fn check_strictly_ascending<T: Ord>(xs: &[T]) -> Result<(), BulkError> {
 // ===========================================================================
 
 /// A compact immutable sorted map backed by packed parallel arrays
-/// (`keys[i]` -> `values[i]`), queried by binary search. Built once from
+/// (`keys[i]` -> `values[i]`), queried by binary search. The arrays are
+/// `Box<[_]>`, not `Vec<_>`: a write-once snapshot never grows, so it carries
+/// neither a capacity word nor spare capacity. Built once from
 /// strictly-ascending input via [`from_sorted`](Self::from_sorted); thereafter
 /// immutable. See the [module docs](self).
 #[derive(Clone, Debug)]
 pub struct ImmutableSortedMap<K, V> {
-    keys: Vec<K>,
-    values: Vec<V>,
+    keys: Box<[K]>,
+    values: Box<[V]>,
 }
 
 impl<K: Ord, V> ImmutableSortedMap<K, V> {
@@ -205,8 +207,8 @@ impl<K: Ord, V> ImmutableSortedMap<K, V> {
     {
         Self::check_slices(keys, values);
         Self {
-            keys: keys.to_vec(),
-            values: values.to_vec(),
+            keys: keys.to_vec().into_boxed_slice(),
+            values: values.to_vec().into_boxed_slice(),
         }
     }
 
@@ -223,7 +225,10 @@ impl<K: Ord, V> ImmutableSortedMap<K, V> {
     pub fn from_sorted_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
         Self::check_slices(&keys, &values);
-        Self { keys, values }
+        Self {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        }
     }
 
     /// Fallible [`from_sorted`](Self::from_sorted): validates the input and
@@ -239,8 +244,8 @@ impl<K: Ord, V> ImmutableSortedMap<K, V> {
     {
         Self::try_check_slices(keys, values)?;
         Ok(Self {
-            keys: keys.to_vec(),
-            values: values.to_vec(),
+            keys: keys.to_vec().into_boxed_slice(),
+            values: values.to_vec().into_boxed_slice(),
         })
     }
 
@@ -253,7 +258,10 @@ impl<K: Ord, V> ImmutableSortedMap<K, V> {
     ) -> Result<Self, BulkError> {
         let (keys, values): (Vec<K>, Vec<V>) = iter.into_iter().unzip();
         Self::try_check_slices(&keys, &values)?;
-        Ok(Self { keys, values })
+        Ok(Self {
+            keys: keys.into_boxed_slice(),
+            values: values.into_boxed_slice(),
+        })
     }
 
     /// Number of entries.
@@ -601,7 +609,7 @@ impl<K, V> IntoIterator for ImmutableSortedMap<K, V> {
     /// bulk ownership-transfer exit — moves the packed arrays out, no clone.
     fn into_iter(self) -> Self::IntoIter {
         SortedIntoIter {
-            inner: self.keys.into_iter().zip(self.values),
+            inner: Vec::from(self.keys).into_iter().zip(Vec::from(self.values)),
         }
     }
 }
@@ -609,12 +617,12 @@ impl<K, V> IntoIterator for ImmutableSortedMap<K, V> {
 impl<K, V> ImmutableSortedMap<K, V> {
     /// Consume the map, yielding owned keys in ascending order.
     pub fn into_keys(self) -> std::vec::IntoIter<K> {
-        self.keys.into_iter()
+        Vec::from(self.keys).into_iter()
     }
     /// Consume the map, yielding owned values in ascending-**key** order
     /// (paired with [`into_keys`](Self::into_keys), not value-sorted).
     pub fn into_values(self) -> std::vec::IntoIter<V> {
-        self.values.into_iter()
+        Vec::from(self.values).into_iter()
     }
 }
 
@@ -649,11 +657,12 @@ impl<K, V> std::iter::FusedIterator for SortedIntoIter<K, V> {}
 // ImmutableSortedSet<T>
 // ===========================================================================
 
-/// A compact immutable sorted set backed by a single packed ascending array,
-/// queried by binary search. The element analogue of [`ImmutableSortedMap`].
+/// A compact immutable sorted set backed by a single packed ascending
+/// `Box<[T]>` (exact capacity — see [`ImmutableSortedMap`]), queried by binary
+/// search. The element analogue of [`ImmutableSortedMap`].
 #[derive(Clone, Debug)]
 pub struct ImmutableSortedSet<T> {
-    elems: Vec<T>,
+    elems: Box<[T]>,
 }
 
 impl<T: Ord> ImmutableSortedSet<T> {
@@ -683,7 +692,7 @@ impl<T: Ord> ImmutableSortedSet<T> {
     {
         Self::check_slice(elements);
         Self {
-            elems: elements.to_vec(),
+            elems: elements.to_vec().into_boxed_slice(),
         }
     }
 
@@ -696,7 +705,9 @@ impl<T: Ord> ImmutableSortedSet<T> {
     pub fn from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
         let elems: Vec<T> = iter.into_iter().collect();
         Self::check_slice(&elems);
-        Self { elems }
+        Self {
+            elems: elems.into_boxed_slice(),
+        }
     }
 
     /// Fallible [`from_sorted`](Self::from_sorted): validates the elements and
@@ -710,7 +721,7 @@ impl<T: Ord> ImmutableSortedSet<T> {
     {
         Self::try_check_slice(elements)?;
         Ok(Self {
-            elems: elements.to_vec(),
+            elems: elements.to_vec().into_boxed_slice(),
         })
     }
 
@@ -720,7 +731,9 @@ impl<T: Ord> ImmutableSortedSet<T> {
     pub fn try_from_sorted_iter<I: IntoIterator<Item = T>>(iter: I) -> Result<Self, BulkError> {
         let elems: Vec<T> = iter.into_iter().collect();
         Self::try_check_slice(&elems)?;
-        Ok(Self { elems })
+        Ok(Self {
+            elems: elems.into_boxed_slice(),
+        })
     }
 
     /// Number of elements.
@@ -894,7 +907,7 @@ impl<T> IntoIterator for ImmutableSortedSet<T> {
     /// Consuming `T` in ascending order (`for x in set`), moving the packed
     /// array out — no clone.
     fn into_iter(self) -> Self::IntoIter {
-        self.elems.into_iter()
+        Vec::from(self.elems).into_iter()
     }
 }
 

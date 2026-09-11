@@ -663,3 +663,92 @@ fn try_from_sorted_set_ok_and_errors() {
         Err(BulkError::OutOfOrder { index: 1 })
     ));
 }
+
+/// The snapshots store `Box<[_]>`, not `Vec<_>`: a map header is two
+/// (pointer, len) pairs and a set header one, so neither carries a capacity
+/// word. Pinned longhand — a silent revert to `Vec` re-adds 16 bytes per map
+/// and 8 per set (8 and 4 on a 32-bit target). This pins the *header*; that the
+/// buffer itself is exactly sized is what
+/// [`iterator_constructors_shed_spare_capacity`] exercises.
+#[test]
+fn snapshot_headers_carry_no_capacity_word() {
+    use std::mem::size_of;
+    let word = size_of::<usize>();
+    assert_eq!(size_of::<ImmutableSortedMap<i32, i32>>(), 4 * word);
+    assert_eq!(size_of::<ImmutableSortedSet<i32>>(), 2 * word);
+}
+
+/// The iterator constructors go through `into_boxed_slice()`, which drops the
+/// slack `collect`/`unzip` left behind when a `filter` hid the exact length from
+/// `size_hint`. The builder's over-allocation is asserted first, longhand —
+/// without it the test would claim to cover a shrink that never happened (an
+/// inexact `size_hint` does not by itself imply surplus capacity: 8 of 64
+/// collects to capacity 8 exactly, 9 of 65 to capacity 16). The shrink itself is
+/// observed through contents and length, never through the pointer: `Vec` may
+/// shrink in place.
+#[test]
+fn iterator_constructors_shed_spare_capacity() {
+    // The builders these constructors run internally, reproduced.
+    let (bk, bv): (Vec<i32>, Vec<i32>) = OVERALLOCATING_SOURCE().map(|i| (i, i)).unzip();
+    let be: Vec<i32> = OVERALLOCATING_SOURCE().collect();
+    assert!(bk.capacity() > bk.len(), "keys builder must over-allocate");
+    assert!(
+        bv.capacity() > bv.len(),
+        "values builder must over-allocate"
+    );
+    assert!(be.capacity() > be.len(), "elems builder must over-allocate");
+
+    let want: Vec<i32> = OVERALLOCATING_SOURCE().collect();
+    assert_eq!(want.len(), 9);
+
+    let m = ImmutableSortedMap::from_sorted_iter(OVERALLOCATING_SOURCE().map(|i| (i, i)));
+    assert_eq!(m.len(), 9);
+    assert_eq!(m.clone().into_keys().collect::<Vec<i32>>(), want);
+    assert_eq!(m.into_values().collect::<Vec<i32>>(), want);
+
+    let m = ImmutableSortedMap::try_from_sorted_iter(OVERALLOCATING_SOURCE().map(|i| (i, i)))
+        .expect("ascending");
+    assert_eq!(m.into_keys().collect::<Vec<i32>>(), want);
+
+    let s = ImmutableSortedSet::from_sorted_iter(OVERALLOCATING_SOURCE());
+    assert_eq!(s.len(), 9);
+    assert_eq!(s.into_iter().collect::<Vec<i32>>(), want);
+
+    let s = ImmutableSortedSet::try_from_sorted_iter(OVERALLOCATING_SOURCE()).expect("ascending");
+    assert_eq!(s.into_iter().collect::<Vec<i32>>(), want);
+}
+
+/// Nine ascending elements behind a `filter`, whose `size_hint` lower bound is 0
+/// and upper bound 65 — every `Vec` built from it over-allocates.
+#[allow(non_snake_case)]
+fn OVERALLOCATING_SOURCE() -> impl Iterator<Item = i32> {
+    (0..65).filter(|i| i % 8 == 0)
+}
+
+/// The iterator constructors and the consuming exits must reach `K`/`V` that are
+/// **not** `Clone` — the reason they validate an owned buffer in place instead of
+/// going through the slice constructors. `String` keys do not pin this (`String`
+/// *is* `Clone`); a bare `Ord`-only type does, at compile time.
+#[test]
+fn iterator_constructors_reach_non_clone_keys_and_values() {
+    #[derive(PartialEq, Eq, PartialOrd, Ord, Debug)]
+    struct NoClone(i32);
+
+    let m = ImmutableSortedMap::from_sorted_iter([
+        (NoClone(1), NoClone(10)),
+        (NoClone(2), NoClone(20)),
+    ]);
+    assert_eq!(m.get(&NoClone(2)), Some(&NoClone(20)));
+    let owned: Vec<(NoClone, NoClone)> = m.into_iter().collect();
+    assert_eq!(
+        owned,
+        vec![(NoClone(1), NoClone(10)), (NoClone(2), NoClone(20))]
+    );
+
+    let s = ImmutableSortedSet::try_from_sorted_iter([NoClone(1), NoClone(3)]).expect("ascending");
+    assert!(s.contains(&NoClone(3)));
+    assert_eq!(
+        s.into_iter().collect::<Vec<NoClone>>(),
+        vec![NoClone(1), NoClone(3)]
+    );
+}

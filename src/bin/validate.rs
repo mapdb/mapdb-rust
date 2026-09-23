@@ -44,14 +44,18 @@ use mapdb_collections::range::{BoundType, Range};
 use mapdb_collections::roaring::RoaringU32;
 use mapdb_collections::space_saving::SpaceSaving;
 use mapdb_collections::{
-    HashableF32, ImmutableSortedMap, ImmutableSortedSet, OpenHashMap, OpenHashSet, RangeMap,
-    RangeSet,
+    HashableF32, ImmutableSortedMap, ImmutableSortedSet, Interval, OpenHashMap, OpenHashSet,
+    RangeMap, RangeSet,
 };
 use serde_json::Value;
 use std::cell::RefCell;
 use std::fs;
+use std::io::{Read, Write};
+use std::process::{Command, Stdio};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 
 // Set whenever any assertion mismatches. The process exits non-zero at the
 // end so the harness treats assertion failures as the primary pass/fail.
@@ -243,9 +247,24 @@ fn main() {
         eprintln!("Usage: validate <scenario.json>");
         std::process::exit(2);
     }
+    // Panic-judge flags are checked before trace mode. No-args stays exit 2.
+    if args[1] == "--panic-judge-selftest" {
+        if args.len() != 2 {
+            std::process::exit(2);
+        }
+        std::process::exit(panic_judge_selftest());
+    }
+    let panic_child = if args[1] == "--panic-child" {
+        if args.len() != 3 {
+            std::process::exit(2);
+        }
+        true
+    } else {
+        false
+    };
     // Flags select trace mode. No flag keeps the positional scenario path,
     // including extra positionals (only args[1] is read).
-    if args.iter().skip(1).any(|a| a.starts_with('-')) {
+    if !panic_child && args.iter().skip(1).any(|a| a.starts_with('-')) {
         let code = match parse_trace_args(&args[1..]) {
             Ok((trace, out)) => run_trace(&trace, &out),
             Err(msg) => {
@@ -255,7 +274,7 @@ fn main() {
         };
         std::process::exit(code);
     }
-    let path = &args[1];
+    let path = if panic_child { &args[2] } else { &args[1] };
     let text = fs::read_to_string(path).expect("failed to read scenario file");
     let scenario: Value = serde_json::from_str(&text).expect("failed to parse JSON");
 
@@ -268,6 +287,24 @@ fn main() {
     let assertions = scenario["assertions"]
         .as_object()
         .expect("missing assertions");
+
+    // The parent does not apply ops and prints nothing until the child is
+    // reaped. The child must not spawn again, and must not catch the trap.
+    if !panic_child {
+        if let Some(flag) = assertions.get("expect_panic") {
+            if flag != &Value::Bool(true) {
+                std::process::exit(1);
+            }
+            if panic_collection_known(collection) {
+                parent_expect_panic(path, name);
+            }
+        }
+    } else if collection == "Interval<i32>" {
+        run_interval(name, operations);
+        println!("=== scenario: {name} ===");
+        let _ = std::io::stdout().flush();
+        return;
+    }
 
     println!("=== scenario: {} ===", name);
 
@@ -319,6 +356,246 @@ fn main() {
 
     if ANY_FAIL.load(Ordering::Relaxed) {
         std::process::exit(1);
+    }
+}
+
+/// Q2: pass only when the child died abnormally, stdout has no sentinel,
+/// and the parent did not time out. `process::exit` does not flush, so
+/// callers that exit after a sentinel print must flush first — an empty
+/// stdout would be judged as a successful panic.
+fn panic_passed(exit_nonzero: bool, stdout: &str, timed_out: bool) -> bool {
+    !timed_out && exit_nonzero && !stdout_has_sentinel(stdout)
+}
+
+fn stdout_has_sentinel(stdout: &str) -> bool {
+    for raw in stdout.split('\n') {
+        let line = raw.trim_end_matches('\r');
+        if line.starts_with("=== scenario:") {
+            return true;
+        }
+        // PASS/FAIL/SKIP/ERROR lines are not assertion sentinels.
+        if is_status_line(line) {
+            continue;
+        }
+        if is_assertion_line(line) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_status_line(line: &str) -> bool {
+    for word in ["PASS", "FAIL", "SKIP", "ERROR", "SUMMARY"] {
+        if let Some(rest) = line.strip_prefix(word) {
+            if rest.is_empty()
+                || rest.starts_with(' ')
+                || rest.starts_with(':')
+                || rest.starts_with('\t')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `^[A-Za-z0-9_+-]+:[ ]`
+fn is_assertion_line(line: &str) -> bool {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && is_assertion_key_byte(bytes[i]) {
+        i += 1;
+    }
+    i > 0 && i + 1 < bytes.len() && bytes[i] == b':' && bytes[i + 1] == b' '
+}
+
+fn is_assertion_key_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'+' || b == b'-'
+}
+
+fn panic_judge_selftest() -> i32 {
+    // (id, exit_nonzero, stdout, timed_out, expect_pass)
+    let cases: [(&str, bool, &str, bool, bool); 11] = [
+        ("1", false, "", false, false),
+        ("2", false, "=== scenario: x ===\n", false, false),
+        ("3", true, "size: 1\n", false, false),
+        ("4", true, "", false, true),
+        ("5", true, "boom\n", false, true),
+        ("6", true, "", true, false),
+        ("7", true, "FAIL name expect_panic\n", false, true),
+        ("8", true, "expect_panic: true\n", false, false),
+        ("9", true, "SUMMARY: 1\n", false, true),
+        ("10", true, "boom:detail\n", false, true),
+        ("11", true, "FAIL-count: 1\n", false, false),
+    ];
+    let mut failed = false;
+    for (id, exit_nonzero, stdout, timed_out, expect) in cases {
+        let got = panic_passed(exit_nonzero, stdout, timed_out);
+        if got != expect {
+            eprintln!(
+                "panic-judge selftest case {id} failed: got {got}, expected {expect}"
+            );
+            failed = true;
+        }
+    }
+    if failed {
+        1
+    } else {
+        0
+    }
+}
+
+fn panic_collection_known(collection: &str) -> bool {
+    matches!(
+        collection,
+        "HashMap<i32, i32>"
+            | "HashMap<i64, i32>"
+            | "ListMultimap<i64, i32>"
+            | "SetMultimap<i64, i32>"
+            | "ArrayList<i32>"
+            | "HashSet<i32>"
+            | "HashBag<i32>"
+            | "TreeSet<i32>"
+            | "TreeMap<i32, i32>"
+            | "HashMap<f32, i32>"
+            | "HashSet<f32>"
+            | "TreeSet<f32>"
+            | "ArrayList<f32>"
+            | "Range<i32>"
+            | "RangeSet<i32>"
+            | "RangeMap<i32, i32>"
+            | "BoundedLruMap<i32, i32>"
+            | "ImmutableSortedMap<i32, i32>"
+            | "ImmutableSortedSet<i32>"
+            | "HashPipeline"
+            | "Bloom"
+            | "HyperLogLog"
+            | "CountMin"
+            | "SpaceSaving"
+            | "FenwickTree"
+            | "RoaringU32"
+            | "Interval<i32>"
+    )
+}
+
+fn parent_expect_panic(path: &str, name: &str) -> ! {
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("current_exe: {e}");
+            fail_expect_panic(name);
+        }
+    };
+    let mut child = match Command::new(exe)
+        .arg("--panic-child")
+        .arg(path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(e) => {
+            eprintln!("spawn: {e}");
+            fail_expect_panic(name);
+        }
+    };
+    let Some(mut pipe) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        fail_expect_panic(name);
+    };
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut timed_out = false;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    timed_out = true;
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                thread::sleep(Duration::from_millis(20).min(deadline - now));
+            }
+            Err(e) => {
+                eprintln!("try_wait: {e}");
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = reader.join();
+                fail_expect_panic(name);
+            }
+        }
+    };
+    let stdout_buf = match reader.join() {
+        Ok(buf) => buf,
+        Err(_) => fail_expect_panic(name),
+    };
+    let stdout = String::from_utf8_lossy(&stdout_buf);
+    let exit_nonzero = match &status {
+        Some(status) => !status.success(),
+        // Signaled death has no exit code. A timeout kill is the same shape
+        // but `timed_out` rejects it.
+        None => true,
+    };
+    if panic_passed(exit_nonzero, &stdout, timed_out) {
+        println!("=== scenario: {name} ===");
+        println!("expect_panic: true");
+        let _ = std::io::stdout().flush();
+        std::process::exit(0);
+    }
+    fail_expect_panic(name);
+}
+
+fn fail_expect_panic(name: &str) -> ! {
+    println!("=== scenario: {name} ===");
+    println!("FAIL {name} expect_panic: child did not trap cleanly");
+    let _ = std::io::stdout().flush();
+    std::process::exit(1);
+}
+
+fn interval_i32_field(op: &Value, field: &str) -> Option<i32> {
+    let n = op.get(field)?.as_i64()?;
+    i32::try_from(n).ok()
+}
+
+fn interval_operand_reject(scenario: &str) -> ! {
+    println!("=== scenario: {scenario} ===");
+    let _ = std::io::stdout().flush();
+    std::process::exit(1);
+}
+
+fn run_interval(scenario: &str, operations: &[Value]) {
+    let mut current: Option<Interval<i32>> = None;
+    for op in operations {
+        match op.get("op").and_then(Value::as_str) {
+            Some("from_to_by") => {
+                let Some(from) = interval_i32_field(op, "from") else {
+                    interval_operand_reject(scenario);
+                };
+                let Some(to) = interval_i32_field(op, "to") else {
+                    interval_operand_reject(scenario);
+                };
+                let Some(step) = interval_i32_field(op, "step") else {
+                    interval_operand_reject(scenario);
+                };
+                let built: Interval<i32> = Interval::from_to_by(from, to, step);
+                current = Some(built);
+            }
+            Some("reversed") => {
+                let Some(cur) = current.as_ref() else {
+                    interval_operand_reject(scenario);
+                };
+                current = Some(cur.reversed());
+            }
+            _ => interval_operand_reject(scenario),
+        }
     }
 }
 

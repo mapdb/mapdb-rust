@@ -241,7 +241,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: validate <scenario.json>");
-        std::process::exit(1);
+        std::process::exit(2);
+    }
+    // Flags select trace mode. No flag keeps the positional scenario path,
+    // including extra positionals (only args[1] is read).
+    if args.iter().skip(1).any(|a| a.starts_with('-')) {
+        let code = match parse_trace_args(&args[1..]) {
+            Ok((trace, out)) => run_trace(&trace, &out),
+            Err(msg) => {
+                eprintln!("{msg}");
+                2
+            }
+        };
+        std::process::exit(code);
     }
     let path = &args[1];
     let text = fs::read_to_string(path).expect("failed to read scenario file");
@@ -313,6 +325,324 @@ fn main() {
 fn format_array(v: &[i32]) -> String {
     let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
     format!("[{}]", parts.join(","))
+}
+
+// ---- trace mode -----------------------------------------------------------
+//
+// `--trace <file> --emit-observations <out.json>` replays M1 ops and writes
+// a fixed probe set. Unknown ops are errors (not the forward-compat skip the
+// positional TreeMap runner uses). Assertions are ignored. Stdout stays empty.
+
+const TRACE_USAGE: &str = "usage: validate --trace <file> --emit-observations <out.json>";
+
+#[derive(serde::Serialize)]
+struct ObservationDoc {
+    name: String,
+    collection: String,
+    observations: serde_json::Map<String, Value>,
+}
+
+fn parse_trace_args(args: &[String]) -> Result<(String, String), String> {
+    let mut trace: Option<String> = None;
+    let mut out: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--trace" => {
+                if trace.is_some() || i + 1 >= args.len() || args[i + 1].starts_with('-') {
+                    return Err(TRACE_USAGE.to_string());
+                }
+                trace = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--emit-observations" => {
+                if out.is_some() || i + 1 >= args.len() || args[i + 1].starts_with('-') {
+                    return Err(TRACE_USAGE.to_string());
+                }
+                out = Some(args[i + 1].clone());
+                i += 2;
+            }
+            _ => return Err(TRACE_USAGE.to_string()),
+        }
+    }
+    match (trace, out) {
+        (Some(trace), Some(out)) => Ok((trace, out)),
+        _ => Err(TRACE_USAGE.to_string()),
+    }
+}
+
+fn run_trace(path: &str, out: &str) -> i32 {
+    match trace_replay(path, out) {
+        Ok(()) => 0,
+        Err(msg) => {
+            eprintln!("{msg}");
+            1
+        }
+    }
+}
+
+fn trace_replay(path: &str, out: &str) -> Result<(), String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("failed to read scenario file: {e}"))?;
+    let scenario: Value =
+        serde_json::from_str(&text).map_err(|e| format!("failed to parse JSON: {e}"))?;
+    let name = scenario
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing name".to_string())?
+        .to_string();
+    let collection = scenario
+        .get("collection")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "missing collection".to_string())?;
+    let operations = scenario
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "missing operations".to_string())?;
+    let observations = match collection {
+        "HashMap<i32, i32>" => {
+            reject_trace_construction(&scenario)?;
+            trace_hashmap(operations)?
+        }
+        "ArrayList<i32>" => {
+            reject_trace_construction(&scenario)?;
+            trace_arraylist(operations)?
+        }
+        "TreeMap<i32, i32>" => {
+            reject_trace_construction(&scenario)?;
+            trace_treemap(operations)?
+        }
+        other => {
+            eprintln!(
+                "skip: unsupported collection kind (forward-compat): {}",
+                other
+            );
+            return Ok(());
+        }
+    };
+    write_observations(
+        out,
+        ObservationDoc {
+            name,
+            collection: collection.to_string(),
+            observations,
+        },
+    )
+}
+
+fn reject_trace_construction(scenario: &Value) -> Result<(), String> {
+    if scenario.get("construction").and_then(Value::as_str).is_some() {
+        return Err("trace: construction is not supported".to_string());
+    }
+    Ok(())
+}
+
+fn record_obs(obs: &mut serde_json::Map<String, Value>, key: &str, value: String) {
+    if value.starts_with("UNKNOWN_ASSERTION:") {
+        return;
+    }
+    obs.insert(key.to_string(), Value::String(value));
+}
+
+fn require_i32_field(op: &Value, field: &str) -> Result<i32, String> {
+    let Some(v) = op.get(field) else {
+        return Err(format!("malformed op: missing {field}"));
+    };
+    let Some(n) = v.as_i64() else {
+        return Err(format!("malformed op: {field} is not an i32 integer"));
+    };
+    i32::try_from(n).map_err(|_| format!("malformed op: {field} is not an i32 integer"))
+}
+
+fn op_kind<'a>(op: &'a Value) -> Result<&'a str, String> {
+    op.get("op")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "malformed op: missing op".to_string())
+}
+
+/// `record` is set for put/remove keys (probe set). Any op key sets `saw_99`.
+fn note_map_key(keys: &mut Vec<i32>, saw_99: &mut bool, k: i32, record: bool) {
+    if k == 99 {
+        *saw_99 = true;
+    }
+    if record && !keys.contains(&k) {
+        keys.push(k);
+    }
+}
+
+fn trace_hashmap(operations: &[Value]) -> Result<serde_json::Map<String, Value>, String> {
+    let mut map: OpenHashMap<i32, i32> = OpenHashMap::new();
+    let mut keys: Vec<i32> = Vec::new();
+    let mut saw_99 = false;
+    for op in operations {
+        match op_kind(op)? {
+            "put" => {
+                let k = require_i32_field(op, "key")?;
+                let v = require_i32_field(op, "value")?;
+                note_map_key(&mut keys, &mut saw_99, k, true);
+                map.insert(k, v);
+            }
+            "remove" => {
+                let k = require_i32_field(op, "key")?;
+                note_map_key(&mut keys, &mut saw_99, k, true);
+                map.remove(&k);
+            }
+            "get" => {
+                let k = require_i32_field(op, "key")?;
+                note_map_key(&mut keys, &mut saw_99, k, false);
+            }
+            "clear" => map.clear(),
+            other => return Err(format!("unknown op: {other}")),
+        }
+    }
+    let mut obs = serde_json::Map::new();
+    for probe in ["size", "is_empty", "sorted_keys", "sorted_values"] {
+        record_obs(&mut obs, probe, eval_map_assertion(probe, &map));
+    }
+    record_map_key_probes(&mut obs, &keys, saw_99, |probe| {
+        eval_map_assertion(probe, &map)
+    });
+    Ok(obs)
+}
+
+fn record_map_key_probes(
+    obs: &mut serde_json::Map<String, Value>,
+    keys: &[i32],
+    saw_99: bool,
+    eval: impl Fn(&str) -> String,
+) {
+    for k in keys {
+        let get = format!("get_{k}");
+        record_obs(obs, &get, eval(&get));
+        let contains = format!("contains_{k}");
+        record_obs(obs, &contains, eval(&contains));
+    }
+    if !saw_99 {
+        record_obs(obs, "get_99", eval("get_99"));
+        record_obs(obs, "contains_99", eval("contains_99"));
+    }
+}
+
+fn trace_arraylist(operations: &[Value]) -> Result<serde_json::Map<String, Value>, String> {
+    let mut list: ArrayList<i32> = ArrayList::new();
+    for op in operations {
+        match op_kind(op)? {
+            "add" => list.push(require_i32_field(op, "value")?),
+            "add_at" => {
+                let v = require_i32_field(op, "value")?;
+                let idx = require_list_index(op, list.len())?;
+                list.insert(idx, v);
+            }
+            "remove" => {
+                let v = require_i32_field(op, "value")?;
+                list.remove(&v);
+            }
+            "clear" => list.clear(),
+            other => return Err(format!("unknown op: {other}")),
+        }
+    }
+    let mut obs = serde_json::Map::new();
+    for probe in ["size", "is_empty", "to_sorted_array", "sum"] {
+        record_obs(&mut obs, probe, eval_list_assertion(probe, &list));
+    }
+    for i in 0..list.len() {
+        let probe = format!("get_at_{i}");
+        record_obs(&mut obs, &probe, eval_list_assertion(&probe, &list));
+    }
+    Ok(obs)
+}
+
+fn require_list_index(op: &Value, len: usize) -> Result<usize, String> {
+    let Some(v) = op.get("index") else {
+        return Err("malformed op: missing index".to_string());
+    };
+    let Some(n) = v.as_u64() else {
+        return Err("malformed op: index is not an integer".to_string());
+    };
+    let idx = usize::try_from(n).map_err(|_| "malformed op: index is not an integer".to_string())?;
+    if idx > len {
+        return Err("malformed op: index out of range".to_string());
+    }
+    Ok(idx)
+}
+
+fn trace_treemap(operations: &[Value]) -> Result<serde_json::Map<String, Value>, String> {
+    let mut map: ObjectTreeMap<i32, i32> = ObjectTreeMap::new();
+    let mut keys: Vec<i32> = Vec::new();
+    let mut saw_99 = false;
+    for op in operations {
+        match op_kind(op)? {
+            "put" => {
+                let k = require_i32_field(op, "key")?;
+                let v = require_i32_field(op, "value")?;
+                note_map_key(&mut keys, &mut saw_99, k, true);
+                map.insert(k, v);
+            }
+            "remove" => {
+                let k = require_i32_field(op, "key")?;
+                note_map_key(&mut keys, &mut saw_99, k, true);
+                map.remove(&k);
+            }
+            "get" => {
+                let k = require_i32_field(op, "key")?;
+                note_map_key(&mut keys, &mut saw_99, k, false);
+            }
+            "clear" => map.clear(),
+            other => return Err(format!("unknown op: {other}")),
+        }
+    }
+    let log = NavLog::default();
+    let eval = |probe: &str| treemap_assertion_value(probe, &map, None, &log);
+    let mut obs = serde_json::Map::new();
+    for probe in ["size", "is_empty", "sorted_keys", "sorted_values"] {
+        record_obs(&mut obs, probe, eval(probe));
+    }
+    if !map.is_empty() {
+        record_obs(&mut obs, "first_key", eval("first_key"));
+        record_obs(&mut obs, "last_key", eval("last_key"));
+    }
+    record_map_key_probes(&mut obs, &keys, saw_99, &eval);
+    for k in &keys {
+        for prefix in ["floor", "ceiling", "lower", "higher", "rank"] {
+            let probe = format!("{prefix}_{k}");
+            record_obs(&mut obs, &probe, eval(&probe));
+        }
+    }
+    // select_<i> for every in-range index, and only while the tree is small.
+    if map.len() <= 32 {
+        for i in 0..map.len() {
+            let probe = format!("select_{i}");
+            record_obs(&mut obs, &probe, eval(&probe));
+        }
+    }
+    Ok(obs)
+}
+
+/// Temp file in the destination directory, then rename. A failed write leaves
+/// the final path untouched.
+fn write_observations(out: &str, doc: ObservationDoc) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| format!("failed to encode JSON: {e}"))?;
+    let mut bytes = bytes;
+    bytes.push(b'\n');
+    let final_path = std::path::Path::new(out);
+    let parent = match final_path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => std::path::PathBuf::from("."),
+    };
+    let file_name = final_path
+        .file_name()
+        .ok_or_else(|| "malformed output path".to_string())?;
+    let mut tmp_name = file_name.to_os_string();
+    tmp_name.push(format!(".{}.tmp", std::process::id()));
+    let tmp = parent.join(tmp_name);
+    if let Err(e) = fs::write(&tmp, &bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("failed to write observations: {e}"));
+    }
+    if let Err(e) = fs::rename(&tmp, final_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("failed to write observations: {e}"));
+    }
+    Ok(())
 }
 
 // ---- HashPipeline (spec/features/hash-pipeline.md) ------------------------
@@ -2134,6 +2464,67 @@ fn run_treemap(
 /// the comparator so the `fromSorted` tree (built by the bulk sink, hence a
 /// runtime `Comparator`) and the incrementally built natural map share one
 /// body — and neither is copied into an oracle first.
+fn treemap_assertion_value<C: Compare<i32>>(
+    key: &str,
+    map: &ObjectTreeMap<i32, i32, C>,
+    bounds: Option<(std::ops::Bound<i32>, std::ops::Bound<i32>)>,
+    log: &NavLog,
+) -> String {
+    match key {
+        "size" => map.len().to_string(),
+        "is_empty" => map.is_empty().to_string(),
+        "min" => opt_i32_str(map.min().map(|(k, _)| *k)),
+        "max" => opt_i32_str(map.max().map(|(k, _)| *k)),
+        "first_key" => opt_i32_str(map.first_key().copied()),
+        "last_key" => opt_i32_str(map.last_key().copied()),
+        "sorted_keys" => format_array(&map.keys().copied().collect::<Vec<i32>>()),
+        "sorted_values" => format_array(&map.values().copied().collect::<Vec<i32>>()),
+        "descending_keys" => {
+            format_array(&map.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
+        }
+        "range_keys" => match bounds {
+            Some(b) => format_array(&map.range(b).map(|(k, _)| *k).collect::<Vec<i32>>()),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        "range_keys_desc" => match bounds {
+            Some(b) => format_array(&map.range(b).rev().map(|(k, _)| *k).collect::<Vec<i32>>()),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        "range_size" => match bounds {
+            Some(b) => map.range(b).len().to_string(),
+            None => format!("UNKNOWN_ASSERTION:{}", key),
+        },
+        "poll_first_keys" => opt_array(&log.poll_first_keys),
+        "poll_last_keys" => opt_array(&log.poll_last_keys),
+        "poll_first_values" => opt_array(&log.poll_first_values),
+        "poll_last_values" => opt_array(&log.poll_last_values),
+        "remove_range_counts" => format_array(&log.remove_range_counts),
+        _ if nav_key_prefix(key).is_some() => {
+            let (kind, n) = nav_key_prefix(key).unwrap();
+            let hit = match kind {
+                "floor" => map.floor_entry(&n),
+                "ceiling" => map.ceiling_entry(&n),
+                "lower" => map.lower_entry(&n),
+                _ => map.higher_entry(&n),
+            };
+            opt_i32_str(hit.map(|(k, _)| *k))
+        }
+        _ if rank_key(key).is_some() => map.rank(&rank_key(key).unwrap()).to_string(),
+        _ if select_index(key).is_some() => {
+            opt_i32_str(map.select_key(select_index(key).unwrap()).copied())
+        }
+        _ if key.starts_with("get_") => {
+            let k: i32 = key[4..].parse().unwrap();
+            opt_i32_str(map.get(&k).copied())
+        }
+        _ if key.starts_with("contains_") => {
+            let k: i32 = key[9..].parse().unwrap();
+            map.contains_key(&k).to_string()
+        }
+        _ => format!("UNKNOWN_ASSERTION:{}", key),
+    }
+}
+
 fn emit_treemap_assertions<C: Compare<i32>>(
     scenario: &str,
     assertions: &serde_json::Map<String, Value>,
@@ -2145,59 +2536,7 @@ fn emit_treemap_assertions<C: Compare<i32>>(
         if key == "comment" {
             continue;
         }
-        let v = match key.as_str() {
-            "size" => map.len().to_string(),
-            "is_empty" => map.is_empty().to_string(),
-            "min" => opt_i32_str(map.min().map(|(k, _)| *k)),
-            "max" => opt_i32_str(map.max().map(|(k, _)| *k)),
-            "first_key" => opt_i32_str(map.first_key().copied()),
-            "last_key" => opt_i32_str(map.last_key().copied()),
-            "sorted_keys" => format_array(&map.keys().copied().collect::<Vec<i32>>()),
-            "sorted_values" => format_array(&map.values().copied().collect::<Vec<i32>>()),
-            "descending_keys" => {
-                format_array(&map.range(..).rev().map(|(k, _)| *k).collect::<Vec<i32>>())
-            }
-            "range_keys" => match bounds {
-                Some(b) => format_array(&map.range(b).map(|(k, _)| *k).collect::<Vec<i32>>()),
-                None => format!("UNKNOWN_ASSERTION:{}", key),
-            },
-            "range_keys_desc" => match bounds {
-                Some(b) => format_array(&map.range(b).rev().map(|(k, _)| *k).collect::<Vec<i32>>()),
-                None => format!("UNKNOWN_ASSERTION:{}", key),
-            },
-            "range_size" => match bounds {
-                Some(b) => map.range(b).len().to_string(),
-                None => format!("UNKNOWN_ASSERTION:{}", key),
-            },
-            "poll_first_keys" => opt_array(&log.poll_first_keys),
-            "poll_last_keys" => opt_array(&log.poll_last_keys),
-            "poll_first_values" => opt_array(&log.poll_first_values),
-            "poll_last_values" => opt_array(&log.poll_last_values),
-            "remove_range_counts" => format_array(&log.remove_range_counts),
-            _ if nav_key_prefix(key).is_some() => {
-                let (kind, n) = nav_key_prefix(key).unwrap();
-                let hit = match kind {
-                    "floor" => map.floor_entry(&n),
-                    "ceiling" => map.ceiling_entry(&n),
-                    "lower" => map.lower_entry(&n),
-                    _ => map.higher_entry(&n),
-                };
-                opt_i32_str(hit.map(|(k, _)| *k))
-            }
-            _ if rank_key(key).is_some() => map.rank(&rank_key(key).unwrap()).to_string(),
-            _ if select_index(key).is_some() => {
-                opt_i32_str(map.select_key(select_index(key).unwrap()).copied())
-            }
-            _ if key.starts_with("get_") => {
-                let k: i32 = key[4..].parse().unwrap();
-                opt_i32_str(map.get(&k).copied())
-            }
-            _ if key.starts_with("contains_") => {
-                let k: i32 = key[9..].parse().unwrap();
-                map.contains_key(&k).to_string()
-            }
-            _ => format!("UNKNOWN_ASSERTION:{}", key),
-        };
+        let v = treemap_assertion_value(key, map, bounds, log);
         emit(scenario, key, &v, expected, FloatMode::None);
     }
 }

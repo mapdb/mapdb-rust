@@ -184,10 +184,7 @@ fn ns_per(elapsed_ns: u128) -> u64 {
 }
 
 fn print_row(id: &str, n: usize, snap: (u64, u64, i64), lookup_ns: u64) {
-    println!(
-        "{id}\t{n}\t{}\t{}\t{}\t{lookup_ns}",
-        snap.0, snap.1, snap.2
-    );
+    println!("{id}\t{n}\t{}\t{}\t{}\t{lookup_ns}", snap.0, snap.1, snap.2);
 }
 
 fn run_ohm(c: &Corpus) {
@@ -250,7 +247,8 @@ fn run_ism(c: &Corpus) {
     let warm_n = WARMUP.min(c.map_n);
     begin_build();
     {
-        let _warm = ImmutableSortedMap::from_sorted(&c.sorted_keys[..warm_n], &c.sorted_vals[..warm_n]);
+        let _warm =
+            ImmutableSortedMap::from_sorted(&c.sorted_keys[..warm_n], &c.sorted_vals[..warm_n]);
     }
     reset_counters();
     let map = ImmutableSortedMap::from_sorted(&c.sorted_keys, &c.sorted_vals);
@@ -354,9 +352,7 @@ fn main() -> ExitCode {
     eprintln!(
         "mode {mode} map_n {map_n} mm_keys {mm_keys} values_per_key {VALUES_PER_KEY} lookups {LOOKUPS}"
     );
-    eprintln!(
-        "bytes are requested Layout sizes. malloc size-class rounding is not measured."
-    );
+    eprintln!("bytes are requested Layout sizes. malloc size-class rounding is not measured.");
     // Corpus vectors are allocated with counting disabled so they are not
     // part of a collection's build total.
     let c = corpus(map_n, mm_keys);

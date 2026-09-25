@@ -391,33 +391,43 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
 
     /// Retains only the entries for which `keep(&k, &mut v)` returns `true`.
     ///
-    /// Implemented by rebuilding the table in place (take entries, clear,
-    /// re-insert the survivors at the **same capacity**) rather than an
-    /// in-place scan — over the backward-shift kernel a live scan index can be
-    /// invalidated when a surviving key is relocated into an already-visited
-    /// slot, so a rebuild is the correct primitive. O(n), no `K: Clone`.
+    /// Calls the predicate once per entry. If it panics, every entry remains
+    /// present and reachable; changes already made to values remain. Hashing a
+    /// survivor can also panic, with the same guarantee. Once all decisions and
+    /// hashes are ready, survivors are rebuilt at the same capacity before
+    /// removed entries are dropped. A removed entry's destructor may panic
+    /// after the new table has been installed.
     ///
-    /// **Not panic-safe:** the old table is swapped out before the first call,
-    /// so if `keep` panics the entries it had not yet visited are dropped and
-    /// the map keeps only the survivors decided so far. `std`'s `retain` and
-    /// [`crate::BoundedMap::retain`] decide first and remove second, and do not have
-    /// this property.
+    /// Uses O(capacity) extra space and O(capacity + probe work) time; severe
+    /// hash collisions can make probe work quadratic. No `K: Clone` is needed.
     pub fn retain<F>(&mut self, mut keep: F)
     where
         F: FnMut(&K, &mut V) -> bool,
     {
-        let cap = self.entries.len();
-        let mut fresh: Vec<MapSlot<K, V>> = Vec::with_capacity(cap);
-        fresh.resize_with(cap, || MapSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, fresh);
-        self.size = 0;
-        for slot in old {
-            if let MapSlot::Occupied { key, mut value } = slot {
-                if keep(&key, &mut value) {
-                    self.insert_no_resize(key, value);
+        // Keep the old table intact while invoking user code. Hash survivors
+        // now too, so the move phase cannot invoke a panicking Hash impl.
+        let mut survivors = Vec::with_capacity(self.size);
+        for (index, slot) in self.entries.iter_mut().enumerate() {
+            if let MapSlot::Occupied { key, value } = slot {
+                if keep(key, value) {
+                    survivors.push((index, self.hasher.hash_one(key)));
                 }
             }
         }
+
+        let cap = self.entries.len();
+        let mut fresh: Vec<MapSlot<K, V>> = Vec::with_capacity(cap);
+        fresh.resize_with(cap, || MapSlot::Empty);
+        let mut old = std::mem::replace(&mut self.entries, fresh);
+        self.size = 0;
+        for (index, hash) in survivors {
+            match std::mem::replace(&mut old[index], MapSlot::Empty) {
+                MapSlot::Occupied { key, value } => self.insert_hashed_no_resize(key, value, hash),
+                MapSlot::Empty => unreachable!("survivor slot must be occupied"),
+            }
+        }
+        // Removed entries still live in `old`. Their Drop implementations run
+        // only after `self` has become a complete, valid table.
     }
 
     fn rehash_from(&mut self, deleted: usize) {
@@ -477,8 +487,13 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
     }
 
     fn insert_no_resize(&mut self, key: K, value: V) {
+        let hash = self.hash(&key);
+        self.insert_hashed_no_resize(key, value, hash);
+    }
+
+    fn insert_hashed_no_resize(&mut self, key: K, value: V, hash: u64) {
         let mask = self.mask();
-        let mut idx = (self.hash(&key) as usize) & mask;
+        let mut idx = (hash as usize) & mask;
         loop {
             if let MapSlot::Empty = &self.entries[idx] {
                 self.entries[idx] = MapSlot::Occupied { key, value };
@@ -980,23 +995,34 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         }
     }
 
-    /// Retains only the elements for which `keep(&k)` returns `true`. Rebuilds
-    /// the table in place at the same capacity (see [`OpenHashMap::retain`] for
-    /// why a rebuild rather than an in-place scan). O(n), no `K: Clone`.
+    /// Retains only the elements for which `keep(&k)` returns `true`. If the
+    /// predicate or survivor hashing panics, every element remains present and
+    /// reachable. Removed elements are dropped after the new table is installed.
+    /// Rebuilds at the same capacity using O(capacity) extra space and
+    /// O(capacity + probe work) time; severe collisions can make probing
+    /// quadratic. No `K: Clone` is needed.
     pub fn retain<F>(&mut self, mut keep: F)
     where
         F: FnMut(&K) -> bool,
     {
+        let mut survivors = Vec::with_capacity(self.size);
+        for (index, slot) in self.entries.iter().enumerate() {
+            if let SetSlot::Occupied { key } = slot {
+                if keep(key) {
+                    survivors.push((index, self.hash(key)));
+                }
+            }
+        }
+
         let cap = self.entries.len();
         let mut fresh: Vec<SetSlot<K>> = Vec::with_capacity(cap);
         fresh.resize_with(cap, || SetSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, fresh);
+        let mut old = std::mem::replace(&mut self.entries, fresh);
         self.size = 0;
-        for slot in old {
-            if let SetSlot::Occupied { key } = slot {
-                if keep(&key) {
-                    self.insert_no_resize(key);
-                }
+        for (index, hash) in survivors {
+            match std::mem::replace(&mut old[index], SetSlot::Empty) {
+                SetSlot::Occupied { key } => self.insert_hashed_no_resize(key, hash),
+                SetSlot::Empty => unreachable!("survivor slot must be occupied"),
             }
         }
     }
@@ -1150,8 +1176,13 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
     }
 
     fn insert_no_resize(&mut self, value: K) {
+        let hash = self.hash(&value);
+        self.insert_hashed_no_resize(value, hash);
+    }
+
+    fn insert_hashed_no_resize(&mut self, value: K, hash: u64) {
         let mask = self.mask();
-        let mut idx = (self.hash(&value) as usize) & mask;
+        let mut idx = (hash as usize) & mask;
         loop {
             if let SetSlot::Empty = &self.entries[idx] {
                 self.entries[idx] = SetSlot::Occupied { key: value };
@@ -1503,6 +1534,45 @@ impl<K: Hash + Eq, S: BuildHasher> Eq for OpenHashSet<K, S> {}
 mod tests {
     use super::*;
     use crate::hashable_float::{HashableF32, HashableF64};
+    use std::hash::{BuildHasherDefault, Hasher};
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct CollisionHasher;
+
+    impl Hasher for CollisionHasher {
+        fn finish(&self) -> u64 {
+            0
+        }
+
+        fn write(&mut self, _: &[u8]) {}
+    }
+
+    type Collisions = BuildHasherDefault<CollisionHasher>;
+
+    struct HashMayPanic {
+        id: i32,
+        fail: Arc<AtomicBool>,
+    }
+
+    impl Hash for HashMayPanic {
+        fn hash<H: Hasher>(&self, state: &mut H) {
+            if self.id == 2 && self.fail.load(Ordering::Relaxed) {
+                panic!("hash panic");
+            }
+            self.id.hash(state);
+        }
+    }
+
+    impl PartialEq for HashMayPanic {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+
+    impl Eq for HashMayPanic {}
 
     #[test]
     fn drain_empties_map_and_yields_all() {
@@ -2191,6 +2261,160 @@ mod tests {
         s.retain(|k| k % 7 == 0);
         for k in 0..100 {
             assert_eq!(s.contains(&k), k % 7 == 0, "at {k}");
+        }
+    }
+
+    #[test]
+    fn map_retain_predicate_panic_keeps_cluster_and_value_changes() {
+        let mut m: OpenHashMap<i32, String, Collisions> =
+            OpenHashMap::with_hasher(Collisions::default());
+        for k in 0..8 {
+            m.insert(k, format!("original-{k}"));
+        }
+        let mut visited = Vec::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            m.retain(|k, value| {
+                visited.push(*k);
+                if *k == 2 {
+                    value.push_str("-changed");
+                }
+                if *k == 3 {
+                    panic!("predicate panic");
+                }
+                *k >= 2 // false callbacks precede the panic
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(visited, vec![0, 1, 2, 3]);
+        assert_eq!(m.len(), 8);
+        for k in 0..8 {
+            let expected = if k == 2 {
+                "original-2-changed".to_string()
+            } else {
+                format!("original-{k}")
+            };
+            assert_eq!(m.get(&k), Some(&expected), "key {k}");
+        }
+        assert_eq!(m.remove(&0), Some("original-0".to_string()));
+        assert_eq!(m.get(&7).map(String::as_str), Some("original-7"));
+    }
+
+    #[test]
+    fn set_retain_predicate_panic_keeps_cluster() {
+        let mut s: OpenHashSet<i32, Collisions> = OpenHashSet::with_hasher(Collisions::default());
+        for k in 0..8 {
+            assert!(s.insert(k));
+        }
+        let mut visited = Vec::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            s.retain(|k| {
+                visited.push(*k);
+                if *k == 3 {
+                    panic!("predicate panic");
+                }
+                *k >= 2
+            });
+        }));
+        assert!(result.is_err());
+        assert_eq!(visited, vec![0, 1, 2, 3]);
+        assert_eq!(s.len(), 8);
+        for k in 0..8 {
+            assert!(s.contains(&k), "key {k}");
+        }
+        assert!(s.remove(&0));
+        assert!(s.contains(&7));
+    }
+
+    #[test]
+    fn retain_all_some_none_with_collisions() {
+        for retain_modulus in [None, Some(2), Some(1)] {
+            let mut m: OpenHashMap<i32, String, Collisions> =
+                OpenHashMap::with_hasher(Collisions::default());
+            let mut s: OpenHashSet<i32, Collisions> =
+                OpenHashSet::with_hasher(Collisions::default());
+            for k in 0..8 {
+                m.insert(k, k.to_string());
+                s.insert(k);
+            }
+            let keep = |k: i32| match retain_modulus {
+                None => true,
+                Some(1) => false,
+                Some(divisor) => k % divisor == 0,
+            };
+            m.retain(|k, value| {
+                value.push('x');
+                keep(*k)
+            });
+            s.retain(|k| keep(*k));
+            let expected = (0..8).filter(|&k| keep(k)).count();
+            assert_eq!(m.len(), expected);
+            assert_eq!(s.len(), expected);
+            for k in 0..8 {
+                assert_eq!(m.contains_key(&k), keep(k));
+                assert_eq!(s.contains(&k), keep(k));
+                if keep(k) {
+                    assert_eq!(m.get(&k), Some(&format!("{k}x")));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retain_survivor_hash_panic_keeps_tables_intact() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(&fail),
+        };
+        let mut m: OpenHashMap<HashMayPanic, String> = OpenHashMap::new();
+        let mut s: OpenHashSet<HashMayPanic> = OpenHashSet::new();
+        for id in 0..5 {
+            m.insert(key(id), id.to_string());
+            s.insert(key(id));
+        }
+        fail.store(true, Ordering::Relaxed);
+        assert!(catch_unwind(AssertUnwindSafe(|| m.retain(|_, _| true))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| s.retain(|_| true))).is_err());
+        fail.store(false, Ordering::Relaxed);
+        assert_eq!(m.len(), 5);
+        assert_eq!(s.len(), 5);
+        for id in 0..5 {
+            assert_eq!(
+                m.get(&key(id)).map(String::as_str),
+                Some(id.to_string().as_str())
+            );
+            assert!(s.contains(&key(id)));
+        }
+    }
+
+    #[test]
+    fn retain_removed_value_drop_panic_leaves_committed_map_valid() {
+        struct DropOnce {
+            fail: Arc<AtomicBool>,
+        }
+        impl Drop for DropOnce {
+            fn drop(&mut self) {
+                if self.fail.swap(false, Ordering::Relaxed) {
+                    panic!("drop panic");
+                }
+            }
+        }
+
+        let fail = Arc::new(AtomicBool::new(false));
+        let mut m = OpenHashMap::new();
+        for id in 0..5 {
+            m.insert(
+                id,
+                DropOnce {
+                    fail: Arc::clone(&fail),
+                },
+            );
+        }
+        fail.store(true, Ordering::Relaxed);
+        assert!(catch_unwind(AssertUnwindSafe(|| m.retain(|k, _| *k != 2))).is_err());
+        assert_eq!(m.len(), 4);
+        for id in 0..5 {
+            assert_eq!(m.contains_key(&id), id != 2);
         }
     }
 

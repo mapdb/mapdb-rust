@@ -74,7 +74,8 @@ impl<K: Eq + Hash, V> HashMap<K, V> {
     }
 
     /// Retain only the entries for which `keep(&k, &mut v)` returns `true`.
-    /// O(n), no `K: Clone` (see [`OpenHashMap::retain`]).
+    /// If the predicate panics, every entry remains; value changes already
+    /// made by the predicate remain. See [`OpenHashMap::retain`].
     pub fn retain<F>(&mut self, keep: F)
     where
         F: FnMut(&K, &mut V) -> bool,

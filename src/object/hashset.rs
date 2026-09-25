@@ -75,7 +75,8 @@ impl<T: Eq + std::hash::Hash> HashSet<T> {
     }
 
     /// Retain only the elements for which `keep(&t)` returns `true`.
-    /// O(n), no `T: Clone` (see [`OpenHashSet::retain`]).
+    /// If the predicate panics, every element remains. See
+    /// [`OpenHashSet::retain`].
     pub fn retain<F>(&mut self, keep: F)
     where
         F: FnMut(&T) -> bool,

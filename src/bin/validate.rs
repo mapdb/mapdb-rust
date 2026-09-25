@@ -432,9 +432,7 @@ fn panic_judge_selftest() -> i32 {
     for (id, exit_nonzero, stdout, timed_out, expect) in cases {
         let got = panic_passed(exit_nonzero, stdout, timed_out);
         if got != expect {
-            eprintln!(
-                "panic-judge selftest case {id} failed: got {got}, expected {expect}"
-            );
+            eprintln!("panic-judge selftest case {id} failed: got {got}, expected {expect}");
             failed = true;
         }
     }
@@ -659,7 +657,8 @@ fn run_trace(path: &str, out: &str) -> i32 {
 }
 
 fn trace_replay(path: &str, out: &str) -> Result<(), String> {
-    let text = fs::read_to_string(path).map_err(|e| format!("failed to read scenario file: {e}"))?;
+    let text =
+        fs::read_to_string(path).map_err(|e| format!("failed to read scenario file: {e}"))?;
     let scenario: Value =
         serde_json::from_str(&text).map_err(|e| format!("failed to parse JSON: {e}"))?;
     let name = scenario
@@ -707,7 +706,11 @@ fn trace_replay(path: &str, out: &str) -> Result<(), String> {
 }
 
 fn reject_trace_construction(scenario: &Value) -> Result<(), String> {
-    if scenario.get("construction").and_then(Value::as_str).is_some() {
+    if scenario
+        .get("construction")
+        .and_then(Value::as_str)
+        .is_some()
+    {
         return Err("trace: construction is not supported".to_string());
     }
     Ok(())
@@ -730,7 +733,7 @@ fn require_i32_field(op: &Value, field: &str) -> Result<i32, String> {
     i32::try_from(n).map_err(|_| format!("malformed op: {field} is not an i32 integer"))
 }
 
-fn op_kind<'a>(op: &'a Value) -> Result<&'a str, String> {
+fn op_kind(op: &Value) -> Result<&str, String> {
     op.get("op")
         .and_then(Value::as_str)
         .ok_or_else(|| "malformed op: missing op".to_string())
@@ -835,7 +838,8 @@ fn require_list_index(op: &Value, len: usize) -> Result<usize, String> {
     let Some(n) = v.as_u64() else {
         return Err("malformed op: index is not an integer".to_string());
     };
-    let idx = usize::try_from(n).map_err(|_| "malformed op: index is not an integer".to_string())?;
+    let idx =
+        usize::try_from(n).map_err(|_| "malformed op: index is not an integer".to_string())?;
     if idx > len {
         return Err("malformed op: index out of range".to_string());
     }
@@ -877,7 +881,7 @@ fn trace_treemap(operations: &[Value]) -> Result<serde_json::Map<String, Value>,
         record_obs(&mut obs, "first_key", eval("first_key"));
         record_obs(&mut obs, "last_key", eval("last_key"));
     }
-    record_map_key_probes(&mut obs, &keys, saw_99, &eval);
+    record_map_key_probes(&mut obs, &keys, saw_99, eval);
     for k in &keys {
         for prefix in ["floor", "ceiling", "lower", "higher", "rank"] {
             let probe = format!("{prefix}_{k}");
@@ -897,7 +901,8 @@ fn trace_treemap(operations: &[Value]) -> Result<serde_json::Map<String, Value>,
 /// Temp file in the destination directory, then rename. A failed write leaves
 /// the final path untouched.
 fn write_observations(out: &str, doc: ObservationDoc) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(&doc).map_err(|e| format!("failed to encode JSON: {e}"))?;
+    let bytes =
+        serde_json::to_vec_pretty(&doc).map_err(|e| format!("failed to encode JSON: {e}"))?;
     let mut bytes = bytes;
     bytes.push(b'\n');
     let final_path = std::path::Path::new(out);

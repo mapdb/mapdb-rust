@@ -638,9 +638,11 @@ fn eval_interval_assertion(key: &str, iv: &Interval<i32>) -> String {
         "first" => opt_i32_str(iv.get(0)),
         "last" => opt_i32_str(iv.len().checked_sub(1).and_then(|i| iv.get(i))),
         "to_array" => format_array(&iv.all().collect::<Vec<i32>>()),
-        _ if key.starts_with("get_at_") => match key[7..].parse::<usize>() {
-            Ok(idx) => opt_i32_str(iv.get(idx)),
-            Err(_) => format!("UNKNOWN_ASSERTION: {key}"),
+        _ if key.starts_with("get_at_") => match parse_interval_index(&key[7..]) {
+            Some(Some(idx)) => opt_i32_str(iv.get(idx)),
+            // Digits-only but past `usize`: necessarily >= size, so `null`.
+            Some(None) => "null".to_string(),
+            None => format!("UNKNOWN_ASSERTION: {key}"),
         },
         _ if key.starts_with("contains_") => match key[9..].parse::<i32>() {
             Ok(v) => iv.contains(v).to_string(),
@@ -648,6 +650,19 @@ fn eval_interval_assertion(key: &str, iv: &Interval<i32>) -> String {
         },
         _ => format!("UNKNOWN_ASSERTION: {key}"),
     }
+}
+
+/// `get_at_N` suffix: one or more ASCII digits and nothing else is always a
+/// valid non-negative index (README "## Interval<i32>"). `Some(Some(n))` when
+/// it fits `usize`; `Some(None)` when it is digits-only but overflows the
+/// index type (then it is necessarily >= size, and the caller prints `null`
+/// exactly as an in-range-but-past-the-end index does); `None` for an empty
+/// suffix, a sign, or any non-digit, which stays an unknown assertion.
+fn parse_interval_index(suffix: &str) -> Option<Option<usize>> {
+    if suffix.is_empty() || !suffix.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(suffix.parse::<usize>().ok())
 }
 
 fn format_array(v: &[i32]) -> String {

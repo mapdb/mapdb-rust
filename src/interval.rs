@@ -245,11 +245,17 @@ impl<T: SignedPrimInt> Interval<T> {
     }
 
     /// The same elements in the opposite order: `[last, from]` with
-    /// `-step`, where `last` is the last element this interval actually
-    /// produces (`get(len() - 1)`), not the constructor's `to`. `to` is only
-    /// an inclusive bound and may sit off the step grid:
+    /// `-step`, where `last` is the last element of the complete
+    /// progression (`to` pulled back onto the step grid by the remainder
+    /// of the distance), not the constructor's `to`. `to` is only an
+    /// inclusive bound and may sit off the step grid:
     /// `from_to_by(0, 10, 3)` yields `0, 3, 6, 9`, so its reverse is
-    /// `9, 6, 3, 0` (the old `[to, from]` form gave `10, 7, 4, 1`). The
+    /// `9, 6, 3, 0` (the old `[to, from]` form gave `10, 7, 4, 1`). `last`
+    /// equals `get(len() - 1)` whenever the element count is representable
+    /// by the index API; the general definition is the complete
+    /// progression, as the spec states (for the full `i64` range at
+    /// `|step| == 1`, `len()` caps at `usize::MAX` and `get(len() - 1)`
+    /// is not the last element, but the reverse still starts from it). The
     /// result has the same `len()`, the same element set (`contains` agrees
     /// on every value) and, reversed again, the source sequence with `to`
     /// normalised onto the grid. See `algorithms.md` §"Reversed() starts

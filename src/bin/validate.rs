@@ -300,9 +300,15 @@ fn main() {
             }
         }
     } else if collection == "Interval<i32>" {
-        run_interval(name, operations);
+        // `--panic-child`: apply the ops (the trap, if any, happens here) and
+        // print only the banner — never an assertion line, which the parent
+        // would read as a sentinel. A malformed operand is banner + exit 1.
+        let built = run_interval(name, operations);
         println!("=== scenario: {name} ===");
         let _ = std::io::stdout().flush();
+        if built.is_none() {
+            std::process::exit(1);
+        }
         return;
     }
 
@@ -316,6 +322,17 @@ fn main() {
         }
         "SetMultimap<i64, i32>" => run_i64_set_multimap(name, operations, assertions, construction),
         "ArrayList<i32>" => run_arraylist(name, operations, assertions),
+        "Interval<i32>" => {
+            // Value path (README §"Interval<i32>"): the production
+            // `from_to_by` / `reversed` build the interval, then every
+            // assertion is answered by a production method.
+            let Some(built) = run_interval(name, operations) else {
+                // Malformed operand: banner (already printed), then exit 1.
+                let _ = std::io::stdout().flush();
+                std::process::exit(1);
+            };
+            emit_interval_assertions(name, &built, assertions);
+        }
         "HashSet<i32>" => run_hashset(name, operations, assertions, &scenario),
         "HashBag<i32>" => run_hashbag(name, operations, assertions),
         "TreeSet<i32>" => run_treeset(name, operations, assertions, &scenario),
@@ -563,37 +580,73 @@ fn interval_i32_field(op: &Value, field: &str) -> Option<i32> {
     i32::try_from(n).ok()
 }
 
-fn interval_operand_reject(scenario: &str) -> ! {
-    println!("=== scenario: {scenario} ===");
-    let _ = std::io::stdout().flush();
-    std::process::exit(1);
-}
-
-fn run_interval(scenario: &str, operations: &[Value]) {
+/// Apply the `Interval<i32>` ops through the PRODUCTION constructor and
+/// `reversed()`, returning the final interval. `None` means a malformed
+/// scenario (a non-i32 operand, an unknown op, `reversed` before any
+/// `from_to_by`, or no ops at all); the caller prints the banner and exits 1.
+/// Nothing is printed here: the `--panic-child` path relies on stdout
+/// staying empty until the ops have run.
+fn run_interval(scenario: &str, operations: &[Value]) -> Option<Interval<i32>> {
     let mut current: Option<Interval<i32>> = None;
     for op in operations {
         match op.get("op").and_then(Value::as_str) {
             Some("from_to_by") => {
-                let Some(from) = interval_i32_field(op, "from") else {
-                    interval_operand_reject(scenario);
-                };
-                let Some(to) = interval_i32_field(op, "to") else {
-                    interval_operand_reject(scenario);
-                };
-                let Some(step) = interval_i32_field(op, "step") else {
-                    interval_operand_reject(scenario);
-                };
+                let from = interval_i32_field(op, "from")?;
+                let to = interval_i32_field(op, "to")?;
+                let step = interval_i32_field(op, "step")?;
                 let built: Interval<i32> = Interval::from_to_by(from, to, step);
                 current = Some(built);
             }
             Some("reversed") => {
-                let Some(cur) = current.as_ref() else {
-                    interval_operand_reject(scenario);
-                };
+                let cur = current.as_ref()?;
                 current = Some(cur.reversed());
             }
-            _ => interval_operand_reject(scenario),
+            _ => {
+                eprintln!("malformed Interval<i32> scenario {scenario}: bad op {op}");
+                return None;
+            }
         }
+    }
+    if current.is_none() {
+        eprintln!("malformed Interval<i32> scenario {scenario}: no from_to_by");
+    }
+    current
+}
+
+/// Every README `Interval<i32>` assertion key, in the map's (sorted) key
+/// order, each answered by a production method: `len`, `is_empty`, `get`,
+/// the production iterator (`to_array` is iteration order, not sorted) and
+/// `contains`. Unknown keys take the `emit` skip path.
+fn emit_interval_assertions(
+    scenario: &str,
+    iv: &Interval<i32>,
+    assertions: &serde_json::Map<String, Value>,
+) {
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let computed = eval_interval_assertion(key, iv);
+        emit(scenario, key, &computed, expected, FloatMode::None);
+    }
+}
+
+fn eval_interval_assertion(key: &str, iv: &Interval<i32>) -> String {
+    match key {
+        "size" => iv.len().to_string(),
+        "is_empty" => iv.is_empty().to_string(),
+        "first" => opt_i32_str(iv.get(0)),
+        "last" => opt_i32_str(iv.len().checked_sub(1).and_then(|i| iv.get(i))),
+        "to_array" => format_array(&iv.all().collect::<Vec<i32>>()),
+        _ if key.starts_with("get_at_") => match key[7..].parse::<usize>() {
+            Ok(idx) => opt_i32_str(iv.get(idx)),
+            Err(_) => format!("UNKNOWN_ASSERTION: {key}"),
+        },
+        _ if key.starts_with("contains_") => match key[9..].parse::<i32>() {
+            Ok(v) => iv.contains(v).to_string(),
+            Err(_) => format!("UNKNOWN_ASSERTION: {key}"),
+        },
+        _ => format!("UNKNOWN_ASSERTION: {key}"),
     }
 }
 

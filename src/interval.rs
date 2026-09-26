@@ -64,7 +64,10 @@ impl_signed_prim_int!(i8, i16, i32, i64);
 ///   contract — never panics in debug, even for full-range `i64`.
 /// - `all()` iterates by index and calls `get`, never `current += step`
 ///   (which can wrap at the last step).
-/// - `reversed()` **panics** for `T::MIN` step: negating the minimum
+/// - `reversed()` starts from the **last element actually produced**
+///   (`to` pulled back onto the step grid with the same `u64` remainder
+///   arithmetic), not from `to`, so `from_to_by(0, 10, 3)` reversed is
+///   `9, 6, 3, 0`. It **panics** for `T::MIN` step: negating the minimum
 ///   signed value is unrepresentable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Interval<T: SignedPrimInt> {
@@ -241,20 +244,40 @@ impl<T: SignedPrimInt> Interval<T> {
         !self.any_satisfy(p)
     }
 
-    /// `[to, from]` with `-step`.
+    /// The same elements in the opposite order: `[last, from]` with
+    /// `-step`, where `last` is the last element this interval actually
+    /// produces (`get(len() - 1)`), not the constructor's `to`. `to` is only
+    /// an inclusive bound and may sit off the step grid:
+    /// `from_to_by(0, 10, 3)` yields `0, 3, 6, 9`, so its reverse is
+    /// `9, 6, 3, 0` (the old `[to, from]` form gave `10, 7, 4, 1`). The
+    /// result has the same `len()`, the same element set (`contains` agrees
+    /// on every value) and, reversed again, the source sequence with `to`
+    /// normalised onto the grid. See `algorithms.md` §"Reversed() starts
+    /// from the last element, and panics at minimum step".
     ///
     /// # Panics
     ///
     /// Panics if `step == T::MIN` — negating the minimum signed value is
-    /// unrepresentable on every architecture we target. See `algorithms.md`
-    /// §"Reversed() panics at minimum step".
+    /// unrepresentable on every architecture we target.
     pub fn reversed(&self) -> Self {
         if self.step.to_i64() == T::MIN_I64 {
             panic!("Interval: cannot reverse interval with minimum step");
         }
+        // Last element: pull `to` back onto the step grid in the same
+        // `u64` arithmetic as `len`/`contains`/`get`. `rem <= distance()`,
+        // so the wrapping step cannot leave `[from, to]`. Not
+        // `get(len() - 1)`: `len()` caps at `usize::MAX`, which would pick
+        // the wrong element for the full `i64` range at `|step| == 1`.
+        let rem = self.distance() % self.abs_step();
+        let to = self.to.to_i64() as u64;
+        let last = if self.step > T::from_i64_truncate(0) {
+            to.wrapping_sub(rem)
+        } else {
+            to.wrapping_add(rem)
+        };
         let neg_step = T::from_i64_truncate(-self.step.to_i64());
         Interval {
-            from: self.to,
+            from: T::from_i64_truncate(last as i64),
             to: self.from,
             step: neg_step,
         }
@@ -494,6 +517,89 @@ mod tests {
         assert_eq!(r.to(), 0);
         assert_eq!(r.step(), -2);
         assert_eq!(r.to_vec(), vec![10, 8, 6, 4, 2, 0]);
+    }
+
+    /// `algorithms.md` test `ReversedOffGridKeepsElements`, run at every
+    /// width the crate ships. Literals are `i64` and narrowed through
+    /// `from_i64_truncate`; `MAX`/`MIN` come from `T::MIN_I64`.
+    fn check_reversed_off_grid_keeps_elements<T: SignedPrimInt>() {
+        let t = T::from_i64_truncate;
+        let min = T::MIN_I64;
+        let max = !T::MIN_I64; // MAX == -(MIN + 1) for every two's-complement width
+        let vec = |v: &[i64]| v.iter().map(|&x| t(x)).collect::<Vec<T>>();
+
+        // (from, to, step) -> the reversed sequence.
+        let cases: [((i64, i64, i64), Vec<i64>); 7] = [
+            ((0, 10, 3), vec![9, 6, 3, 0]),
+            ((10, 0, -3), vec![1, 4, 7, 10]),
+            ((0, 5, max), vec![0]),
+            ((-7, 9, 5), vec![8, 3, -2, -7]),
+            // Type max boundary: `to = MAX` is off the grid.
+            ((max - 7, max, 3), vec![max - 1, max - 4, max - 7]),
+            // Type min boundary, descending: `to = MIN` is off the grid.
+            ((min + 7, min, -3), vec![min + 1, min + 4, min + 7]),
+            // Step MIN+1 negates without overflow (only MIN panics).
+            ((0, min + 1, min + 1), vec![min + 1, 0]),
+        ];
+        for ((from, to, step), want) in cases {
+            let iv: Interval<T> = Interval::from_to_by(t(from), t(to), t(step));
+            let rev = iv.reversed();
+            let want = vec(&want);
+            assert_eq!(rev.to_vec(), want, "reversed of ({from}, {to}, {step})");
+            assert_eq!(rev.from(), want[0]);
+            assert_eq!(rev.to(), t(from));
+            assert_eq!(rev.step(), t(-step));
+            // Same size and element set as the source.
+            assert_eq!(rev.len(), iv.len(), "len of ({from}, {to}, {step})");
+            let mut probes: Vec<i64> = want.iter().map(|v| v.to_i64()).collect();
+            // Neighbours saturate at the i64 width; the range filter below
+            // drops the out-of-type ones at the narrower widths.
+            probes.extend([from, to, from.saturating_sub(1), to.saturating_add(1)]);
+            probes.extend([0, 1, -1, min, max]);
+            for v in probes {
+                if v < min || v > max {
+                    continue;
+                }
+                assert_eq!(
+                    rev.contains(t(v)),
+                    iv.contains(t(v)),
+                    "contains({v}) of ({from}, {to}, {step})"
+                );
+            }
+            // The lazy reverse view agrees with `reversed()`.
+            assert_eq!(iv.all().rev().collect::<Vec<T>>(), want);
+            // Reversed twice is the source sequence (`to` normalised).
+            let twice = rev.reversed();
+            assert_eq!(
+                twice.to_vec(),
+                iv.to_vec(),
+                "twice of ({from}, {to}, {step})"
+            );
+            assert_eq!(twice.from(), t(from));
+            assert_eq!(twice.step(), t(step));
+            assert_eq!(twice.to(), *want.first().unwrap());
+        }
+    }
+
+    #[test]
+    fn reversed_off_grid_keeps_elements() {
+        check_reversed_off_grid_keeps_elements::<i8>();
+        check_reversed_off_grid_keeps_elements::<i16>();
+        check_reversed_off_grid_keeps_elements::<i32>();
+        check_reversed_off_grid_keeps_elements::<i64>();
+    }
+
+    #[test]
+    fn reversed_full_range_i64_is_not_capped() {
+        // `len()` caps at usize::MAX here; the remainder form still finds
+        // the true last element, i64::MAX.
+        let iv: Interval<i64> = Interval::from_to(i64::MIN, i64::MAX);
+        let rev = iv.reversed();
+        assert_eq!(rev.from(), i64::MAX);
+        assert_eq!(rev.to(), i64::MIN);
+        assert_eq!(rev.step(), -1);
+        assert_eq!(rev.get(0), Some(i64::MAX));
+        assert_eq!(rev.get(1), Some(i64::MAX - 1));
     }
 
     #[test]

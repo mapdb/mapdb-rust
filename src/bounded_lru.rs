@@ -61,11 +61,14 @@ type EvictCallback<K> = Box<dyn FnMut(&K, i32, EvictionCause)>;
 /// One arena slot: an intrusive doubly-linked-list node. When the slot is live
 /// it links into the LRU list (`prev`/`next` are slot indices, `key` is the
 /// back-reference into the map). When the slot is free it sits on the free-list
-/// (`next` chains the free-list, `prev`/`key`/`value`/`expire_at` are dead).
+/// (`next` chains the free-list, `prev`/`value`/`expire_at` are dead) and its
+/// `key` is `None`: freeing a slot drops the key immediately rather than keeping
+/// it alive until the slot is reused.
 struct Node<K> {
     prev: usize,
     next: usize,
-    key: K,
+    /// `Some` while the slot is live, `None` while it is on the free-list.
+    key: Option<K>,
     value: i32,
     /// Logical expiry tick: an entry expires when `now >= expire_at`. `u64::MAX`
     /// means "never" (no TTL configured, or `now + ttl` saturated).
@@ -184,7 +187,7 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
             let node = &mut self.arena[idx];
             node.prev = NIL;
             node.next = NIL;
-            node.key = key;
+            node.key = Some(key);
             node.value = value;
             node.expire_at = expire_at;
             idx
@@ -193,7 +196,7 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
             self.arena.push(Node {
                 prev: NIL,
                 next: NIL,
-                key,
+                key: Some(key),
                 value,
                 expire_at,
             });
@@ -202,11 +205,15 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
     }
 
     /// Return a slot to the free-list (the node must already be unlinked from
-    /// the LRU list and removed from the index).
-    fn free_node(&mut self, idx: usize) {
-        self.arena[idx].next = self.free_head;
-        self.arena[idx].prev = NIL;
+    /// the LRU list and removed from the index). Drops the slot's key now and
+    /// returns it (or `None` if it was already taken), so a freed slot never
+    /// keeps a key alive until reuse.
+    fn free_node(&mut self, idx: usize) -> Option<K> {
+        let node = &mut self.arena[idx];
+        node.next = self.free_head;
+        node.prev = NIL;
         self.free_head = idx;
+        node.key.take()
     }
 
     /// Unlink a node from the LRU list (O(1)); leaves the slot allocated.
@@ -348,11 +355,10 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
     /// Remove a victim node entirely (unlink + free + index-remove) and fire the
     /// eviction callback with the given cause and the value-at-eviction.
     fn evict_node(&mut self, idx: usize, cause: EvictionCause) {
-        let key = self.arena[idx].key.clone();
         let value = self.arena[idx].value;
-        self.index.remove(&key);
         self.unlink(idx);
-        self.free_node(idx);
+        let key = self.free_node(idx).expect("live LRU node has a key");
+        self.index.remove(&key);
         if let Some(cb) = self.on_evict.as_mut() {
             cb(&key, value, cause);
         }
@@ -397,13 +403,18 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
 
     // --- iteration (LRU order, read-only snapshots) -----------------------
 
+    /// The key of a node reached by walking the LRU list (always live).
+    fn live_key(n: &Node<K>) -> &K {
+        n.key.as_ref().expect("live LRU node has a key")
+    }
+
     /// All keys in LRU order (least-recently-used first). A read-only snapshot:
     /// does NOT refresh recency and never evicts.
     pub fn keys(&self) -> Vec<K> {
         let mut out = Vec::with_capacity(self.len());
         let mut cur = self.head;
         while cur != NIL {
-            out.push(self.arena[cur].key.clone());
+            out.push(Self::live_key(&self.arena[cur]).clone());
             cur = self.arena[cur].next;
         }
         out
@@ -427,7 +438,7 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
         let mut cur = self.head;
         while cur != NIL {
             let n = &self.arena[cur];
-            out.push((n.key.clone(), n.value));
+            out.push((Self::live_key(n).clone(), n.value));
             cur = n.next;
         }
         out
@@ -833,5 +844,34 @@ mod tests {
         let a = replay();
         let b = replay();
         assert_eq!(a, b);
+    }
+
+    /// F23: a freed arena slot must not keep the key alive until reuse —
+    /// `remove` and eviction drop both map-held copies of the key at once.
+    #[test]
+    fn freed_slot_drops_key_immediately() {
+        let mut m = BoundedLruMap::<Rc<String>>::with_capacity(2);
+        let a = Rc::new("a".to_string());
+        let b = Rc::new("b".to_string());
+        let c = Rc::new("c".to_string());
+        m.put(a.clone(), 1);
+        m.put(b.clone(), 2);
+        assert_eq!(Rc::strong_count(&a), 3); // test + index + arena slot
+
+        // Manual removal: the slot goes on the free-list and is not reused yet.
+        assert_eq!(m.remove(&a), Some(1));
+        assert_eq!(Rc::strong_count(&a), 1);
+
+        // Eviction path (TTL expiry frees the slot without reusing it).
+        let mut t = BoundedLruMap::<Rc<String>>::builder()
+            .max_size(4)
+            .ttl(5)
+            .build();
+        t.put_at(b.clone(), 2, 0);
+        t.put_at(c.clone(), 3, 10);
+        assert_eq!(Rc::strong_count(&b), 5); // test + (index + arena) in m and t
+        assert_eq!(t.expire_entries(5), 1);
+        assert_eq!(Rc::strong_count(&b), 3); // t's slot for b is free and holds nothing
+        assert_eq!(t.keys(), vec![c.clone()]);
     }
 }

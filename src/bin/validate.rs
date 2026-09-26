@@ -2180,6 +2180,11 @@ fn run_hashmap(
             continue; // Scenario authors use "comment" for doc strings; skip.
         }
         let computed = if key == "add_to_value_results" {
+            // Storage readback, NOT a production return value: Rust has no
+            // add_to_value, so this log is the entry slot's value after the
+            // runner's own wrapping_add. Emitted only so the five-port output
+            // stays comparable; see mapdb-collection-spec
+            // cross-language-validation/README.md "Result-log assertions".
             format_array(&add_to_value_results)
         } else {
             eval_map_assertion(key, &map)

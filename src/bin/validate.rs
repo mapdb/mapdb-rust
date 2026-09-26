@@ -2135,6 +2135,9 @@ fn run_hashmap(
     assertions: &serde_json::Map<String, Value>,
     construction: Option<&str>,
 ) {
+    // Value produced by each addToValue, in execution order
+    // (add_to_value_results).
+    let mut add_to_value_results: Vec<i32> = Vec::new();
     let map: OpenHashMap<i32, i32> = if construction == Some("bulkLoadExact") {
         OpenHashMap::bulk_load_exact(
             i32_pairs(operations),
@@ -2158,8 +2161,13 @@ fn run_hashmap(
                 "addToValue" => {
                     let k = op["key"].as_i64().unwrap() as i32;
                     let delta = op["delta"].as_i64().unwrap() as i32;
-                    let cur = map.get(&k).copied().unwrap_or(0);
-                    map.insert(k, cur.wrapping_add(delta));
+                    // Rust ships no dedicated add_to_value (algorithms.md
+                    // "Integer overflow contract"): drive the production
+                    // entry API and record the value read back from the
+                    // stored slot, so the result is what the map holds.
+                    let slot = map.entry(k).or_insert(0);
+                    *slot = slot.wrapping_add(delta);
+                    add_to_value_results.push(*slot);
                 }
                 "clear" => map.clear(),
                 other => panic!("unknown hashmap op: {}", other),
@@ -2171,7 +2179,11 @@ fn run_hashmap(
         if key == "comment" {
             continue; // Scenario authors use "comment" for doc strings; skip.
         }
-        let computed = eval_map_assertion(key, &map);
+        let computed = if key == "add_to_value_results" {
+            format_array(&add_to_value_results)
+        } else {
+            eval_map_assertion(key, &map)
+        };
         emit(scenario, key, &computed, expected, FloatMode::None);
     }
 }

@@ -296,14 +296,14 @@ fn main() {
                 std::process::exit(1);
             }
             if panic_collection_known(collection) {
-                parent_expect_panic(path, name);
+                parent_expect_panic(path, name, operations.len());
             }
         }
     } else if collection == "Interval<i32>" {
         // `--panic-child`: apply the ops (the trap, if any, happens here) and
         // print only the banner — never an assertion line, which the parent
         // would read as a sentinel. A malformed operand is banner + exit 1.
-        let built = run_interval(name, operations);
+        let built = run_interval(name, operations, true);
         println!("=== scenario: {name} ===");
         let _ = std::io::stdout().flush();
         if built.is_none() {
@@ -326,7 +326,7 @@ fn main() {
             // Value path (README §"Interval<i32>"): the production
             // `from_to_by` / `reversed` build the interval, then every
             // assertion is answered by a production method.
-            let Some(built) = run_interval(name, operations) else {
+            let Some(built) = run_interval(name, operations, false) else {
                 // Malformed operand: banner (already printed), then exit 1.
                 let _ = std::io::stdout().flush();
                 std::process::exit(1);
@@ -376,12 +376,38 @@ fn main() {
     }
 }
 
+/// The line the --panic-child prints on stdout immediately before it calls
+/// the production operation for op `i` of `n` (1-based). It starts with '['
+/// so it can never be an assertion sentinel.
+fn reach_marker_line(i: usize, n: usize) -> String {
+    format!("[panic-child] reached op {i}/{n}")
+}
+
+/// Did the child print the marker for the LAST operation, i.e. get as far as
+/// calling the product for it? A runner crash before that point leaves no
+/// such line (astra25/25 F4: any non-zero exit used to count as the trap). A
+/// scenario with no operations has nothing to reach and cannot pass.
+fn stdout_has_reach_marker(stdout: &str, ops: usize) -> bool {
+    if ops == 0 {
+        return false;
+    }
+    let want = reach_marker_line(ops, ops);
+    stdout
+        .split('\n')
+        .any(|raw| raw.trim_end_matches('\r') == want)
+}
+
 /// Q2: pass only when the child died abnormally, stdout has no sentinel,
-/// and the parent did not time out. `process::exit` does not flush, so
-/// callers that exit after a sentinel print must flush first — an empty
-/// stdout would be judged as a successful panic.
-fn panic_passed(exit_nonzero: bool, stdout: &str, timed_out: bool) -> bool {
-    !timed_out && exit_nonzero && !stdout_has_sentinel(stdout)
+/// the parent did not time out, and the child reached the product call of
+/// the last op (`ops` is the scenario's operation count, so the trap has to
+/// be raised by that op). `process::exit` does not flush, so callers that
+/// exit after a sentinel print must flush first — an empty stdout would
+/// otherwise look like a clean death.
+fn panic_passed(exit_nonzero: bool, stdout: &str, timed_out: bool, ops: usize) -> bool {
+    !timed_out
+        && exit_nonzero
+        && !stdout_has_sentinel(stdout)
+        && stdout_has_reach_marker(stdout, ops)
 }
 
 fn stdout_has_sentinel(stdout: &str) -> bool {
@@ -431,23 +457,68 @@ fn is_assertion_key_byte(b: u8) -> bool {
 }
 
 fn panic_judge_selftest() -> i32 {
-    // (id, exit_nonzero, stdout, timed_out, expect_pass)
-    let cases: [(&str, bool, &str, bool, bool); 11] = [
-        ("1", false, "", false, false),
-        ("2", false, "=== scenario: x ===\n", false, false),
-        ("3", true, "size: 1\n", false, false),
-        ("4", true, "", false, true),
-        ("5", true, "boom\n", false, true),
-        ("6", true, "", true, false),
-        ("7", true, "FAIL name expect_panic\n", false, true),
-        ("8", true, "expect_panic: true\n", false, false),
-        ("9", true, "SUMMARY: 1\n", false, true),
-        ("10", true, "boom:detail\n", false, true),
-        ("11", true, "FAIL-count: 1\n", false, false),
+    // m1: reach marker of a one-op scenario; m2: last-op marker of a two-op
+    // scenario. Cases 1-11 are the original sentinel/exit rules with the marker
+    // present; 12-17 pin the reach rule (astra25/25 F4).
+    let m1 = reach_marker_line(1, 1) + "\n";
+    let m2 = reach_marker_line(2, 2) + "\n";
+    let m1of2 = reach_marker_line(1, 2) + "\n";
+    // (id, exit_nonzero, stdout, timed_out, ops, expect_pass)
+    let cases: [(&str, bool, String, bool, usize, bool); 17] = [
+        ("1", false, m1.clone(), false, 1, false),
+        (
+            "2",
+            false,
+            m1.clone() + "=== scenario: x ===\n",
+            false,
+            1,
+            false,
+        ),
+        ("3", true, m1.clone() + "size: 1\n", false, 1, false),
+        ("4", true, m1.clone(), false, 1, true),
+        ("5", true, m1.clone() + "boom\n", false, 1, true),
+        ("6", true, m1.clone(), true, 1, false),
+        (
+            "7",
+            true,
+            m1.clone() + "FAIL name expect_panic\n",
+            false,
+            1,
+            true,
+        ),
+        (
+            "8",
+            true,
+            m1.clone() + "expect_panic: true\n",
+            false,
+            1,
+            false,
+        ),
+        ("9", true, m1.clone() + "SUMMARY: 1\n", false, 1, true),
+        ("10", true, m1.clone() + "boom:detail\n", false, 1, true),
+        ("11", true, m1.clone() + "FAIL-count: 1\n", false, 1, false),
+        // crash before the product: no marker
+        ("12", true, String::new(), false, 1, false),
+        ("13", true, "boom\n".to_string(), false, 1, false),
+        // trapped on op 1 of 2
+        ("14", true, m1of2.clone(), false, 2, false),
+        // reached op 2 of 2
+        ("15", true, m1of2 + &m2, false, 2, true),
+        // no ops: nothing to reach
+        ("16", true, m1.clone(), false, 0, false),
+        // the marker must match exactly
+        (
+            "17",
+            true,
+            "[panic-child] reached op 1/1 \n".to_string(),
+            false,
+            1,
+            false,
+        ),
     ];
     let mut failed = false;
-    for (id, exit_nonzero, stdout, timed_out, expect) in cases {
-        let got = panic_passed(exit_nonzero, stdout, timed_out);
+    for (id, exit_nonzero, stdout, timed_out, ops, expect) in cases {
+        let got = panic_passed(exit_nonzero, &stdout, timed_out, ops);
         if got != expect {
             eprintln!("panic-judge selftest case {id} failed: got {got}, expected {expect}");
             failed = true;
@@ -493,7 +564,7 @@ fn panic_collection_known(collection: &str) -> bool {
     )
 }
 
-fn parent_expect_panic(path: &str, name: &str) -> ! {
+fn parent_expect_panic(path: &str, name: &str, ops: usize) -> ! {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
@@ -559,7 +630,7 @@ fn parent_expect_panic(path: &str, name: &str) -> ! {
         // but `timed_out` rejects it.
         None => true,
     };
-    if panic_passed(exit_nonzero, &stdout, timed_out) {
+    if panic_passed(exit_nonzero, &stdout, timed_out, ops) {
         println!("=== scenario: {name} ===");
         println!("expect_panic: true");
         let _ = std::io::stdout().flush();
@@ -586,19 +657,32 @@ fn interval_i32_field(op: &Value, field: &str) -> Option<i32> {
 /// `from_to_by`, or no ops at all); the caller prints the banner and exits 1.
 /// Nothing is printed here: the `--panic-child` path relies on stdout
 /// staying empty until the ops have run.
-fn run_interval(scenario: &str, operations: &[Value]) -> Option<Interval<i32>> {
+/// Interval<i32> replay. With `markers` (panic child only) the reach marker
+/// for op i of n is printed and flushed immediately before each production
+/// call, so the parent can tell a trap raised by the product from a runner
+/// crash on the way there.
+fn run_interval(scenario: &str, operations: &[Value], markers: bool) -> Option<Interval<i32>> {
     let mut current: Option<Interval<i32>> = None;
-    for op in operations {
+    let n = operations.len();
+    let reach = |i: usize| {
+        if markers {
+            println!("{}", reach_marker_line(i + 1, n));
+            let _ = std::io::stdout().flush();
+        }
+    };
+    for (i, op) in operations.iter().enumerate() {
         match op.get("op").and_then(Value::as_str) {
             Some("from_to_by") => {
                 let from = interval_i32_field(op, "from")?;
                 let to = interval_i32_field(op, "to")?;
                 let step = interval_i32_field(op, "step")?;
+                reach(i);
                 let built: Interval<i32> = Interval::from_to_by(from, to, step);
                 current = Some(built);
             }
             Some("reversed") => {
                 let cur = current.as_ref()?;
+                reach(i);
                 current = Some(cur.reversed());
             }
             _ => {
@@ -2942,9 +3026,23 @@ fn run_f32_hashmap(
                     .collect();
                 format!("[{}]", parts.join(","))
             }
+            // The values are i32 (README: HashMap<*> sorted_values is the
+            // value multiset ascending), rendered like the i32 map's.
+            "sorted_values" => {
+                let mut vals: Vec<i32> = map.iter().map(|(_, v)| *v).collect();
+                vals.sort_unstable();
+                format_array(&vals)
+            }
             _ => format!("UNKNOWN_ASSERTION:{}", key),
         };
-        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
+        // sorted_values is the i32 value multiset, so its expected side is
+        // rendered in i32 mode, not as quoted float labels.
+        let mode = if key == "sorted_values" {
+            FloatMode::None
+        } else {
+            FloatMode::F32Keyed
+        };
+        emit(scenario, key, &val, expected, mode);
     }
 }
 

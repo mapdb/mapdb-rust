@@ -205,9 +205,9 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
     }
 
     /// Return a slot to the free-list (the node must already be unlinked from
-    /// the LRU list and removed from the index). Drops the slot's key now and
-    /// returns it (or `None` if it was already taken), so a freed slot never
-    /// keeps a key alive until reuse.
+    /// the LRU list). Clears the slot's ownership of its key immediately and
+    /// returns the key to the caller (e.g. for index removal and the eviction
+    /// callback), so a freed slot never keeps a key alive until reuse.
     fn free_node(&mut self, idx: usize) -> Option<K> {
         let node = &mut self.arena[idx];
         node.next = self.free_head;
@@ -873,5 +873,24 @@ mod tests {
         assert_eq!(t.expire_entries(5), 1);
         assert_eq!(Rc::strong_count(&b), 3); // t's slot for b is free and holds nothing
         assert_eq!(t.keys(), vec![c.clone()]);
+
+        // Size eviction: inside the callback (before the freed slot is reused
+        // by the incoming key) the arena and index copies are already gone;
+        // only the test's handle and the key passed to the callback remain.
+        let seen: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+        let seen2 = seen.clone();
+        let mut s = BoundedLruMap::<Rc<String>>::builder()
+            .max_size(1)
+            .on_evict(move |k, _, cause| {
+                assert_eq!(cause, EvictionCause::Size);
+                seen2.borrow_mut().push(Rc::strong_count(k));
+            })
+            .build();
+        let x = Rc::new("x".to_string());
+        s.put(x.clone(), 1);
+        assert_eq!(Rc::strong_count(&x), 3); // test + index + arena slot
+        s.put(Rc::new("y".to_string()), 2); // evicts x, then reuses its slot
+        assert_eq!(*seen.borrow(), vec![2]); // test + callback's key only
+        assert_eq!(Rc::strong_count(&x), 1); // released after the callback
     }
 }

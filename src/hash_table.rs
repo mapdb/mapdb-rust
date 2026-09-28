@@ -90,13 +90,13 @@ impl<K, V> OpenHashMap<K, V, RandomState> {
 impl<K, V, S> OpenHashMap<K, V, S> {
     /// Creates an empty map that will hash keys with `hasher`.
     pub fn with_hasher(hasher: S) -> Self {
-        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+        Self::with_capacity_and_hasher(0, hasher)
     }
 
-    /// Creates an empty map with pre-allocated capacity that will hash keys
-    /// with `hasher`.
+    /// Creates an empty map with room for at least `capacity` entries without
+    /// growing, using `hasher` to hash keys.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
-        let cap = capacity.max(DEFAULT_CAPACITY).next_power_of_two();
+        let cap = crate::bulk::open_addressing_capacity(capacity, DEFAULT_CAPACITY);
         let mut entries = Vec::with_capacity(cap);
         entries.resize_with(cap, || MapSlot::Empty);
         OpenHashMap {
@@ -847,13 +847,13 @@ impl<K> OpenHashSet<K, RandomState> {
 impl<K, S> OpenHashSet<K, S> {
     /// Creates an empty set that will hash values with `hasher`.
     pub fn with_hasher(hasher: S) -> Self {
-        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+        Self::with_capacity_and_hasher(0, hasher)
     }
 
-    /// Creates an empty set with pre-allocated capacity that will hash values
-    /// with `hasher`.
+    /// Creates an empty set with room for at least `capacity` values without
+    /// growing, using `hasher` to hash values.
     pub fn with_capacity_and_hasher(capacity: usize, hasher: S) -> Self {
-        let cap = capacity.max(DEFAULT_CAPACITY).next_power_of_two();
+        let cap = crate::bulk::open_addressing_capacity(capacity, DEFAULT_CAPACITY);
         let mut entries = Vec::with_capacity(cap);
         entries.resize_with(cap, || SetSlot::Empty);
         OpenHashSet {
@@ -1920,6 +1920,36 @@ mod tests {
         assert_eq!(m.len(), 1000);
         for i in 0..1000 {
             assert_eq!(m.get(&i), Some(&(i * 2)));
+        }
+    }
+
+    #[test]
+    fn with_capacity_reserves_entries_not_slots() {
+        assert_eq!(OpenHashMap::<i32, i32>::new().entries.len(), DEFAULT_CAPACITY);
+        assert_eq!(OpenHashSet::<i32>::new().entries.len(), DEFAULT_CAPACITY);
+
+        for (requested, expected_slots) in [
+            (11, 16),
+            (12, 32),
+            (16, 32),
+            (23, 32),
+            (24, 64),
+            (64, 128),
+            (1000, 2048),
+        ] {
+            let mut map = OpenHashMap::<i32, i32>::with_capacity(requested);
+            let mut set = OpenHashSet::<i32>::with_capacity_and_hasher(
+                requested,
+                RandomState::new(),
+            );
+            assert_eq!(map.entries.len(), expected_slots);
+            assert_eq!(set.entries.len(), expected_slots);
+            for key in 0..requested {
+                map.insert(key as i32, key as i32);
+                set.insert(key as i32);
+            }
+            assert_eq!(map.entries.len(), expected_slots);
+            assert_eq!(set.entries.len(), expected_slots);
         }
     }
 

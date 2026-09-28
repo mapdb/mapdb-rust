@@ -36,6 +36,7 @@ use mapdb_collections::fenwick::FenwickTree;
 use mapdb_collections::hash;
 use mapdb_collections::hyperloglog::HyperLogLog;
 use mapdb_collections::multimap::{Multimap, SetMultimap};
+use mapdb_collections::object;
 use mapdb_collections::object::ArrayList;
 use mapdb_collections::object::HashBag;
 use mapdb_collections::object::TreeMap as ObjectTreeMap;
@@ -288,6 +289,21 @@ fn main() {
         .as_object()
         .expect("missing assertions");
 
+    // Scenario `profile` (README §"Scenario JSON format"): absent means
+    // "primitive". An unknown value is a FAIL, never a fallback to another
+    // implementation tier.
+    let profile = match resolve_profile(&scenario) {
+        Ok(p) => p,
+        Err(raw) => {
+            if !panic_child {
+                println!("=== scenario: {} ===", name);
+                println!("FAIL profile: unknown '{}'", raw);
+                let _ = std::io::stdout().flush();
+            }
+            std::process::exit(1);
+        }
+    };
+
     // The parent does not apply ops and prints nothing until the child is
     // reaped. The child must not spawn again, and must not catch the trap.
     if !panic_child {
@@ -296,7 +312,7 @@ fn main() {
                 std::process::exit(1);
             }
             if panic_collection_known(collection) {
-                parent_expect_panic(path, name, operations.len());
+                parent_expect_panic(path, name, profile, operations.len());
             }
         }
     } else if collection == "Interval<i32>" {
@@ -313,6 +329,35 @@ fn main() {
     }
 
     println!("=== scenario: {} ===", name);
+    println!("profile: {}", profile);
+
+    if profile == Profile::Object {
+        // Object profile: the generic `object::` tier of the same kind. Only
+        // kinds with an object dispatch run; a known kind without one FAILs
+        // (never falls back to the primitive dispatch below), an unknown kind
+        // skips exactly like the primitive path (forward-compat).
+        match collection {
+            "HashMap<f32, i32>" => run_f32_hashmap_object(name, operations, assertions),
+            "HashSet<f32>" => run_f32_hashset_object(name, operations, assertions),
+            "TreeSet<f32>" => run_f32_treeset_object(name, operations, assertions),
+            other if panic_collection_known(other) => {
+                println!("FAIL {} profile: no object dispatch for {}", name, other);
+                let _ = std::io::stdout().flush();
+                std::process::exit(1);
+            }
+            other => {
+                eprintln!(
+                    "skip: unsupported collection kind (forward-compat): {}",
+                    other
+                );
+                return;
+            }
+        }
+        if ANY_FAIL.load(Ordering::Relaxed) {
+            std::process::exit(1);
+        }
+        return;
+    }
 
     match collection {
         "HashMap<i32, i32>" => run_hashmap(name, operations, assertions, construction),
@@ -373,6 +418,38 @@ fn main() {
 
     if ANY_FAIL.load(Ordering::Relaxed) {
         std::process::exit(1);
+    }
+}
+
+/// Scenario implementation profile (runners.json `"profiles"`).
+#[derive(Copy, Clone, PartialEq)]
+enum Profile {
+    /// The primitive-specialised tier (absent field or `"primitive"`).
+    Primitive,
+    /// The generic `object::` tier.
+    Object,
+}
+
+impl std::fmt::Display for Profile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Profile::Primitive => "primitive",
+            Profile::Object => "object",
+        })
+    }
+}
+
+/// Resolve the optional top-level `profile` field. `Err` carries the raw
+/// value (a string's contents, otherwise its JSON text) for the FAIL line.
+fn resolve_profile(scenario: &Value) -> Result<Profile, String> {
+    match scenario.get("profile") {
+        None => Ok(Profile::Primitive),
+        Some(Value::String(s)) => match s.as_str() {
+            "primitive" => Ok(Profile::Primitive),
+            "object" => Ok(Profile::Object),
+            other => Err(other.to_string()),
+        },
+        Some(other) => Err(other.to_string()),
     }
 }
 
@@ -586,12 +663,12 @@ fn panic_collection_known(collection: &str) -> bool {
     )
 }
 
-fn parent_expect_panic(path: &str, name: &str, ops: usize) -> ! {
+fn parent_expect_panic(path: &str, name: &str, profile: Profile, ops: usize) -> ! {
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
         Err(e) => {
             eprintln!("current_exe: {e}");
-            fail_expect_panic(name);
+            fail_expect_panic(name, profile);
         }
     };
     let mut child = match Command::new(exe)
@@ -604,13 +681,13 @@ fn parent_expect_panic(path: &str, name: &str, ops: usize) -> ! {
         Ok(child) => child,
         Err(e) => {
             eprintln!("spawn: {e}");
-            fail_expect_panic(name);
+            fail_expect_panic(name, profile);
         }
     };
     let Some(mut pipe) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
-        fail_expect_panic(name);
+        fail_expect_panic(name, profile);
     };
     let reader = thread::spawn(move || {
         let mut buf = Vec::new();
@@ -637,13 +714,13 @@ fn parent_expect_panic(path: &str, name: &str, ops: usize) -> ! {
                 let _ = child.kill();
                 let _ = child.wait();
                 let _ = reader.join();
-                fail_expect_panic(name);
+                fail_expect_panic(name, profile);
             }
         }
     };
     let stdout_buf = match reader.join() {
         Ok(buf) => buf,
-        Err(_) => fail_expect_panic(name),
+        Err(_) => fail_expect_panic(name, profile),
     };
     let stdout = String::from_utf8_lossy(&stdout_buf);
     let exit_nonzero = match &status {
@@ -654,15 +731,17 @@ fn parent_expect_panic(path: &str, name: &str, ops: usize) -> ! {
     };
     if panic_passed(exit_nonzero, &stdout, timed_out, ops) {
         println!("=== scenario: {name} ===");
+        println!("profile: {profile}");
         println!("expect_panic: true");
         let _ = std::io::stdout().flush();
         std::process::exit(0);
     }
-    fail_expect_panic(name);
+    fail_expect_panic(name, profile);
 }
 
-fn fail_expect_panic(name: &str) -> ! {
+fn fail_expect_panic(name: &str, profile: Profile) -> ! {
     println!("=== scenario: {name} ===");
+    println!("profile: {profile}");
     println!("FAIL {name} expect_panic: child did not trap cleanly");
     let _ = std::io::stdout().flush();
     std::process::exit(1);
@@ -3204,6 +3283,177 @@ fn run_f32_treeset(
             k if k.starts_with("contains_") => {
                 let raw = &k[9..];
                 let probe = HashableF32(parse_f32_label(raw));
+                set.contains(&probe).to_string()
+            }
+            "sorted" | "sorted_values" | "to_sorted_array" => {
+                // In-order traversal straight from the production tree.
+                let parts: Vec<String> = set
+                    .iter()
+                    .map(|x| format!("\"{}\"", format_f32(x.0)))
+                    .collect();
+                format!("[{}]", parts.join(","))
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
+    }
+}
+
+// ---- object profile: HashMap<f32, i32> / HashSet<f32> / TreeSet<f32> -----
+//
+// `profile: object` dispatch (design fable-spec-allign/08 §2-§3, Rust column).
+// Each function builds the generic `object::` collection over HashableF32
+// keys (raw f32 is !Eq/!Hash; algorithms.md §"NaN must hash and compare by
+// bit pattern") and answers every operation and assertion through that
+// object's production methods. Float decoding is the primitive path's
+// (parse_f32 / parse_f32_label / format_f32). The hash kinds sort their
+// iteration output only to canonicalise it, as the primitive functions do;
+// the tree set reports its own in-order traversal.
+
+fn run_f32_hashmap_object(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let mut map: object::HashMap<HashableF32, i32> = object::HashMap::<HashableF32, i32>::new();
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "put" => {
+                let k = HashableF32(parse_f32(&op["key"]));
+                let v = op["value"].as_i64().unwrap() as i32;
+                map.insert(k, v);
+            }
+            "remove" => {
+                let k = HashableF32(parse_f32(&op["key"]));
+                map.remove(&k);
+            }
+            "clear" => map.clear(),
+            other => panic!("unknown f32-hashmap op: {}", other),
+        }
+    }
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let val = match key.as_str() {
+            "size" => map.len().to_string(),
+            "is_empty" => map.is_empty().to_string(),
+            k if k.starts_with("get_") => {
+                let probe = HashableF32(parse_f32_label(&k[4..]));
+                map.get(&probe)
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "null".into())
+            }
+            k if k.starts_with("contains_") => {
+                let probe = HashableF32(parse_f32_label(&k[9..]));
+                map.contains_key(&probe).to_string()
+            }
+            "sorted_keys" => {
+                let mut keys: Vec<HashableF32> = map.keys().copied().collect();
+                keys.sort();
+                let parts: Vec<String> = keys
+                    .into_iter()
+                    .map(|x| format!("\"{}\"", format_f32(x.0)))
+                    .collect();
+                format!("[{}]", parts.join(","))
+            }
+            "sorted_values" => {
+                let mut vals: Vec<i32> = map.values().copied().collect();
+                vals.sort_unstable();
+                format_array(&vals)
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        let mode = if key == "sorted_values" {
+            FloatMode::None
+        } else {
+            FloatMode::F32Keyed
+        };
+        emit(scenario, key, &val, expected, mode);
+    }
+}
+
+fn run_f32_hashset_object(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let mut set: object::HashSet<HashableF32> = object::HashSet::<HashableF32>::new();
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "add" => {
+                set.insert(HashableF32(parse_f32(&op["value"])));
+            }
+            "remove" => {
+                set.remove(&HashableF32(parse_f32(&op["value"])));
+            }
+            "clear" => set.clear(),
+            other => panic!("unknown f32-hashset op: {}", other),
+        }
+    }
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let val = match key.as_str() {
+            "size" => set.len().to_string(),
+            "is_empty" => set.is_empty().to_string(),
+            k if k.starts_with("contains_") => {
+                let probe = HashableF32(parse_f32_label(&k[9..]));
+                set.contains(&probe).to_string()
+            }
+            "sorted_values" | "to_sorted_array" => {
+                let mut v: Vec<HashableF32> = set.iter().copied().collect();
+                v.sort();
+                let parts: Vec<String> = v
+                    .into_iter()
+                    .map(|x| format!("\"{}\"", format_f32(x.0)))
+                    .collect();
+                format!("[{}]", parts.join(","))
+            }
+            _ => format!("UNKNOWN_ASSERTION:{}", key),
+        };
+        emit(scenario, key, &val, expected, FloatMode::F32Keyed);
+    }
+}
+
+// Natural order: `TreeSet::new()` uses HashableF32's Ord (f32::total_cmp);
+// no comparator argument, so this tests the natural default.
+fn run_f32_treeset_object(
+    scenario: &str,
+    operations: &[Value],
+    assertions: &serde_json::Map<String, Value>,
+) {
+    let mut set: TreeSet<HashableF32> = TreeSet::<HashableF32>::new();
+    for op in operations {
+        match op["op"].as_str().unwrap() {
+            "add" => {
+                set.insert(HashableF32(parse_f32(&op["value"])));
+            }
+            "remove" => {
+                set.remove(&HashableF32(parse_f32(&op["value"])));
+            }
+            "clear" => set.clear(),
+            other => panic!("unknown f32-treeset op: {}", other),
+        }
+    }
+    for (key, expected) in assertions {
+        if key == "comment" {
+            continue;
+        }
+        let val = match key.as_str() {
+            "size" => set.len().to_string(),
+            "is_empty" => set.is_empty().to_string(),
+            "min" => set
+                .min()
+                .map(|x| format_f32(x.0))
+                .unwrap_or_else(|| "null".into()),
+            "max" => set
+                .max()
+                .map(|x| format_f32(x.0))
+                .unwrap_or_else(|| "null".into()),
+            k if k.starts_with("contains_") => {
+                let probe = HashableF32(parse_f32_label(&k[9..]));
                 set.contains(&probe).to_string()
             }
             "sorted" | "sorted_values" | "to_sorted_array" => {

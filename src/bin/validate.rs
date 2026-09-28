@@ -303,6 +303,21 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // `object` on a kind without an object dispatch, known or unknown kind:
+    // banner, echo, FAIL, exit 1 before any dispatch (the expect_panic parent
+    // included). Never a fallback, and never the primitive forward-compat
+    // skip: the profile is valid, so the scenario was meant for this tier.
+    // The `--panic-child` exits 1 silently here, before its Interval special
+    // case, so a rejected pair can never pass as a production trap.
+    if profile == Profile::Object && !object_profile_kind(collection) {
+        if !panic_child {
+            println!("=== scenario: {} ===", name);
+            println!("profile: {}", profile);
+            println!("FAIL profile: object not supported for '{}'", collection);
+            let _ = std::io::stdout().flush();
+        }
+        std::process::exit(1);
+    }
 
     // The parent does not apply ops and prints nothing until the child is
     // reaped. The child must not spawn again, and must not catch the trap.
@@ -329,28 +344,25 @@ fn main() {
     }
 
     println!("=== scenario: {} ===", name);
-    println!("profile: {}", profile);
+    // The `--panic-child` never echoes: its stdout is judged by the parent,
+    // which reads any `key: value` line as an assertion line. The parent owns
+    // the echo (`parent_expect_panic`).
+    if !panic_child {
+        println!("profile: {}", profile);
+    }
 
     if profile == Profile::Object {
         // Object profile: the generic `object::` tier of the same kind. Only
-        // kinds with an object dispatch run; a known kind without one FAILs
-        // (never falls back to the primitive dispatch below), an unknown kind
-        // skips exactly like the primitive path (forward-compat).
+        // the kinds in `object_profile_kind` reach here; every other kind was
+        // rejected above (never a fallback to the primitive dispatch below).
         match collection {
             "HashMap<f32, i32>" => run_f32_hashmap_object(name, operations, assertions),
             "HashSet<f32>" => run_f32_hashset_object(name, operations, assertions),
             "TreeSet<f32>" => run_f32_treeset_object(name, operations, assertions),
-            other if panic_collection_known(other) => {
-                println!("FAIL {} profile: no object dispatch for {}", name, other);
+            other => {
+                println!("FAIL profile: object not supported for '{}'", other);
                 let _ = std::io::stdout().flush();
                 std::process::exit(1);
-            }
-            other => {
-                eprintln!(
-                    "skip: unsupported collection kind (forward-compat): {}",
-                    other
-                );
-                return;
             }
         }
         if ANY_FAIL.load(Ordering::Relaxed) {
@@ -437,6 +449,15 @@ impl std::fmt::Display for Profile {
             Profile::Object => "object",
         })
     }
+}
+
+/// The collection kinds with an object-profile dispatch. Any other kind
+/// under `"object"` is a FAIL.
+fn object_profile_kind(collection: &str) -> bool {
+    matches!(
+        collection,
+        "HashMap<f32, i32>" | "HashSet<f32>" | "TreeSet<f32>"
+    )
 }
 
 /// Resolve the optional top-level `profile` field. `Err` carries the raw

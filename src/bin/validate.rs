@@ -383,6 +383,19 @@ fn reach_marker_line(i: usize, n: usize) -> String {
     format!("[panic-child] reached op {i}/{n}")
 }
 
+/// Printed immediately after that production call returns normally. Its
+/// presence for the last op means the product did NOT trap there, whatever
+/// killed the process afterwards.
+fn return_marker_line(i: usize, n: usize) -> String {
+    format!("[panic-child] returned op {i}/{n}")
+}
+
+fn stdout_has_line(stdout: &str, want: &str) -> bool {
+    stdout
+        .split('\n')
+        .any(|raw| raw.trim_end_matches('\r') == want)
+}
+
 /// Did the child print the marker for the LAST operation, i.e. get as far as
 /// calling the product for it? A runner crash before that point leaves no
 /// such line (astra25/25 F4: any non-zero exit used to count as the trap). A
@@ -391,10 +404,7 @@ fn stdout_has_reach_marker(stdout: &str, ops: usize) -> bool {
     if ops == 0 {
         return false;
     }
-    let want = reach_marker_line(ops, ops);
-    stdout
-        .split('\n')
-        .any(|raw| raw.trim_end_matches('\r') == want)
+    stdout_has_line(stdout, &reach_marker_line(ops, ops))
 }
 
 /// Q2: pass only when the child died abnormally, stdout has no sentinel,
@@ -408,6 +418,10 @@ fn panic_passed(exit_nonzero: bool, stdout: &str, timed_out: bool, ops: usize) -
         && exit_nonzero
         && !stdout_has_sentinel(stdout)
         && stdout_has_reach_marker(stdout, ops)
+        // The last call returned normally: whatever killed the child
+        // afterwards (a crash on the way to the banner), it was not the
+        // product's trap.
+        && !stdout_has_line(stdout, &return_marker_line(ops, ops))
 }
 
 fn stdout_has_sentinel(stdout: &str) -> bool {
@@ -464,7 +478,11 @@ fn panic_judge_selftest() -> i32 {
     let m2 = reach_marker_line(2, 2) + "\n";
     let m1of2 = reach_marker_line(1, 2) + "\n";
     // (id, exit_nonzero, stdout, timed_out, ops, expect_pass)
-    let cases: [(&str, bool, String, bool, usize, bool); 17] = [
+    let r1 = return_marker_line(1, 1) + "\n";
+    let r1of2 = return_marker_line(1, 2) + "\n";
+    let m1of2b = m1of2.clone();
+    let m2b = m2.clone();
+    let cases: [(&str, bool, String, bool, usize, bool); 19] = [
         ("1", false, m1.clone(), false, 1, false),
         (
             "2",
@@ -515,6 +533,10 @@ fn panic_judge_selftest() -> i32 {
             1,
             false,
         ),
+        // the last call returned: not the product's trap
+        ("18", true, m1.clone() + &r1, false, 1, false),
+        // op 1 returned, op 2 trapped
+        ("19", true, m1of2b + &r1of2 + &m2b, false, 2, true),
     ];
     let mut failed = false;
     for (id, exit_nonzero, stdout, timed_out, ops, expect) in cases {
@@ -670,6 +692,12 @@ fn run_interval(scenario: &str, operations: &[Value], markers: bool) -> Option<I
             let _ = std::io::stdout().flush();
         }
     };
+    let returned = |i: usize| {
+        if markers {
+            println!("{}", return_marker_line(i + 1, n));
+            let _ = std::io::stdout().flush();
+        }
+    };
     for (i, op) in operations.iter().enumerate() {
         match op.get("op").and_then(Value::as_str) {
             Some("from_to_by") => {
@@ -678,12 +706,15 @@ fn run_interval(scenario: &str, operations: &[Value], markers: bool) -> Option<I
                 let step = interval_i32_field(op, "step")?;
                 reach(i);
                 let built: Interval<i32> = Interval::from_to_by(from, to, step);
+                returned(i);
                 current = Some(built);
             }
             Some("reversed") => {
                 let cur = current.as_ref()?;
                 reach(i);
-                current = Some(cur.reversed());
+                let rev = cur.reversed();
+                returned(i);
+                current = Some(rev);
             }
             _ => {
                 eprintln!("malformed Interval<i32> scenario {scenario}: bad op {op}");

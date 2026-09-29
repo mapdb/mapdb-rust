@@ -137,7 +137,7 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
     /// already present, or `None` if it was new.
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let mut old = None;
-        self.root = Self::insert_rec(&self.cmp, self.root.take(), key, value, &mut old);
+        Self::insert_rec(&self.cmp, &mut self.root, key, value, &mut old);
         if old.is_none() {
             self.size += 1;
         }
@@ -188,9 +188,10 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
 
     /// Removes the entry for the given key. Returns `Some(value)` if found.
     pub fn remove(&mut self, key: &K) -> Option<V> {
-        if !self.contains_key(key) {
-            return None;
-        }
+        // All user comparator calls happen before any links or colors change.
+        // Deletion then follows the target's in-order index using cached
+        // subtree sizes, so a comparator panic leaves the original tree intact.
+        let index = self.index_of(key)?;
         // If both children of root are black, set root to red.
         if let Some(ref mut root) = self.root {
             if !is_red(&root.left) && !is_red(&root.right) {
@@ -198,7 +199,7 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
             }
         }
         let mut removed = None;
-        self.root = Self::remove_rec(&self.cmp, self.root.take(), key, &mut removed);
+        self.root = Self::remove_at_rec(self.root.take(), index, &mut removed);
         if let Some(ref mut root) = self.root {
             root.red = false;
         }
@@ -206,6 +207,22 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
             self.size -= 1;
         }
         removed
+    }
+
+    fn index_of(&self, key: &K) -> Option<usize> {
+        let mut node = self.root.as_ref();
+        let mut rank = 0;
+        while let Some(n) = node {
+            match self.cmp.compare(key, &n.key) {
+                Ordering::Less => node = n.left.as_ref(),
+                Ordering::Greater => {
+                    rank += node_size(&n.left) + 1;
+                    node = n.right.as_ref();
+                }
+                Ordering::Equal => return Some(rank + node_size(&n.left)),
+            }
+        }
+        None
     }
 
     /// Returns the number of key-value pairs.
@@ -568,10 +585,7 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
     /// Panic-consistency also holds if the *comparator* panics during the
     /// re-insertion of a survivor (an adversarial [`Compare`] with interior
     /// mutability): the drop guard recomputes `size` from the surviving tree's
-    /// cached root subtree size, so [`len`](Self::len) always equals the live
-    /// entry count on the unwind path — never the stale pre-panic count that a
-    /// bare re-insert loop would leave (`insert` takes `root` before it runs
-    /// the comparator).
+    /// cached root subtree size.
     pub fn retain<F>(&mut self, mut keep: F)
     where
         F: FnMut(&K, &mut V) -> bool,
@@ -601,58 +615,61 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
 
     fn insert_rec(
         cmp: &C,
-        node: Option<Box<Node<K, V>>>,
+        link: &mut Option<Box<Node<K, V>>>,
         key: K,
         value: V,
         old: &mut Option<V>,
-    ) -> Option<Box<Node<K, V>>> {
-        let mut node = match node {
-            None => return Some(Box::new(Node::new(key, value, true))),
+    ) {
+        let node = match link {
+            None => {
+                *link = Some(Box::new(Node::new(key, value, true)));
+                return;
+            }
             Some(n) => n,
         };
 
         match cmp.compare(&key, &node.key) {
             Ordering::Less => {
-                node.left = Self::insert_rec(cmp, node.left.take(), key, value, old);
+                Self::insert_rec(cmp, &mut node.left, key, value, old);
             }
             Ordering::Greater => {
-                node.right = Self::insert_rec(cmp, node.right.take(), key, value, old);
+                Self::insert_rec(cmp, &mut node.right, key, value, old);
             }
             Ordering::Equal => {
                 *old = Some(std::mem::replace(&mut node.value, value));
             }
         }
 
-        Some(fix_up(node))
+        *link = Some(fix_up(link.take().unwrap()));
     }
 
     // ── internal: remove ────────────────────────────────────────────
 
-    fn remove_rec(
-        cmp: &C,
+    fn remove_at_rec(
         node: Option<Box<Node<K, V>>>,
-        key: &K,
+        index: usize,
         removed: &mut Option<V>,
     ) -> Option<Box<Node<K, V>>> {
         let mut node = node?;
 
-        if cmp.compare(key, &node.key) == Ordering::Less {
+        if index < node_size(&node.left) {
             if !is_red(&node.left) && !node.left.as_ref().is_some_and(|l| is_red(&l.left)) {
                 node = move_red_left(node);
             }
-            node.left = Self::remove_rec(cmp, node.left.take(), key, removed);
+            node.left = Self::remove_at_rec(node.left.take(), index, removed);
         } else {
             if is_red(&node.left) {
                 node = rotate_right(node);
             }
-            if cmp.compare(key, &node.key) == Ordering::Equal && node.right.is_none() {
+            if index == node_size(&node.left) && node.right.is_none() {
                 *removed = Some(node.value);
                 return None;
             }
             if !is_red(&node.right) && !node.right.as_ref().is_some_and(|r| is_red(&r.left)) {
                 node = move_red_right(node);
             }
-            if cmp.compare(key, &node.key) == Ordering::Equal {
+            let left_size = node_size(&node.left);
+            if index == left_size {
                 // Replace with min of right subtree.
                 let (new_right, min_key, min_value) = delete_min_node(node.right.take());
                 node.right = new_right;
@@ -660,7 +677,7 @@ impl<K, V, C: Compare<K>> TreeMap<K, V, C> {
                 let old_value = std::mem::replace(&mut node.value, min_value);
                 *removed = Some(old_value);
             } else {
-                node.right = Self::remove_rec(cmp, node.right.take(), key, removed);
+                node.right = Self::remove_at_rec(node.right.take(), index - left_size - 1, removed);
             }
         }
         Some(fix_up(node))
@@ -2560,8 +2577,8 @@ mod tests {
         }
 
         // retain keeps everything, but arms the comparator at key 2, so the
-        // NEXT survivor re-insert aborts mid-`insert` with a comparator panic —
-        // `insert` has already taken `root`, dropping the earlier survivors.
+        // The next survivor re-insert aborts in its comparator. Earlier
+        // survivors remain linked because insert compares before taking links.
         let armed_in = armed.clone();
         let result = catch_unwind(AssertUnwindSafe(|| {
             m.retain(|k, _| {
@@ -2573,9 +2590,77 @@ mod tests {
         }));
         assert!(result.is_err());
 
-        // Regardless of how many survivors were lost, `len()` must equal the
-        // actual live entry count — the drop guard recomputed it from the tree.
+        assert_eq!(m.keys().copied().collect::<Vec<_>>(), vec![0, 1]);
         assert_eq!(m.len(), m.iter().count());
+    }
+
+    #[test]
+    fn comparator_panic_during_insert_or_remove_preserves_tree() {
+        use std::cell::Cell;
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+        use std::rc::Rc;
+
+        for operation in ["insert", "remove"] {
+            for fail_after in 0..10 {
+                let remaining = Rc::new(Cell::new(None::<usize>));
+                let probe = remaining.clone();
+                let cmp = Comparator::new(Box::new(move |a: &i32, b: &i32| {
+                    if let Some(n) = probe.get() {
+                        if n == 0 {
+                            panic!("comparator trap");
+                        }
+                        probe.set(Some(n - 1));
+                    }
+                    a.cmp(b)
+                }));
+                let mut m = TreeMap::with_comparator(cmp);
+                for key in 0..100 {
+                    m.insert(key, key * 2);
+                }
+                let before = m.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>();
+                remaining.set(Some(fail_after));
+                let result = catch_unwind(AssertUnwindSafe(|| {
+                    if operation == "insert" {
+                        m.insert(101, 202);
+                    } else {
+                        m.remove(&50);
+                    }
+                }));
+                remaining.set(None);
+                if result.is_err() {
+                    assert_eq!(m.iter().map(|(k, v)| (*k, *v)).collect::<Vec<_>>(), before);
+                    assert_eq!(m.len(), 100);
+                    assert_eq!(m.range(..).count(), 100);
+                } else if operation == "insert" {
+                    assert_eq!(m.get(&101), Some(&202));
+                } else {
+                    assert_eq!(m.get(&50), None);
+                }
+                assert_eq!(m.len(), m.iter().count());
+                assert!(m.is_valid_llrb());
+                m.insert(200, 400);
+                assert_eq!(m.remove(&200), Some(400));
+                assert!(m.is_valid_llrb());
+            }
+        }
+    }
+
+    #[test]
+    fn nan_comparator_panic_keeps_all_entries() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        let cmp = Comparator::new(Box::new(|a: &f64, b: &f64| a.partial_cmp(b).unwrap()));
+        let mut m = TreeMap::with_comparator(cmp);
+        for key in 0..100 {
+            m.insert(key as f64, key);
+        }
+        assert!(catch_unwind(AssertUnwindSafe(|| m.insert(f64::NAN, -1))).is_err());
+        assert!(catch_unwind(AssertUnwindSafe(|| m.remove(&f64::NAN))).is_err());
+        assert_eq!(m.len(), 100);
+        assert_eq!(m.iter().count(), 100);
+        assert_eq!(m.range(..).count(), 100);
+        assert_eq!(m.get(&5.0), Some(&5));
+        assert!(m.is_valid_llrb());
     }
 
     #[test]

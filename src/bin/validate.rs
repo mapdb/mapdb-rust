@@ -1565,7 +1565,11 @@ fn build_hll(operations: &[Value], other: Option<&Value>) -> Option<HyperLogLog>
     let first_op = first["op"].as_str().unwrap_or("");
     let mut hll = match first_op {
         "with_precision" => {
-            let p = first["p"].as_u64()? as u8;
+            let parsed = first["p"].as_u64()?;
+            if !(4..=18).contains(&parsed) {
+                return None;
+            }
+            let p = parsed as u8;
             // Out-of-range p is a construction error -> SKIP (the harness cannot
             // build the probe). The native tests pin the error path itself.
             HyperLogLog::with_precision(p).ok()?

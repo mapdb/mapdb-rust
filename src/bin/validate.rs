@@ -4345,6 +4345,22 @@ mod render_expected_tests {
     use serde_json::json;
 
     #[test]
+    fn hll_checks_precision_before_narrowing() {
+        for p in [4_u64, 18] {
+            let h = build_hll(&[json!({"op": "with_precision", "p": p})], None)
+                .expect("valid precision");
+            assert_eq!(u64::from(h.precision()), p);
+            assert_eq!(h.register_count(), 1_usize << p);
+        }
+        for p in [3_u64, 19, 260, 65540, u64::MAX] {
+            assert!(
+                build_hll(&[json!({"op": "with_precision", "p": p})], None).is_none(),
+                "out-of-range precision {p} accepted after narrowing"
+            );
+        }
+    }
+
+    #[test]
     fn fenwick_tree_unquotes_i64_decimal_strings() {
         let v = json!(["5", "5", "0", "7", "0", "0", "0", "16"]);
         assert_eq!(

@@ -2828,55 +2828,51 @@ mod tests {
     /// `insert`, `entry` or `try_reserve` — must leave the old table intact.
     #[test]
     fn grow_hash_panic_leaves_map_and_set_unchanged() {
-        let fail = Arc::new(AtomicBool::new(false));
-        let key = |id| HashMayPanic {
+        // Separate flags so each table's live keys can be counted on their own.
+        let map_fail = Arc::new(AtomicBool::new(false));
+        let set_fail = Arc::new(AtomicBool::new(false));
+        let key = |fail: &Arc<AtomicBool>, id| HashMayPanic {
             id,
-            fail: Arc::clone(&fail),
+            fail: Arc::clone(fail),
         };
         // 11 entries: the 12th insert into a capacity-16 table grows it.
         let ids: Vec<i32> = (0..11).collect();
+        let mut grown = ids.clone();
+        grown.push(100);
         for op in 0..3 {
             let mut m: OpenHashMap<HashMayPanic, String> = OpenHashMap::new();
             let mut s: OpenHashSet<HashMayPanic> = OpenHashSet::new();
             for &id in &ids {
-                m.insert(key(id), id.to_string());
-                s.insert(key(id));
+                m.insert(key(&map_fail, id), id.to_string());
+                s.insert(key(&set_fail, id));
             }
-            fail.store(true, Ordering::Relaxed);
+            map_fail.store(true, Ordering::Relaxed);
+            set_fail.store(true, Ordering::Relaxed);
             let caught_map = catch_unwind(AssertUnwindSafe(|| match op {
-                0 => drop(m.insert(key(100), "100".to_string())),
-                1 => drop(m.entry(key(100)).or_insert_with(|| "100".to_string())),
+                0 => drop(m.insert(key(&map_fail, 100), "100".to_string())),
+                1 => drop(
+                    m.entry(key(&map_fail, 100))
+                        .or_insert_with(|| "100".to_string()),
+                ),
                 _ => m.try_reserve(100).unwrap(),
             }));
             let caught_set = catch_unwind(AssertUnwindSafe(|| match op {
-                0 | 1 => drop(s.insert(key(100))),
+                0 | 1 => drop(s.insert(key(&set_fail, 100))),
                 _ => s.try_reserve(100).unwrap(),
             }));
-            fail.store(false, Ordering::Relaxed);
+            map_fail.store(false, Ordering::Relaxed);
+            set_fail.store(false, Ordering::Relaxed);
             assert!(
                 caught_map.is_err() && caught_set.is_err(),
                 "op {op} must panic"
             );
-            // Both tables share `fail`: count each separately.
-            let set_keys = s.len();
-            assert_eq!(m.len(), m.iter().count());
-            assert_eq!(s.len(), s.iter().count());
-            assert_eq!(Arc::strong_count(&fail), 1 + m.len() + set_keys);
-            drop(s);
-            assert_map_holds(&m, &ids, &fail);
-            m.insert(key(100), "100".to_string());
-            let mut grown = ids.clone();
-            grown.push(100);
-            assert_map_holds(&m, &grown, &fail);
+            assert_map_holds(&m, &ids, &map_fail);
+            assert_set_holds(&s, &ids, &set_fail);
+            m.insert(key(&map_fail, 100), "100".to_string());
+            s.insert(key(&set_fail, 100));
+            assert_map_holds(&m, &grown, &map_fail);
+            assert_set_holds(&s, &grown, &set_fail);
         }
-        let mut s: OpenHashSet<HashMayPanic> = OpenHashSet::new();
-        for &id in &ids {
-            s.insert(key(id));
-        }
-        fail.store(true, Ordering::Relaxed);
-        assert!(catch_unwind(AssertUnwindSafe(|| s.insert(key(100)))).is_err());
-        fail.store(false, Ordering::Relaxed);
-        assert_set_holds(&s, &ids, &fail);
     }
 
     /// Differential check of the victim-carrying backward shift against a

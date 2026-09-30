@@ -467,9 +467,11 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
     /// recycle the slot. Ordered so a panicking user `Hash`/`Eq` during the
     /// unindex leaves the map fully consistent (the value is still in its slot
     /// and still indexed): the index removal — the only step that runs user code
-    /// — happens *before* any structural change, and the backing kernel hashes
-    /// the colliding run before it empties the cell, so its backward shift runs
-    /// no user code.
+    /// — happens *before* any structural change. The backing kernel's backward
+    /// shift does run survivor `Hash` impls, but it keeps every key (the removed
+    /// one included) reachable until the last of them returns and only then
+    /// empties the removed key's final cell, so a panic there leaves the index
+    /// still holding the key.
     fn take_slot(&mut self, slot: usize) -> Option<(K, V)> {
         // Occupancy + bounds check without holding the borrow across the removal.
         self.slots.get(slot)?.as_ref()?;

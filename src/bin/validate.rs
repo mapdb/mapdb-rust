@@ -34,7 +34,7 @@ use mapdb_collections::bulk::DuplicatePolicy;
 use mapdb_collections::count_min::CountMin;
 use mapdb_collections::fenwick::FenwickTree;
 use mapdb_collections::hash;
-use mapdb_collections::hyperloglog::HyperLogLog;
+use mapdb_collections::hyperloglog::{HllError, HyperLogLog};
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object;
 use mapdb_collections::object::ArrayList;
@@ -1325,8 +1325,13 @@ fn run_hash_pipeline(
         }
         "positions" => {
             let value = op["value"].as_i64().expect("positions needs i32 value") as i32;
-            let m = op["m"].as_u64().expect("positions needs m") as u32;
-            let k = op["k"].as_u64().expect("positions needs k") as u32;
+            let (Some(m), Some(k)) = (
+                exact_u32_param(&op["m"], "positions needs m"),
+                exact_u32_param(&op["k"], "positions needs k"),
+            ) else {
+                eprintln!("skip: positions m/k outside u32 range (forward-compat)");
+                return;
+            };
             // The byte encoding of an i32 element drives positions: encode the
             // i32 to its little-endian 4-byte form (the byte path the sketches
             // use), then derive. No op-level seed (the scheme fixes 0 / SALT2).
@@ -1556,6 +1561,38 @@ fn format_u32_array(v: &[u32]) -> String {
 // malformed => SKIP. A `merge` consumes the scenario's `other` HyperLogLog.
 // Unknown ops/keys/kinds SKIP (forward-compat).
 
+/// The HLL `p` operand for production's `with_precision(p: u8)`. Only the `u8`
+/// parameter domain is checked here (so a wide `p` cannot wrap into range);
+/// the `4..=18` range is production's own check, never copied into the runner.
+fn hll_precision_param(v: &Value) -> Option<u8> {
+    u8::try_from(v.as_u64()?).ok()
+}
+
+/// Build the `with_precision` sketch: `None` when `p` is outside production's
+/// `u8` parameter domain (SKIP before narrowing), otherwise production's own
+/// `HyperLogLog::with_precision` result -- its `4..=18` check decides.
+fn hll_with_precision(v: &Value) -> Option<Result<HyperLogLog, HllError>> {
+    Some(HyperLogLog::with_precision(hll_precision_param(v)?))
+}
+
+/// A `u32` sketch parameter (CountMin `d`/`w`, SpaceSaving `m`, positions
+/// `m`/`k`) read WITHOUT narrowing: an integer serde_json holds as `u64`/`i64`
+/// that is outside `0..=u32::MAX` is `None` so the caller SKIPs, instead of
+/// wrapping under `as u32` (4294967312 -> 16). Every in-domain value reaches
+/// the production constructor unchanged, so its own checks (e.g. `w == 0`)
+/// still decide. Anything else -- missing, non-numeric, or a number serde_json
+/// could only represent as `f64` (fractional, exponent, or beyond `i64`/`u64`;
+/// the original token is not recoverable from the rounded value) -- panics
+/// with `what` exactly as the old `as_u64().expect(..)` did: a loud failure,
+/// never a narrowed value.
+fn exact_u32_param(v: &Value, what: &str) -> Option<u32> {
+    if let Some(u) = v.as_u64() {
+        return u32::try_from(u).ok();
+    }
+    assert!(v.is_i64(), "{what}");
+    None // negative integer
+}
+
 /// Build a HyperLogLog from an op list (used for the primary and the `other`
 /// block). Returns `None` (=> caller SKIPs) when the op list is malformed for
 /// the harness: not starting with exactly one builder, an `add`/`merge` before
@@ -1565,14 +1602,15 @@ fn build_hll(operations: &[Value], other: Option<&Value>) -> Option<HyperLogLog>
     let first_op = first["op"].as_str().unwrap_or("");
     let mut hll = match first_op {
         "with_precision" => {
-            let parsed = first["p"].as_u64()?;
-            if !(4..=18).contains(&parsed) {
-                return None;
-            }
-            let p = parsed as u8;
             // Out-of-range p is a construction error -> SKIP (the harness cannot
             // build the probe). The native tests pin the error path itself.
-            HyperLogLog::with_precision(p).ok()?
+            match hll_with_precision(&first["p"])? {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("skip: HyperLogLog with_precision error: {e}");
+                    return None;
+                }
+            }
         }
         "from_bytes" => {
             // `from_bytes` is the SOLE op when present (full state replacement,
@@ -1710,8 +1748,13 @@ fn run_count_min(
         return;
     }
     let ctor = with_params[0];
-    let d = ctor["d"].as_u64().expect("with_params needs d") as u32;
-    let w = ctor["w"].as_u64().expect("with_params needs w") as u32;
+    let (Some(d), Some(w)) = (
+        exact_u32_param(&ctor["d"], "with_params needs d"),
+        exact_u32_param(&ctor["w"], "with_params needs w"),
+    ) else {
+        eprintln!("skip: CountMin with_params d/w outside u32 range (forward-compat)");
+        return;
+    };
     let mut cms = CountMin::with_params(d, w);
 
     for op in &operations[1..] {
@@ -1807,9 +1850,10 @@ fn run_space_saving(
         );
         return;
     }
-    let m = with_capacity[0]["m"]
-        .as_u64()
-        .expect("with_capacity needs m") as u32;
+    let Some(m) = exact_u32_param(&with_capacity[0]["m"], "with_capacity needs m") else {
+        eprintln!("skip: SpaceSaving with_capacity m outside u32 range (forward-compat)");
+        return;
+    };
     let mut ss = SpaceSaving::with_capacity(m);
 
     for op in &operations[1..] {
@@ -4343,6 +4387,65 @@ fn eval_lru_assertion(
 mod render_expected_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn sketch_u32_params_reject_wide_values_before_narrowing() {
+        for (v, want) in [
+            (json!(16), 16_u32),
+            (json!(0), 0),
+            (json!(u32::MAX), u32::MAX),
+        ] {
+            assert_eq!(exact_u32_param(&v, "x"), Some(want), "in-domain {v}");
+        }
+        // Raw JSON tokens, parsed the way the runner parses scenarios.
+        for raw in [
+            "4294967312",
+            "4294967296",
+            "18446744073709551615",
+            "-1",
+            "-9223372036854775808",
+        ] {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                exact_u32_param(&v, "x"),
+                None,
+                "out-of-domain {raw} narrowed"
+            );
+        }
+        // Tokens serde_json can only hold as f64 (and non-numbers) keep the old
+        // loud panic: never a narrowed value, never a silent SKIP.
+        for raw in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "18446744073709551616.5",
+            "1.5",
+            "16.0",
+            "\"16\"",
+            "null",
+        ] {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            let r = std::panic::catch_unwind(|| exact_u32_param(&v, "x"));
+            assert!(r.is_err(), "{raw} must still panic, got {r:?}");
+        }
+    }
+
+    #[test]
+    fn hll_precision_range_is_left_to_production() {
+        // The runner only guards the u8 domain; 3 and 19 must reach
+        // HyperLogLog::with_precision and be rejected THERE.
+        for p in [3_u64, 19, 255] {
+            assert_eq!(hll_precision_param(&json!(p)), Some(p as u8));
+            assert_eq!(
+                hll_with_precision(&json!(p)).map(|r| r.err()),
+                Some(Some(HllError::BadPrecision(p as u8))),
+                "p={p} must be rejected by production"
+            );
+            assert!(build_hll(&[json!({"op": "with_precision", "p": p})], None).is_none());
+        }
+        for v in [json!(256), json!(260), json!(-252), json!(u64::MAX)] {
+            assert_eq!(hll_precision_param(&v), None, "wide p {v} narrowed");
+        }
+    }
 
     #[test]
     fn hll_checks_precision_before_narrowing() {

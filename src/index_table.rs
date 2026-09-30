@@ -223,7 +223,7 @@ impl<S> IndexTable<S> {
 
     /// Robin-Hood backward-shift from a just-emptied cell `deleted`, using the
     /// stored hash of each candidate to compute its ideal position. Identical in
-    /// shape to `OpenHashMap::rehash_from`.
+    /// shape to the `OpenHashMap` backward shift.
     fn backward_shift(&mut self, deleted: usize) {
         let mask = self.mask();
         let mut gap = deleted;

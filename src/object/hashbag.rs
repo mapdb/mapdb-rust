@@ -185,16 +185,18 @@ impl<T: Eq + Hash> HashBag<T> {
     }
 
     pub fn remove_one(&mut self, value: &T) -> bool {
-        if let Some(c) = self.counts.get_mut(value) {
+        let Some(c) = self.counts.get_mut(value) else {
+            return false;
+        };
+        if *c > 1 {
             *c -= 1;
-            self.size -= 1;
-            if *c == 0 {
-                self.counts.remove(value);
-            }
-            true
         } else {
-            false
+            // Last occurrence: the removal re-probes (user Hash/Eq may panic),
+            // so it runs before `size` changes. A panic leaves the bag as it was.
+            self.counts.remove(value);
         }
+        self.size -= 1;
+        true
     }
 
     pub fn for_each_with_occurrences(&self, mut f: impl FnMut(&T, usize)) {
@@ -614,5 +616,53 @@ mod tests {
         assert_eq!(bag.occurrences_of(&2), 0);
         assert_eq!(bag.occurrences_of(&1), 2);
         assert_eq!(bag.occurrences_of(&3), 1);
+    }
+
+    /// Removing the last occurrence deletes the element from the counts table,
+    /// whose backward shift hashes a colliding survivor. That Hash panics: the
+    /// bag (size, counts, distinct elements) must be left unchanged.
+    #[test]
+    fn remove_one_survivor_hash_panic_keeps_bag_consistent() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        #[derive(Clone)]
+        struct Armed {
+            id: i32,
+            armed: Rc<Cell<i32>>,
+        }
+        impl Hash for Armed {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                assert!(self.armed.get() != self.id, "armed hash");
+                0_i32.hash(state); // every element collides
+            }
+        }
+        impl PartialEq for Armed {
+            fn eq(&self, other: &Self) -> bool {
+                self.id == other.id
+            }
+        }
+        impl Eq for Armed {}
+
+        let armed = Rc::new(Cell::new(-1));
+        let e = |id| Armed {
+            id,
+            armed: armed.clone(),
+        };
+        let mut bag = HashBag::new();
+        bag.insert(e(1));
+        bag.insert(e(2));
+        armed.set(2);
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bag.remove_one(&e(1))));
+        armed.set(-1);
+        assert!(caught.is_err());
+        assert_eq!(bag.len(), 2);
+        assert_eq!(bag.distinct_len(), 2);
+        assert_eq!(bag.iter().count(), 2);
+        assert_eq!(bag.occurrences_of(&e(1)), 1);
+        assert_eq!(bag.occurrences_of(&e(2)), 1);
+        assert!(bag.remove_one(&e(1)));
+        assert_eq!((bag.len(), bag.distinct_len()), (1, 1));
+        assert_eq!(bag.occurrences_of(&e(2)), 1);
     }
 }

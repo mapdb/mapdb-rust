@@ -246,10 +246,9 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
     /// index *probe*, leaves the index, arena, free-list, expiry, and policy all
     /// untouched — not even a leaked cell: the slot is peeked (not committed), the
     /// only fallible user code (key clone + index insert) runs first, and the
-    /// arena allocation is committed afterwards. (The one residual is a `Hash`
-    /// that panics during a kernel resize-rehash, which can leave `index` partial
-    /// — a pre-existing `OpenHashMap::insert` property shared with `BoundedLruMap`,
-    /// not addressed here.)
+    /// arena allocation is committed afterwards. The kernel's resize computes
+    /// every rehash before moving entries, so a `Hash` panic while growing the
+    /// index also leaves it unchanged.
     fn insert_absent(&mut self, key: K, value: V, expire_at: u64) -> usize {
         if self.index.len() >= self.max_size {
             if let Some(victim) = self.policy.victim() {
@@ -468,8 +467,9 @@ impl<K: Hash + Eq + Clone, V, P: EvictionPolicy> BoundedMap<K, V, P> {
     /// recycle the slot. Ordered so a panicking user `Hash`/`Eq` during the
     /// unindex leaves the map fully consistent (the value is still in its slot
     /// and still indexed): the index removal — the only step that runs user code
-    /// — happens *before* any structural change, and the backing kernel's
-    /// backward-shift deletion runs no user code once the cell is found.
+    /// — happens *before* any structural change, and the backing kernel hashes
+    /// the colliding run before it empties the cell, so its backward shift runs
+    /// no user code.
     fn take_slot(&mut self, slot: usize) -> Option<(K, V)> {
         // Occupancy + bounds check without holding the borrow across the removal.
         self.slots.get(slot)?.as_ref()?;
@@ -1221,5 +1221,90 @@ mod tests {
             o.sort_unstable();
             o
         });
+    }
+
+    // --- unwind safety of the index (fable72 M1 sibling) ---
+
+    #[derive(Clone)]
+    struct ArmedKey {
+        id: i32,
+        armed: Rc<std::cell::Cell<i32>>,
+    }
+    impl std::hash::Hash for ArmedKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            assert!(self.armed.get() != self.id, "armed key hash");
+            0_i32.hash(state); // every key collides
+        }
+    }
+    impl PartialEq for ArmedKey {
+        fn eq(&self, other: &Self) -> bool {
+            self.id == other.id
+        }
+    }
+    impl Eq for ArmedKey {}
+
+    fn assert_holds(m: &BoundedMap<ArmedKey, i32>, armed: &Rc<std::cell::Cell<i32>>, ids: &[i32]) {
+        let key = |id| ArmedKey {
+            id,
+            armed: armed.clone(),
+        };
+        assert_eq!(m.len(), m.iter().count());
+        let mut seen: Vec<(i32, i32)> = m.iter().map(|(k, &v)| (k.id, v)).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, ids.iter().map(|&i| (i, i * 10)).collect::<Vec<_>>());
+        for &id in ids {
+            assert_eq!(m.peek(&key(id)), Some(&(id * 10)), "key {id} unreachable");
+        }
+    }
+
+    /// Evicting the LRU victim deletes it from the index, whose backward shift
+    /// needs the colliding survivor's hash. That Hash panics: the map must be
+    /// left unchanged.
+    #[test]
+    fn eviction_survivor_hash_panic_preserves_state() {
+        let armed = Rc::new(std::cell::Cell::new(-1));
+        let key = |id| ArmedKey {
+            id,
+            armed: armed.clone(),
+        };
+        let evicted = Rc::new(RefCell::new(Vec::new()));
+        let log = evicted.clone();
+        let mut m: BoundedMap<ArmedKey, i32> = BoundedMap::with_capacity(2)
+            .on_evict(move |k: &ArmedKey, _, _| log.borrow_mut().push(k.id));
+        m.put(key(1), 10);
+        m.put(key(2), 20);
+        armed.set(2);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.put(key(3), 30)));
+        armed.set(-1);
+        assert!(caught.is_err());
+        assert_holds(&m, &armed, &[1, 2]);
+        assert!(evicted.borrow().is_empty());
+        m.put(key(3), 30);
+        assert_holds(&m, &armed, &[2, 3]);
+        assert_eq!(*evicted.borrow(), vec![1]);
+    }
+
+    /// A resident key's Hash panics while the index grows for a new key.
+    #[test]
+    fn index_growth_hash_panic_preserves_state() {
+        let armed = Rc::new(std::cell::Cell::new(-1));
+        let key = |id| ArmedKey {
+            id,
+            armed: armed.clone(),
+        };
+        let mut m: BoundedMap<ArmedKey, i32> = BoundedMap::with_capacity(20);
+        let ids: Vec<i32> = (1..=11).collect();
+        for &id in &ids {
+            m.put(key(id), id * 10);
+        }
+        armed.set(5);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.put(key(12), 120)));
+        armed.set(-1);
+        assert!(caught.is_err());
+        assert_holds(&m, &armed, &ids);
+        m.put(key(12), 120);
+        let mut grown = ids.clone();
+        grown.push(12);
+        assert_holds(&m, &armed, &grown);
     }
 }

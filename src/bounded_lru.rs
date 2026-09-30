@@ -301,9 +301,20 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
             self.evict_node(victim, EvictionCause::Size);
         }
 
-        let idx = self.alloc_node(key.clone(), value, expire_at);
-        self.push_tail(idx);
+        // User Clone/Hash/Eq may panic: run them (clone, then the index insert,
+        // which may also grow the index) before the arena and list change. The
+        // node's slot is peeked here and committed by `alloc_node` below, which
+        // runs no user code.
+        let node_key = key.clone();
+        let idx = if self.free_head != NIL {
+            self.free_head
+        } else {
+            self.arena.len()
+        };
         self.index.insert(key, idx);
+        let allocated = self.alloc_node(node_key, value, expire_at);
+        debug_assert_eq!(allocated, idx);
+        self.push_tail(idx);
         None
     }
 
@@ -481,7 +492,10 @@ mod tests {
     }
     impl Eq for PanicKey {}
 
-    fn exercise_eviction_lookup_panic(equality: bool, expiry: bool) {
+    /// `armed_id` 1 arms the victim's own lookup; 2 arms the surviving key
+    /// that collides with it, whose Hash the index needs to backward-shift
+    /// after deleting the victim (fable72 M1).
+    fn exercise_eviction_lookup_panic(equality: bool, expiry: bool, armed_id: i32) {
         let armed = Rc::new(std::cell::Cell::new(-1));
         let key = |id| PanicKey {
             id,
@@ -500,7 +514,7 @@ mod tests {
         map.put_at(key(1), 10, 0);
         map.put_at(key(2), 20, 4);
         let links = (map.head, map.tail, map.free_head, map.arena.len());
-        armed.set(1);
+        armed.set(armed_id);
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             if expiry {
                 map.expire_entries(5);
@@ -555,19 +569,64 @@ mod tests {
 
     #[test]
     fn size_eviction_hash_panic_preserves_state() {
-        exercise_eviction_lookup_panic(false, false);
+        exercise_eviction_lookup_panic(false, false, 1);
     }
     #[test]
     fn size_eviction_eq_panic_preserves_state() {
-        exercise_eviction_lookup_panic(true, false);
+        exercise_eviction_lookup_panic(true, false, 1);
     }
     #[test]
     fn expiry_eviction_hash_panic_preserves_state() {
-        exercise_eviction_lookup_panic(false, true);
+        exercise_eviction_lookup_panic(false, true, 1);
     }
     #[test]
     fn expiry_eviction_eq_panic_preserves_state() {
-        exercise_eviction_lookup_panic(true, true);
+        exercise_eviction_lookup_panic(true, true, 1);
+    }
+
+    #[test]
+    fn size_eviction_survivor_hash_panic_preserves_state() {
+        exercise_eviction_lookup_panic(false, false, 2);
+    }
+    #[test]
+    fn expiry_eviction_survivor_hash_panic_preserves_state() {
+        exercise_eviction_lookup_panic(false, true, 2);
+    }
+
+    /// A resident key's Hash panics while the index grows for a new key. The
+    /// new node must not be linked into the LRU list without an index entry,
+    /// and the index must keep every resident key.
+    #[test]
+    fn index_growth_hash_panic_preserves_state() {
+        let armed = Rc::new(std::cell::Cell::new(-1));
+        let key = |id| PanicKey {
+            id,
+            armed: armed.clone(),
+            equality: false,
+        };
+        let mut map = BoundedLruMap::with_capacity(20);
+        // The 12th insert grows the default 16-slot index.
+        for id in 1..=11 {
+            map.put(key(id), id * 10);
+        }
+        let links = (map.head, map.tail, map.free_head, map.arena.len());
+        armed.set(5);
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| map.put(key(12), 120)));
+        armed.set(-1);
+        assert!(caught.is_err(), "index growth must hash the armed key");
+        let ids: Vec<i32> = (1..=11).collect();
+        assert_eq!(map.len(), 11);
+        assert_eq!(map.keys().iter().map(|k| k.id).collect::<Vec<_>>(), ids);
+        assert_eq!((map.head, map.tail, map.free_head, map.arena.len()), links);
+        for &id in &ids {
+            assert!(map.contains_key(&key(id)), "key {id} unreachable");
+        }
+        assert!(!map.contains_key(&key(12)));
+        map.put(key(12), 120);
+        assert_eq!(map.len(), 12);
+        assert_eq!(map.get(&key(12)), Some(120));
+        assert_eq!(map.get(&key(5)), Some(50));
     }
 
     #[test]

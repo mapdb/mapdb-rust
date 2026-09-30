@@ -53,6 +53,53 @@ enum SetSlot<K> {
 }
 
 // ---------------------------------------------------------------------------
+// Unwind safety: user `Hash` never runs on a half-mutated table
+// ---------------------------------------------------------------------------
+//
+// Backward-shift deletion and rehash-on-grow need the hash of every key they
+// move, and those hashes come from the user's `Hash` impl, which may panic.
+//
+// - Deletion carries the victim along the shift instead of emptying its slot
+//   first: each survivor that moves back swaps places with the victim. Every
+//   key, the victim included, stays reachable after every step (a moved
+//   survivor lands between its ideal slot and its old slot; the victim only
+//   moves forward within the occupied run). Only after the last user `Hash`
+//   is the victim's final slot emptied and the length decremented. A panic
+//   mid-shift leaves a valid table that still holds the victim: the removal
+//   simply did not happen.
+// - Growth hashes every key before moving any into the new table.
+
+/// Robin Hood backward shift for deleting the occupied slot `deleted`. The
+/// victim is kept in the current gap (see the note above) and the slot it
+/// finally occupies is returned; the caller empties it. `hash_of` returns a
+/// slot's key hash, or `None` for an empty slot; it may panic, which leaves
+/// every key, including the victim, reachable.
+#[inline]
+fn backward_shift<T>(
+    entries: &mut [T],
+    deleted: usize,
+    mut hash_of: impl FnMut(&T) -> Option<u64>,
+) -> usize {
+    let mask = entries.len() - 1;
+    let mut gap = deleted;
+    let mut idx = (deleted + 1) & mask;
+    while let Some(hash) = hash_of(&entries[idx]) {
+        let ideal = (hash as usize) & mask;
+        let dist_current = idx.wrapping_sub(ideal) & mask;
+        let dist_gap = gap.wrapping_sub(ideal) & mask;
+        if dist_current > dist_gap {
+            entries.swap(gap, idx);
+            gap = idx;
+        }
+        idx = (idx + 1) & mask;
+        if idx == deleted {
+            break;
+        }
+    }
+    gap
+}
+
+// ---------------------------------------------------------------------------
 // OpenHashMap<K, V, S>
 // ---------------------------------------------------------------------------
 
@@ -376,13 +423,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             match &self.entries[idx] {
                 MapSlot::Empty => return None,
                 MapSlot::Occupied { key: k, .. } if k.borrow() == key => {
-                    let taken = std::mem::replace(&mut self.entries[idx], MapSlot::Empty);
-                    self.size -= 1;
-                    self.rehash_from(idx);
-                    match taken {
-                        MapSlot::Occupied { value, .. } => return Some(value),
-                        MapSlot::Empty => unreachable!(),
-                    }
+                    return Some(self.remove_at(idx).1);
                 }
                 MapSlot::Occupied { .. } => idx = (idx + 1) & mask,
             }
@@ -430,22 +471,21 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         // only after `self` has become a complete, valid table.
     }
 
-    fn rehash_from(&mut self, deleted: usize) {
-        let mask = self.mask();
-        let mut gap = deleted;
-        let mut idx = (deleted + 1) & mask;
-        while let MapSlot::Occupied { key, .. } = &self.entries[idx] {
-            let ideal = (self.hash(key) as usize) & mask;
-            let dist_current = idx.wrapping_sub(ideal) & mask;
-            let dist_gap = gap.wrapping_sub(ideal) & mask;
-            if dist_current > dist_gap {
-                self.entries.swap(gap, idx);
-                gap = idx;
-            }
-            idx = (idx + 1) & mask;
-            if idx == deleted {
-                break;
-            }
+    /// Removes the occupied slot `idx` and backward-shifts its run. A panicking
+    /// user `Hash` during the shift leaves a valid table that still holds the
+    /// entry (see [`backward_shift`]); the entry is dropped by the caller only
+    /// after the table is consistent.
+    fn remove_at(&mut self, idx: usize) -> (K, V) {
+        let hasher = &self.hasher;
+        let gap = backward_shift(&mut self.entries, idx, |slot| match slot {
+            MapSlot::Occupied { key, .. } => Some(hasher.hash_one(key)),
+            MapSlot::Empty => None,
+        });
+        let taken = std::mem::replace(&mut self.entries[gap], MapSlot::Empty);
+        self.size -= 1;
+        match taken {
+            MapSlot::Occupied { key, value } => (key, value),
+            MapSlot::Empty => unreachable!("remove_at on an empty slot"),
         }
     }
 
@@ -460,13 +500,8 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         }
         let mut new_entries: Vec<MapSlot<K, V>> = Vec::with_capacity(new_cap);
         new_entries.resize_with(new_cap, || MapSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, new_entries);
-        self.size = 0;
-        for e in old.into_iter() {
-            if let MapSlot::Occupied { key, value } = e {
-                self.insert_no_resize(key, value);
-            }
-        }
+        let hashes = self.occupied_hashes(Vec::with_capacity(self.size));
+        self.rebuild_hashed(new_entries, hashes);
     }
 
     fn grow_to(&mut self, new_cap: usize) -> Result<(), std::collections::TryReserveError> {
@@ -476,19 +511,36 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         let mut new_entries: Vec<MapSlot<K, V>> = Vec::new();
         new_entries.try_reserve_exact(new_cap)?;
         new_entries.resize_with(new_cap, || MapSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, new_entries);
-        self.size = 0;
-        for e in old.into_iter() {
-            if let MapSlot::Occupied { key, value } = e {
-                self.insert_no_resize(key, value);
-            }
-        }
+        let mut hashes = Vec::new();
+        hashes.try_reserve_exact(self.size)?;
+        let hashes = self.occupied_hashes(hashes);
+        self.rebuild_hashed(new_entries, hashes);
         Ok(())
     }
 
-    fn insert_no_resize(&mut self, key: K, value: V) {
-        let hash = self.hash(&key);
-        self.insert_hashed_no_resize(key, value, hash);
+    /// Hashes every occupied slot in table order, without mutating the table.
+    /// This is where a rehash runs user `Hash` code.
+    fn occupied_hashes(&self, mut out: Vec<u64>) -> Vec<u64> {
+        let hasher = &self.hasher;
+        out.extend(self.entries.iter().filter_map(|slot| match slot {
+            MapSlot::Occupied { key, .. } => Some(hasher.hash_one(key)),
+            _ => None,
+        }));
+        out
+    }
+
+    /// Moves every entry into `new_entries` using `hashes` (from
+    /// [`occupied_hashes`](Self::occupied_hashes), same order). Runs no user code.
+    fn rebuild_hashed(&mut self, new_entries: Vec<MapSlot<K, V>>, hashes: Vec<u64>) {
+        let old = std::mem::replace(&mut self.entries, new_entries);
+        self.size = 0;
+        let mut hashes = hashes.into_iter();
+        for e in old.into_iter() {
+            if let MapSlot::Occupied { key, value } = e {
+                let hash = hashes.next().expect("one precomputed hash per entry");
+                self.insert_hashed_no_resize(key, value, hash);
+            }
+        }
     }
 
     fn insert_hashed_no_resize(&mut self, key: K, value: V, hash: u64) {
@@ -695,13 +747,7 @@ impl<'a, K: Hash + Eq, V, S: BuildHasher> OccupiedEntry<'a, K, V, S> {
     /// backward-shift as [`OpenHashMap::remove`], keeping the table
     /// tombstone-free.
     pub fn remove_entry(self) -> (K, V) {
-        let taken = std::mem::replace(&mut self.map.entries[self.idx], MapSlot::Empty);
-        self.map.size -= 1;
-        self.map.rehash_from(self.idx);
-        match taken {
-            MapSlot::Occupied { key, value } => (key, value),
-            MapSlot::Empty => unreachable!("OccupiedEntry over an empty slot"),
-        }
+        self.map.remove_at(self.idx)
     }
 
     /// Removes the entry and returns its value.
@@ -985,9 +1031,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
             match &self.entries[idx] {
                 SetSlot::Empty => return false,
                 SetSlot::Occupied { key } if key.borrow() == value => {
-                    self.entries[idx] = SetSlot::Empty;
-                    self.size -= 1;
-                    self.rehash_from(idx);
+                    self.remove_at(idx);
                     return true;
                 }
                 SetSlot::Occupied { .. } => idx = (idx + 1) & mask,
@@ -1119,22 +1163,18 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         out
     }
 
-    fn rehash_from(&mut self, deleted: usize) {
-        let mask = self.mask();
-        let mut gap = deleted;
-        let mut idx = (deleted + 1) & mask;
-        while let SetSlot::Occupied { key } = &self.entries[idx] {
-            let ideal = (self.hash(key) as usize) & mask;
-            let dist_current = idx.wrapping_sub(ideal) & mask;
-            let dist_gap = gap.wrapping_sub(ideal) & mask;
-            if dist_current > dist_gap {
-                self.entries.swap(gap, idx);
-                gap = idx;
-            }
-            idx = (idx + 1) & mask;
-            if idx == deleted {
-                break;
-            }
+    /// Removes the occupied slot `idx`; see `OpenHashMap::remove_at`.
+    fn remove_at(&mut self, idx: usize) -> K {
+        let hasher = &self.hasher;
+        let gap = backward_shift(&mut self.entries, idx, |slot| match slot {
+            SetSlot::Occupied { key } => Some(hasher.hash_one(key)),
+            SetSlot::Empty => None,
+        });
+        let taken = std::mem::replace(&mut self.entries[gap], SetSlot::Empty);
+        self.size -= 1;
+        match taken {
+            SetSlot::Occupied { key } => key,
+            SetSlot::Empty => unreachable!("remove_at on an empty slot"),
         }
     }
 
@@ -1149,13 +1189,8 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         }
         let mut new_entries: Vec<SetSlot<K>> = Vec::with_capacity(new_cap);
         new_entries.resize_with(new_cap, || SetSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, new_entries);
-        self.size = 0;
-        for e in old.into_iter() {
-            if let SetSlot::Occupied { key } = e {
-                self.insert_no_resize(key);
-            }
-        }
+        let hashes = self.occupied_hashes(Vec::with_capacity(self.size));
+        self.rebuild_hashed(new_entries, hashes);
     }
 
     fn grow_to(&mut self, new_cap: usize) -> Result<(), std::collections::TryReserveError> {
@@ -1165,19 +1200,34 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         let mut new_entries: Vec<SetSlot<K>> = Vec::new();
         new_entries.try_reserve_exact(new_cap)?;
         new_entries.resize_with(new_cap, || SetSlot::Empty);
-        let old = std::mem::replace(&mut self.entries, new_entries);
-        self.size = 0;
-        for e in old.into_iter() {
-            if let SetSlot::Occupied { key } = e {
-                self.insert_no_resize(key);
-            }
-        }
+        let mut hashes = Vec::new();
+        hashes.try_reserve_exact(self.size)?;
+        let hashes = self.occupied_hashes(hashes);
+        self.rebuild_hashed(new_entries, hashes);
         Ok(())
     }
 
-    fn insert_no_resize(&mut self, value: K) {
-        let hash = self.hash(&value);
-        self.insert_hashed_no_resize(value, hash);
+    /// See `OpenHashMap::occupied_hashes`.
+    fn occupied_hashes(&self, mut out: Vec<u64>) -> Vec<u64> {
+        let hasher = &self.hasher;
+        out.extend(self.entries.iter().filter_map(|slot| match slot {
+            SetSlot::Occupied { key } => Some(hasher.hash_one(key)),
+            _ => None,
+        }));
+        out
+    }
+
+    /// See `OpenHashMap::rebuild_hashed`. Runs no user code.
+    fn rebuild_hashed(&mut self, new_entries: Vec<SetSlot<K>>, hashes: Vec<u64>) {
+        let old = std::mem::replace(&mut self.entries, new_entries);
+        self.size = 0;
+        let mut hashes = hashes.into_iter();
+        for e in old.into_iter() {
+            if let SetSlot::Occupied { key } = e {
+                let hash = hashes.next().expect("one precomputed hash per entry");
+                self.insert_hashed_no_resize(key, hash);
+            }
+        }
     }
 
     fn insert_hashed_no_resize(&mut self, value: K, hash: u64) {
@@ -1925,7 +1975,10 @@ mod tests {
 
     #[test]
     fn with_capacity_reserves_entries_not_slots() {
-        assert_eq!(OpenHashMap::<i32, i32>::new().entries.len(), DEFAULT_CAPACITY);
+        assert_eq!(
+            OpenHashMap::<i32, i32>::new().entries.len(),
+            DEFAULT_CAPACITY
+        );
         assert_eq!(OpenHashSet::<i32>::new().entries.len(), DEFAULT_CAPACITY);
 
         for (requested, expected_slots) in [
@@ -1938,10 +1991,8 @@ mod tests {
             (1000, 2048),
         ] {
             let mut map = OpenHashMap::<i32, i32>::with_capacity(requested);
-            let mut set = OpenHashSet::<i32>::with_capacity_and_hasher(
-                requested,
-                RandomState::new(),
-            );
+            let mut set =
+                OpenHashSet::<i32>::with_capacity_and_hasher(requested, RandomState::new());
             assert_eq!(map.entries.len(), expected_slots);
             assert_eq!(set.entries.len(), expected_slots);
             for key in 0..requested {
@@ -2654,5 +2705,215 @@ mod tests {
         assert!(empty.is_subset(&a));
         assert!(a.is_superset(&empty));
         assert!(empty.is_disjoint(&a));
+    }
+
+    // --- unwind safety: a panicking user Hash after a probe / during growth ---
+
+    /// Asserts that `m` holds exactly the keys `ids` (each mapped to its id
+    /// string), that `len` matches iteration, that every iterated key is
+    /// findable, and that no key was leaked or dropped twice (`fail` is shared
+    /// by every live key, plus the test's own handle).
+    fn assert_map_holds<S: BuildHasher>(
+        m: &OpenHashMap<HashMayPanic, String, S>,
+        ids: &[i32],
+        fail: &Arc<AtomicBool>,
+    ) {
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(fail),
+        };
+        assert_eq!(m.len(), m.iter().count());
+        let mut seen: Vec<i32> = m.keys().map(|k| k.id).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, ids);
+        for (k, v) in m.iter() {
+            assert_eq!(
+                m.get(&key(k.id)),
+                Some(v),
+                "iterated key {} unreachable",
+                k.id
+            );
+            assert_eq!(*v, k.id.to_string());
+        }
+        assert_eq!(
+            Arc::strong_count(fail),
+            1 + ids.len(),
+            "leaked or lost keys"
+        );
+    }
+
+    fn assert_set_holds<S: BuildHasher>(
+        s: &OpenHashSet<HashMayPanic, S>,
+        ids: &[i32],
+        fail: &Arc<AtomicBool>,
+    ) {
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(fail),
+        };
+        assert_eq!(s.len(), s.iter().count());
+        let mut seen: Vec<i32> = s.iter().map(|k| k.id).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, ids);
+        for k in s.iter() {
+            assert!(s.contains(&key(k.id)), "iterated key {} unreachable", k.id);
+        }
+        assert_eq!(
+            Arc::strong_count(fail),
+            1 + ids.len(),
+            "leaked or lost keys"
+        );
+    }
+
+    /// M1 (fable72): removing the head of a collision run hashes the survivors
+    /// for the backward shift. Survivor id 2's Hash panics; the table must be
+    /// left unchanged — no hole before the survivor, no stale length.
+    #[test]
+    fn remove_survivor_hash_panic_leaves_map_unchanged() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(&fail),
+        };
+        let ids = [0, 1, 2, 3, 4];
+        // `remove`, then `entry(..).remove_entry()`: both share the shift.
+        for via_entry in [false, true] {
+            let mut m: OpenHashMap<HashMayPanic, String, Collisions> =
+                OpenHashMap::with_hasher(Collisions::default());
+            for id in ids {
+                m.insert(key(id), id.to_string());
+            }
+            fail.store(true, Ordering::Relaxed);
+            let caught = catch_unwind(AssertUnwindSafe(|| {
+                if via_entry {
+                    match m.entry(key(0)) {
+                        Entry::Occupied(e) => drop(e.remove_entry()),
+                        Entry::Vacant(_) => unreachable!(),
+                    }
+                } else {
+                    m.remove(&key(0));
+                }
+            }));
+            fail.store(false, Ordering::Relaxed);
+            assert!(caught.is_err(), "survivor hash must panic");
+            assert_map_holds(&m, &ids, &fail);
+            // Retry succeeds and the survivors stay reachable.
+            assert_eq!(m.remove(&key(0)).as_deref(), Some("0"));
+            assert_map_holds(&m, &[1, 2, 3, 4], &fail);
+        }
+    }
+
+    #[test]
+    fn remove_survivor_hash_panic_leaves_set_unchanged() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(&fail),
+        };
+        let ids = [0, 1, 2, 3, 4];
+        let mut s: OpenHashSet<HashMayPanic, Collisions> =
+            OpenHashSet::with_hasher(Collisions::default());
+        for id in ids {
+            s.insert(key(id));
+        }
+        fail.store(true, Ordering::Relaxed);
+        assert!(catch_unwind(AssertUnwindSafe(|| s.remove(&key(1)))).is_err());
+        fail.store(false, Ordering::Relaxed);
+        assert_set_holds(&s, &ids, &fail);
+        assert!(s.remove(&key(1)));
+        assert_set_holds(&s, &[0, 2, 3, 4], &fail);
+    }
+
+    /// Growth rehashes every key. A panicking Hash (id 2) while growing — from
+    /// `insert`, `entry` or `try_reserve` — must leave the old table intact.
+    #[test]
+    fn grow_hash_panic_leaves_map_and_set_unchanged() {
+        let fail = Arc::new(AtomicBool::new(false));
+        let key = |id| HashMayPanic {
+            id,
+            fail: Arc::clone(&fail),
+        };
+        // 11 entries: the 12th insert into a capacity-16 table grows it.
+        let ids: Vec<i32> = (0..11).collect();
+        for op in 0..3 {
+            let mut m: OpenHashMap<HashMayPanic, String> = OpenHashMap::new();
+            let mut s: OpenHashSet<HashMayPanic> = OpenHashSet::new();
+            for &id in &ids {
+                m.insert(key(id), id.to_string());
+                s.insert(key(id));
+            }
+            fail.store(true, Ordering::Relaxed);
+            let caught_map = catch_unwind(AssertUnwindSafe(|| match op {
+                0 => drop(m.insert(key(100), "100".to_string())),
+                1 => drop(m.entry(key(100)).or_insert_with(|| "100".to_string())),
+                _ => m.try_reserve(100).unwrap(),
+            }));
+            let caught_set = catch_unwind(AssertUnwindSafe(|| match op {
+                0 | 1 => drop(s.insert(key(100))),
+                _ => s.try_reserve(100).unwrap(),
+            }));
+            fail.store(false, Ordering::Relaxed);
+            assert!(
+                caught_map.is_err() && caught_set.is_err(),
+                "op {op} must panic"
+            );
+            // Both tables share `fail`: count each separately.
+            let set_keys = s.len();
+            assert_eq!(m.len(), m.iter().count());
+            assert_eq!(s.len(), s.iter().count());
+            assert_eq!(Arc::strong_count(&fail), 1 + m.len() + set_keys);
+            drop(s);
+            assert_map_holds(&m, &ids, &fail);
+            m.insert(key(100), "100".to_string());
+            let mut grown = ids.clone();
+            grown.push(100);
+            assert_map_holds(&m, &grown, &fail);
+        }
+        let mut s: OpenHashSet<HashMayPanic> = OpenHashSet::new();
+        for &id in &ids {
+            s.insert(key(id));
+        }
+        fail.store(true, Ordering::Relaxed);
+        assert!(catch_unwind(AssertUnwindSafe(|| s.insert(key(100)))).is_err());
+        fail.store(false, Ordering::Relaxed);
+        assert_set_holds(&s, &ids, &fail);
+    }
+
+    /// Differential check of the victim-carrying backward shift against a
+    /// model under heavy clustering (a tiny hash range forces long runs that
+    /// wrap around the end of the table).
+    #[test]
+    fn backward_shift_with_long_runs_matches_model() {
+        #[derive(Default)]
+        struct Narrow(u64);
+        impl Hasher for Narrow {
+            fn finish(&self) -> u64 {
+                // Few distinct buckets near the top of a 64-slot table so runs
+                // wrap around the end.
+                60 + (self.0 % 3)
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                for &b in bytes {
+                    self.0 = self.0.wrapping_mul(31).wrapping_add(b as u64);
+                }
+            }
+        }
+        let mut m: OpenHashMap<u32, u32, BuildHasherDefault<Narrow>> =
+            OpenHashMap::with_capacity_and_hasher(40, BuildHasherDefault::default());
+        let mut model = std::collections::BTreeMap::new();
+        let mut state: u64 = 0x5EED;
+        for _ in 0..20_000 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let k = ((state >> 33) % 45) as u32;
+            if (state >> 20) & 1 == 0 {
+                assert_eq!(m.insert(k, k * 2), model.insert(k, k * 2));
+            } else {
+                assert_eq!(m.remove(&k), model.remove(&k));
+            }
+            assert_eq!(m.len(), model.len());
+        }
+        for k in 0..45 {
+            assert_eq!(m.get(&k), model.get(&k));
+        }
     }
 }

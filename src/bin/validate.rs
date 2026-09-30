@@ -34,7 +34,7 @@ use mapdb_collections::bulk::DuplicatePolicy;
 use mapdb_collections::count_min::CountMin;
 use mapdb_collections::fenwick::FenwickTree;
 use mapdb_collections::hash;
-use mapdb_collections::hyperloglog::HyperLogLog;
+use mapdb_collections::hyperloglog::{HllError, HyperLogLog};
 use mapdb_collections::multimap::{Multimap, SetMultimap};
 use mapdb_collections::object;
 use mapdb_collections::object::ArrayList;
@@ -1568,29 +1568,26 @@ fn hll_precision_param(v: &Value) -> Option<u8> {
     u8::try_from(v.as_u64()?).ok()
 }
 
+/// Build the `with_precision` sketch: `None` when `p` is outside production's
+/// `u8` parameter domain (SKIP before narrowing), otherwise production's own
+/// `HyperLogLog::with_precision` result -- its `4..=18` check decides.
+fn hll_with_precision(v: &Value) -> Option<Result<HyperLogLog, HllError>> {
+    Some(HyperLogLog::with_precision(hll_precision_param(v)?))
+}
+
 /// A `u32` sketch parameter (CountMin `d`/`w`, SpaceSaving `m`, positions
-/// `m`/`k`) read WITHOUT narrowing: an integer outside `0..=u32::MAX` (negative,
-/// or wider -- serde parses an integer beyond `u64` as `f64`) is `None` so the
-/// caller SKIPs, instead of wrapping under `as u32` (4294967312 -> 16). Every
-/// in-domain value reaches the production constructor unchanged, so its own
-/// checks (e.g. `w == 0`) still decide. A missing / non-numeric / non-integral
-/// operand panics with `what`, as before.
+/// `m`/`k`) read WITHOUT narrowing: any JSON number that is not exactly an
+/// integer in `0..=u32::MAX` is `None` so the caller SKIPs, instead of wrapping
+/// under `as u32` (4294967312 -> 16). serde_json has already rounded integers
+/// beyond `i64`/`u64` (and fractional values) into `f64`, so the original
+/// token cannot be classified exactly; every non-`u32` number therefore SKIPs,
+/// the same `u32::try_from(v.as_u64()?)` rule the Bloom and HLL builders here
+/// use. Every in-domain value reaches the production constructor unchanged,
+/// so its own checks (e.g. `w == 0`) still decide. A missing or non-numeric
+/// operand still panics with `what`, as before.
 fn exact_u32_param(v: &Value, what: &str) -> Option<u32> {
-    if let Some(u) = v.as_u64() {
-        return u32::try_from(u).ok();
-    }
-    if v.is_i64() {
-        return None; // negative integer
-    }
-    match v.as_f64() {
-        Some(f)
-            if f.fract() == 0.0
-                && (f >= 18_446_744_073_709_551_616.0 || f < -9_223_372_036_854_775_808.0) =>
-        {
-            None
-        }
-        _ => panic!("{what}"),
-    }
+    assert!(v.is_number(), "{what}");
+    u32::try_from(v.as_u64()?).ok()
 }
 
 /// Build a HyperLogLog from an op list (used for the primary and the `other`
@@ -1602,10 +1599,9 @@ fn build_hll(operations: &[Value], other: Option<&Value>) -> Option<HyperLogLog>
     let first_op = first["op"].as_str().unwrap_or("");
     let mut hll = match first_op {
         "with_precision" => {
-            let p = hll_precision_param(&first["p"])?;
             // Out-of-range p is a construction error -> SKIP (the harness cannot
             // build the probe). The native tests pin the error path itself.
-            match HyperLogLog::with_precision(p) {
+            match hll_with_precision(&first["p"])? {
                 Ok(h) => h,
                 Err(e) => {
                     eprintln!("skip: HyperLogLog with_precision error: {e}");
@@ -4398,15 +4394,27 @@ mod render_expected_tests {
         ] {
             assert_eq!(exact_u32_param(&v, "x"), Some(want), "in-domain {v}");
         }
-        let beyond_u64: Value = serde_json::from_str("18446744073709551632").unwrap();
-        for v in [
-            json!(4_294_967_312_u64),
-            json!(4_294_967_296_u64),
-            json!(u64::MAX),
-            json!(-1),
-            beyond_u64,
+        // Raw JSON tokens, parsed the way the runner parses scenarios.
+        for raw in [
+            "4294967312",
+            "4294967296",
+            "18446744073709551615",
+            "18446744073709551616",
+            "18446744073709551632",
+            "-1",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "18446744073709551616.5",
+            "-9223372036854780000.5",
+            "1.5",
+            "16.0",
         ] {
-            assert_eq!(exact_u32_param(&v, "x"), None, "out-of-domain {v} narrowed");
+            let v: Value = serde_json::from_str(raw).unwrap();
+            assert_eq!(
+                exact_u32_param(&v, "x"),
+                None,
+                "out-of-domain {raw} narrowed"
+            );
         }
     }
 
@@ -4416,6 +4424,11 @@ mod render_expected_tests {
         // HyperLogLog::with_precision and be rejected THERE.
         for p in [3_u64, 19, 255] {
             assert_eq!(hll_precision_param(&json!(p)), Some(p as u8));
+            assert_eq!(
+                hll_with_precision(&json!(p)).map(|r| r.err()),
+                Some(Some(HllError::BadPrecision(p as u8))),
+                "p={p} must be rejected by production"
+            );
             assert!(build_hll(&[json!({"op": "with_precision", "p": p})], None).is_none());
         }
         for v in [json!(256), json!(260), json!(-252), json!(u64::MAX)] {

@@ -352,13 +352,15 @@ impl<K: Hash + Eq + Clone> BoundedLruMap<K> {
         self.tail = NIL;
     }
 
-    /// Remove a victim node entirely (unlink + free + index-remove) and fire the
+    /// Remove a victim node entirely (index-remove + unlink + free) and fire the
     /// eviction callback with the given cause and the value-at-eviction.
     fn evict_node(&mut self, idx: usize, cause: EvictionCause) {
         let value = self.arena[idx].value;
+        // User Hash/Eq may panic: resolve the lookup before changing links
+        // or putting the live node on the free list.
+        self.index.remove(Self::live_key(&self.arena[idx]));
         self.unlink(idx);
         let key = self.free_node(idx).expect("live LRU node has a key");
-        self.index.remove(&key);
         if let Some(cb) = self.on_evict.as_mut() {
             cb(&key, value, cause);
         }
@@ -450,6 +452,170 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::rc::Rc;
+
+    #[derive(Clone)]
+    struct PanicKey {
+        id: i32,
+        armed: Rc<std::cell::Cell<i32>>,
+        equality: bool,
+    }
+
+    impl std::hash::Hash for PanicKey {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            assert!(
+                self.equality || self.armed.get() != self.id,
+                "armed victim hash"
+            );
+            0_i32.hash(state); // force Eq probes and backward-shift collisions
+        }
+    }
+
+    impl PartialEq for PanicKey {
+        fn eq(&self, other: &Self) -> bool {
+            assert!(
+                !self.equality || self.armed.get() != self.id || self.id != other.id,
+                "armed victim equality"
+            );
+            self.id == other.id
+        }
+    }
+    impl Eq for PanicKey {}
+
+    fn exercise_eviction_lookup_panic(equality: bool, expiry: bool) {
+        let armed = Rc::new(std::cell::Cell::new(-1));
+        let key = |id| PanicKey {
+            id,
+            armed: armed.clone(),
+            equality,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let recording = log.clone();
+        let mut builder = BoundedLruMap::builder()
+            .max_size(2)
+            .on_evict(move |k: &PanicKey, v, c| recording.borrow_mut().push((k.id, v, c)));
+        if expiry {
+            builder = builder.ttl(5);
+        }
+        let mut map = builder.build();
+        map.put_at(key(1), 10, 0);
+        map.put_at(key(2), 20, 4);
+        let links = (map.head, map.tail, map.free_head, map.arena.len());
+        armed.set(1);
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if expiry {
+                map.expire_entries(5);
+            } else {
+                map.put(key(3), 30);
+            }
+        }));
+        armed.set(-1);
+        assert!(
+            caught.is_err(),
+            "victim lookup must exercise the intended panic"
+        );
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.keys().iter().map(|k| k.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(map.values(), vec![10, 20]);
+        assert_eq!((map.head, map.tail, map.free_head, map.arena.len()), links);
+        assert!(map.contains_key(&key(1)) && map.contains_key(&key(2)));
+        assert!(!map.contains_key(&key(3)));
+        assert!(log.borrow().is_empty());
+        if expiry {
+            assert_eq!(map.expire_entries(5), 1);
+            map.put_at(key(3), 30, 5);
+        } else {
+            map.put(key(3), 30);
+        }
+        assert_eq!(
+            map.keys().iter().map(|k| k.id).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(map.values(), vec![20, 30]);
+        assert_eq!(map.arena.len(), 2, "successful retry reuses a freed slot");
+        assert_eq!(map.len(), 2);
+        assert!(!map.contains_key(&key(1)));
+        assert_eq!(map.get(&key(3)), Some(30));
+        assert_eq!(map.get(&key(2)), Some(20));
+        assert_eq!(
+            *log.borrow(),
+            vec![(
+                1,
+                10,
+                if expiry {
+                    EvictionCause::Expired
+                } else {
+                    EvictionCause::Size
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn size_eviction_hash_panic_preserves_state() {
+        exercise_eviction_lookup_panic(false, false);
+    }
+    #[test]
+    fn size_eviction_eq_panic_preserves_state() {
+        exercise_eviction_lookup_panic(true, false);
+    }
+    #[test]
+    fn expiry_eviction_hash_panic_preserves_state() {
+        exercise_eviction_lookup_panic(false, true);
+    }
+    #[test]
+    fn expiry_eviction_eq_panic_preserves_state() {
+        exercise_eviction_lookup_panic(true, true);
+    }
+
+    #[test]
+    fn expiry_panic_retains_consistency_after_completed_victim() {
+        let armed = Rc::new(std::cell::Cell::new(-1));
+        let key = |id| PanicKey {
+            id,
+            armed: armed.clone(),
+            equality: true,
+        };
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let recording = log.clone();
+        let mut map = BoundedLruMap::builder()
+            .max_size(3)
+            .ttl(5)
+            .on_evict(move |k: &PanicKey, v, c| recording.borrow_mut().push((k.id, v, c)))
+            .build();
+        for id in 1..=3 {
+            map.put_at(key(id), id * 10, (id - 1) as u64);
+        }
+        armed.set(2);
+        let caught =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| map.expire_entries(7)));
+        armed.set(-1);
+        assert!(caught.is_err());
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.keys().iter().map(|k| k.id).collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        assert_eq!(map.values(), vec![20, 30]);
+        assert!(!map.contains_key(&key(1)));
+        assert!(map.contains_key(&key(2)) && map.contains_key(&key(3)));
+        assert_eq!(*log.borrow(), vec![(1, 10, EvictionCause::Expired)]);
+        assert_eq!(map.expire_entries(7), 2);
+        assert!(map.is_empty());
+        map.put_at(key(4), 40, 8);
+        assert_eq!(map.get(&key(4)), Some(40));
+        assert_eq!(map.arena.len(), 3);
+        assert_eq!(
+            *log.borrow(),
+            vec![
+                (1, 10, EvictionCause::Expired),
+                (2, 20, EvictionCause::Expired),
+                (3, 30, EvictionCause::Expired)
+            ]
+        );
+    }
 
     type Log = Rc<RefCell<Vec<(i32, i32, EvictionCause)>>>;
     /// (keys, values, eviction-log) snapshot returned by the determinism replay.

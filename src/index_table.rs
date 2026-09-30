@@ -93,12 +93,12 @@ impl IndexTable<RandomState> {
 impl<S> IndexTable<S> {
     /// A new empty index using `hasher`.
     pub(crate) fn with_hasher(hasher: S) -> Self {
-        Self::with_capacity_and_hasher(DEFAULT_CAPACITY, hasher)
+        Self::with_capacity_and_hasher(0, hasher)
     }
 
     /// A new empty index sized for `cap` items, using `hasher`.
     pub(crate) fn with_capacity_and_hasher(cap: usize, hasher: S) -> Self {
-        let cap = cap.max(DEFAULT_CAPACITY).next_power_of_two();
+        let cap = crate::bulk::open_addressing_capacity(cap, DEFAULT_CAPACITY);
         let mut slots = Vec::with_capacity(cap);
         slots.resize_with(cap, || IdxSlot::Empty);
         IndexTable {
@@ -111,6 +111,11 @@ impl<S> IndexTable<S> {
     #[inline]
     fn cap(&self) -> usize {
         self.slots.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocated_slots(&self) -> usize {
+        self.cap()
     }
 
     #[inline]
@@ -269,6 +274,39 @@ impl<S: BuildHasher> IndexTable<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reservation_keeps_index_capacity_through_requested_entries() {
+        for requested in [0, 1, 11, 12, 15, 16, 23, 24, 48, 64, 1000] {
+            let mut table: IndexTable = IndexTable::with_capacity(requested);
+            let initial = table.cap();
+            for key in 0..requested {
+                let hash = key as u64; // deliberately colliding at small capacities
+                match table.probe(hash, |slot| slot == key) {
+                    RawEntry::Vacant(cell) => table.fill_vacant(cell, hash, key),
+                    RawEntry::Occupied(_) => panic!("new key present"),
+                }
+                assert_eq!(
+                    table.cap(),
+                    initial,
+                    "requested {requested}, inserted {}",
+                    key + 1
+                );
+            }
+            for key in 0..requested {
+                assert_eq!(table.find(key as u64, |slot| slot == key), Some(key));
+            }
+            table.clear();
+            assert_eq!(table.cap(), initial);
+        }
+    }
+
+    #[test]
+    fn impossible_index_reservation_panics_before_allocation() {
+        for requested in [usize::MAX, usize::MAX / 2] {
+            assert!(std::panic::catch_unwind(|| IndexTable::with_capacity(requested)).is_err());
+        }
+    }
 
     /// Drive the index against an external key arena and a `std` reference map,
     /// asserting `find` agreement across a long randomized insert/remove stream.

@@ -116,6 +116,11 @@ impl<K, V> HashMapWithStrategy<K, V> {
         self.find_slot(key).is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn allocated_index_slots(&self) -> usize {
+        self.index.allocated_slots()
+    }
+
     /// Returns the number of key-value pairs.
     pub fn len(&self) -> usize {
         self.slots.len()
@@ -186,6 +191,33 @@ impl<K, V> HashMapWithStrategy<K, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn constructor_reserves_requested_entries_without_index_growth() {
+        for requested in [0, 1, 11, 12, 16, 24, 64, 1000] {
+            let mut collection = HashMapWithStrategy::with_capacity(
+                crate::object::strategy::HashingStrategy::new(
+                    Box::new(|_: &usize| 0),
+                    Box::new(|a, b| a == b),
+                ),
+                requested,
+            );
+            let initial = collection.allocated_index_slots();
+            for key in 0..requested {
+                assert_eq!(collection.insert(key, key + 1), None);
+                assert_eq!(
+                    collection.allocated_index_slots(),
+                    initial,
+                    "requested {requested}, inserted {}",
+                    key + 1
+                );
+            }
+            assert_eq!(collection.len(), requested);
+            for key in 0..requested {
+                assert_eq!(collection.get(&key), Some(&(key + 1)));
+            }
+        }
+    }
+
     use crate::object::strategy::*;
 
     #[test]

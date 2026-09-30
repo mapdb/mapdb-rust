@@ -75,6 +75,11 @@ impl<K: Eq + Hash, V, S: BuildHasher> LinkedHashMap<K, V, S> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn allocated_index_slots(&self) -> usize {
+        self.index.allocated_slots()
+    }
+
     /// The number of entries.
     pub fn len(&self) -> usize {
         self.slots.len()
@@ -674,6 +679,26 @@ impl<K, V, S> IntoIterator for LinkedHashMap<K, V, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn constructor_reserves_requested_entries_without_index_growth() {
+        for requested in [0, 1, 11, 12, 16, 24, 64, 1000] {
+            let mut collection = LinkedHashMap::<usize, usize>::with_capacity(requested);
+            let initial = collection.allocated_index_slots();
+            for key in 0..requested {
+                assert_eq!(collection.insert(key, key + 1), None);
+                assert_eq!(
+                    collection.allocated_index_slots(),
+                    initial,
+                    "requested {requested}, inserted {}",
+                    key + 1
+                );
+            }
+            assert_eq!(collection.len(), requested);
+            for key in 0..requested {
+                assert_eq!(collection.get(&key), Some(&(key + 1)));
+            }
+        }
+    }
 
     #[test]
     fn test_basic() {

@@ -330,6 +330,26 @@ impl<T, S> IntoIterator for LinkedHashSet<T, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn constructor_reserves_requested_entries_without_index_growth() {
+        for requested in [0, 1, 11, 12, 16, 24, 64, 1000] {
+            let mut collection = LinkedHashSet::<usize>::with_capacity(requested);
+            let initial = collection.map.allocated_index_slots();
+            for key in 0..requested {
+                assert!(collection.insert(key));
+                assert_eq!(
+                    collection.map.allocated_index_slots(),
+                    initial,
+                    "requested {requested}, inserted {}",
+                    key + 1
+                );
+            }
+            assert_eq!(collection.len(), requested);
+            for key in 0..requested {
+                assert!(collection.contains(&key));
+            }
+        }
+    }
 
     #[test]
     fn test_basic() {

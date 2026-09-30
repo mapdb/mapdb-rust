@@ -1576,18 +1576,21 @@ fn hll_with_precision(v: &Value) -> Option<Result<HyperLogLog, HllError>> {
 }
 
 /// A `u32` sketch parameter (CountMin `d`/`w`, SpaceSaving `m`, positions
-/// `m`/`k`) read WITHOUT narrowing: any JSON number that is not exactly an
-/// integer in `0..=u32::MAX` is `None` so the caller SKIPs, instead of wrapping
-/// under `as u32` (4294967312 -> 16). serde_json has already rounded integers
-/// beyond `i64`/`u64` (and fractional values) into `f64`, so the original
-/// token cannot be classified exactly; every non-`u32` number therefore SKIPs,
-/// the same `u32::try_from(v.as_u64()?)` rule the Bloom and HLL builders here
-/// use. Every in-domain value reaches the production constructor unchanged,
-/// so its own checks (e.g. `w == 0`) still decide. A missing or non-numeric
-/// operand still panics with `what`, as before.
+/// `m`/`k`) read WITHOUT narrowing: an integer serde_json holds as `u64`/`i64`
+/// that is outside `0..=u32::MAX` is `None` so the caller SKIPs, instead of
+/// wrapping under `as u32` (4294967312 -> 16). Every in-domain value reaches
+/// the production constructor unchanged, so its own checks (e.g. `w == 0`)
+/// still decide. Anything else -- missing, non-numeric, or a number serde_json
+/// could only represent as `f64` (fractional, exponent, or beyond `i64`/`u64`;
+/// the original token is not recoverable from the rounded value) -- panics
+/// with `what` exactly as the old `as_u64().expect(..)` did: a loud failure,
+/// never a narrowed value.
 fn exact_u32_param(v: &Value, what: &str) -> Option<u32> {
-    assert!(v.is_number(), "{what}");
-    u32::try_from(v.as_u64()?).ok()
+    if let Some(u) = v.as_u64() {
+        return u32::try_from(u).ok();
+    }
+    assert!(v.is_i64(), "{what}");
+    None // negative integer
 }
 
 /// Build a HyperLogLog from an op list (used for the primary and the `other`
@@ -4399,15 +4402,8 @@ mod render_expected_tests {
             "4294967312",
             "4294967296",
             "18446744073709551615",
-            "18446744073709551616",
-            "18446744073709551632",
             "-1",
             "-9223372036854775808",
-            "-9223372036854775809",
-            "18446744073709551616.5",
-            "-9223372036854780000.5",
-            "1.5",
-            "16.0",
         ] {
             let v: Value = serde_json::from_str(raw).unwrap();
             assert_eq!(
@@ -4415,6 +4411,21 @@ mod render_expected_tests {
                 None,
                 "out-of-domain {raw} narrowed"
             );
+        }
+        // Tokens serde_json can only hold as f64 (and non-numbers) keep the old
+        // loud panic: never a narrowed value, never a silent SKIP.
+        for raw in [
+            "18446744073709551616",
+            "-9223372036854775809",
+            "18446744073709551616.5",
+            "1.5",
+            "16.0",
+            "\"16\"",
+            "null",
+        ] {
+            let v: Value = serde_json::from_str(raw).unwrap();
+            let r = std::panic::catch_unwind(|| exact_u32_param(&v, "x"));
+            assert!(r.is_err(), "{raw} must still panic, got {r:?}");
         }
     }
 

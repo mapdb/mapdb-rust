@@ -61,12 +61,14 @@ enum SetSlot<K> {
 /// with the same fixed hasher then lands the keys as dense ascending runs that
 /// lap the target before it grows: linear probing walks ever longer clusters
 /// and the rebuild is quadratic (hashbrown/rust #36481). Folding in the bits
-/// above `k` makes each size's slot order independent of every other size's
-/// for well-mixed hashes, while hashes below the capacity (small keys under an
+/// above `k` decorrelates each size's slot order from every other size's for
+/// well-mixed hashes, while hashes below the capacity (small keys under an
 /// identity hasher) still map to themselves. Hashing the high bits instead of
 /// XORing them in raw keeps simple strides apart under an identity hasher: a
 /// bare fold sends every multiple of `2^k + 1` to slot 0, as `hash & mask`
-/// does for every multiple of `2^k`.
+/// does for every multiple of `2^k`. No fixed placement suits every
+/// arithmetic progression; an identity hasher over arbitrary strided keys can
+/// still cluster at some capacity.
 #[inline]
 fn home(hash: u64, mask: usize) -> usize {
     // A slot array never exceeds isize::MAX elements, so k < 64.

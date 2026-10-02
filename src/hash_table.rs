@@ -52,6 +52,23 @@ enum SetSlot<K> {
     Occupied { key: K },
 }
 
+/// Home slot of `hash` in a table of `mask + 1` slots (a power of two):
+/// the low `k` hash bits XOR the next `k`, where `2^k` is the capacity.
+///
+/// Plain `hash & mask` makes every table size order keys by the same low bits.
+/// Feeding one table's iteration (slot order) into a smaller, growing table
+/// with the same fixed hasher then lands the keys as dense ascending runs that
+/// lap the target before it grows: linear probing walks ever longer clusters
+/// and the rebuild is quadratic (hashbrown/rust #36481). Folding in the next
+/// `k` bits makes each size's slot order independent of every other size's
+/// for well-mixed hashes, while hashes below the capacity (small keys under an
+/// identity hasher) still map to themselves.
+#[inline]
+fn home(hash: u64, mask: usize) -> usize {
+    // A slot array never exceeds isize::MAX elements, so the shift is < 64.
+    ((hash ^ (hash >> mask.trailing_ones())) as usize) & mask
+}
+
 // ---------------------------------------------------------------------------
 // Unwind safety: user `Hash` never runs on a half-mutated table
 // ---------------------------------------------------------------------------
@@ -84,7 +101,7 @@ fn backward_shift<T>(
     let mut gap = deleted;
     let mut idx = (deleted + 1) & mask;
     while let Some(hash) = hash_of(&entries[idx]) {
-        let ideal = (hash as usize) & mask;
+        let ideal = home(hash, mask);
         let dist_current = idx.wrapping_sub(ideal) & mask;
         let dist_gap = gap.wrapping_sub(ideal) & mask;
         if dist_current > dist_gap {
@@ -246,7 +263,8 @@ impl<K, V, S> OpenHashMap<K, V, S> {
 impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
     /// Hashes `key` through the table's `BuildHasher`. `RandomState` (the
     /// default) already produces well-mixed 64-bit output, so no
-    /// Fibonacci/spread multiplier is layered on top.
+    /// Fibonacci/spread multiplier is layered on top; [`home`] only folds in
+    /// size-dependent bits to pick the slot.
     #[inline]
     fn hash(&self, key: &(impl Hash + ?Sized)) -> u64 {
         self.hasher.hash_one(key)
@@ -259,7 +277,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             self.resize();
         }
         let mask = self.mask();
-        let mut idx = (self.hash(&key) as usize) & mask;
+        let mut idx = home(self.hash(&key), mask);
         loop {
             match &mut self.entries[idx] {
                 MapSlot::Empty => {
@@ -304,7 +322,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             self.resize();
         }
         let mask = self.mask();
-        let mut idx = (self.hash(&key) as usize) & mask;
+        let mut idx = home(self.hash(&key), mask);
         // Probe to either the matching key or the first empty slot, recording
         // which. `idx` is a plain `usize`, so the transient borrow of `entries`
         // ends before we move `self` into the entry.
@@ -340,7 +358,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(key) as usize) & mask;
+        let mut idx = home(self.hash(key), mask);
         loop {
             match &self.entries[idx] {
                 MapSlot::Empty => return None,
@@ -364,7 +382,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(key) as usize) & mask;
+        let mut idx = home(self.hash(key), mask);
         loop {
             match &self.entries[idx] {
                 MapSlot::Empty => return None,
@@ -385,7 +403,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(key) as usize) & mask;
+        let mut idx = home(self.hash(key), mask);
         loop {
             match &self.entries[idx] {
                 MapSlot::Empty => return None,
@@ -418,7 +436,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
             return None;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(key) as usize) & mask;
+        let mut idx = home(self.hash(key), mask);
         loop {
             match &self.entries[idx] {
                 MapSlot::Empty => return None,
@@ -545,7 +563,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
 
     fn insert_hashed_no_resize(&mut self, key: K, value: V, hash: u64) {
         let mask = self.mask();
-        let mut idx = (hash as usize) & mask;
+        let mut idx = home(hash, mask);
         loop {
             if let MapSlot::Empty = &self.entries[idx] {
                 self.entries[idx] = MapSlot::Occupied { key, value };
@@ -585,7 +603,7 @@ impl<K: Hash + Eq, V, S: BuildHasher> OpenHashMap<K, V, S> {
         index: usize,
     ) -> Result<bool, BulkError> {
         let mask = self.mask();
-        let mut idx = (self.hash(&key) as usize) & mask;
+        let mut idx = home(self.hash(&key), mask);
         loop {
             match &mut self.entries[idx] {
                 MapSlot::Empty => {
@@ -984,7 +1002,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
             self.resize();
         }
         let mask = self.mask();
-        let mut idx = (self.hash(&value) as usize) & mask;
+        let mut idx = home(self.hash(&value), mask);
         loop {
             match &self.entries[idx] {
                 SetSlot::Empty => {
@@ -1007,7 +1025,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
             return false;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(value) as usize) & mask;
+        let mut idx = home(self.hash(value), mask);
         loop {
             match &self.entries[idx] {
                 SetSlot::Empty => return false,
@@ -1026,7 +1044,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
             return false;
         }
         let mask = self.mask();
-        let mut idx = (self.hash(value) as usize) & mask;
+        let mut idx = home(self.hash(value), mask);
         loop {
             match &self.entries[idx] {
                 SetSlot::Empty => return false,
@@ -1232,7 +1250,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
 
     fn insert_hashed_no_resize(&mut self, value: K, hash: u64) {
         let mask = self.mask();
-        let mut idx = (hash as usize) & mask;
+        let mut idx = home(hash, mask);
         loop {
             if let SetSlot::Empty = &self.entries[idx] {
                 self.entries[idx] = SetSlot::Occupied { key: value };
@@ -1267,7 +1285,7 @@ impl<K: Hash + Eq, S: BuildHasher> OpenHashSet<K, S> {
         index: usize,
     ) -> Result<bool, BulkError> {
         let mask = self.mask();
-        let mut idx = (self.hash(&value) as usize) & mask;
+        let mut idx = home(self.hash(&value), mask);
         loop {
             match &self.entries[idx] {
                 SetSlot::Empty => {
@@ -2001,6 +2019,106 @@ mod tests {
             }
             assert_eq!(map.entries.len(), expected_slots);
             assert_eq!(set.entries.len(), expected_slots);
+        }
+    }
+
+    type FixedSip = BuildHasherDefault<std::collections::hash_map::DefaultHasher>;
+
+    /// Mean probe distance from each key's home slot to the slot it occupies.
+    fn mean_displacement(
+        hashes: impl Iterator<Item = (usize, u64)>,
+        mask: usize,
+        len: usize,
+    ) -> f64 {
+        let total: usize = hashes
+            .map(|(idx, hash)| idx.wrapping_sub(home(hash, mask)) & mask)
+            .sum();
+        total as f64 / len as f64
+    }
+
+    fn map_displacement<S: BuildHasher>(m: &OpenHashMap<u64, u64, S>) -> f64 {
+        let hashes = m.entries.iter().enumerate().filter_map(|(i, s)| match s {
+            MapSlot::Occupied { key, .. } => Some((i, m.hasher.hash_one(key))),
+            MapSlot::Empty => None,
+        });
+        mean_displacement(hashes, m.mask(), m.len())
+    }
+
+    fn set_displacement<S: BuildHasher>(s: &OpenHashSet<u64, S>) -> f64 {
+        let hashes = s
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, slot)| match slot {
+                SetSlot::Occupied { key } => Some((i, s.hasher.hash_one(key))),
+                SetSlot::Empty => None,
+            });
+        mean_displacement(hashes, s.mask(), s.len())
+    }
+
+    /// Rebuilding a table from its own slot-order iteration with the same fixed
+    /// hasher must not cluster. The damage shows while the target is smaller
+    /// than the source, so each rebuild takes the source's first `m` keys,
+    /// stopping just below the grow threshold of a target a quarter the
+    /// source's size: under plain `hash & mask` homes those keys span 1.5 laps
+    /// of the target and pile into runs (mean displacement here was over 100,
+    /// and a full rebuild was quadratic).
+    #[test]
+    fn fixed_hasher_rebuild_from_slot_order_does_not_cluster() {
+        let n = 1u64 << 17;
+        let src: OpenHashMap<u64, u64, FixedSip> = (0..n).map(|k| (k, k)).collect();
+        let target_slots = src.entries.len() / 4;
+        let m = target_slots * LOAD_FACTOR_NUM / LOAD_FACTOR_DEN - 1;
+        assert!(map_displacement(&src) < 4.0);
+
+        let prefix = || src.iter().take(m).map(|(k, v)| (*k, *v));
+        let collected: OpenHashMap<u64, u64, FixedSip> = prefix().collect();
+        let mut extended: OpenHashMap<u64, u64, FixedSip> = OpenHashMap::default();
+        extended.extend(prefix());
+        let mut inserted: OpenHashMap<u64, u64, FixedSip> = OpenHashMap::default();
+        for (k, v) in prefix() {
+            inserted.insert(k, v);
+        }
+        for t in [&collected, &extended, &inserted] {
+            assert_eq!(t.len(), m);
+            assert_eq!(t.entries.len(), target_slots);
+            let d = map_displacement(t);
+            assert!(d < 4.0, "map rebuild mean displacement {d}");
+            assert!(prefix().all(|(k, v)| t.get(&k) == Some(&v)));
+        }
+
+        let set: OpenHashSet<u64, FixedSip> = (0..n).collect();
+        let rebuilt: OpenHashSet<u64, FixedSip> = set.iter().take(m).copied().collect();
+        let mut set_ext: OpenHashSet<u64, FixedSip> = OpenHashSet::default();
+        set_ext.extend(set.iter().take(m).copied());
+        for t in [&rebuilt, &set_ext] {
+            assert_eq!(t.len(), m);
+            assert_eq!(t.entries.len(), target_slots);
+            let d = set_displacement(t);
+            assert!(d < 4.0, "set rebuild mean displacement {d}");
+            assert!(set.iter().take(m).all(|k| t.contains(k)));
+        }
+
+        // The full rebuild ends at the source's size and stays well formed.
+        let full: OpenHashMap<u64, u64, FixedSip> = src.iter().map(|(k, v)| (*k, *v)).collect();
+        assert_eq!(full.len(), n as usize);
+        assert!(map_displacement(&full) < 4.0);
+        assert!((0..n).all(|k| full.get(&k) == Some(&k)));
+    }
+
+    /// Hashes below the capacity keep their own slot, so an identity-style
+    /// hasher over small keys still fills the table without collisions.
+    #[test]
+    fn home_keeps_hashes_below_capacity() {
+        for bits in [4u32, 10, 20, 31, 32, 40, 63]
+            .into_iter()
+            .filter(|&b| b < usize::BITS)
+        {
+            let mask = (1usize << bits) - 1;
+            for hash in [0u64, 1, 5, (mask as u64) / 2, mask as u64] {
+                assert_eq!(home(hash, mask), hash as usize);
+            }
+            assert!(home(u64::MAX, mask) <= mask);
         }
     }
 

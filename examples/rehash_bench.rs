@@ -11,6 +11,9 @@
 //!
 //! `cargo run --release --example rehash_bench`
 
+// std `HashMap` is the comparison baseline here, not an oracle.
+#![allow(clippy::disallowed_types)]
+
 use mapdb_collections::hash_table::{OpenHashMap, OpenHashSet};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::hash_map::{DefaultHasher, RandomState};

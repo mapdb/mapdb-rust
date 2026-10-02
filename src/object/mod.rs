@@ -26,7 +26,7 @@ mod treeset;
 pub use arraylist::ArrayList;
 pub use arraystack::ArrayStack;
 pub use hashbag::HashBag;
-pub use hashbimap::HashBiMap;
+pub use hashbimap::{HashBiMap, IntoIter as HashBiMapIntoIter, Iter as HashBiMapIter};
 pub use hashmap::HashMap;
 pub use hashset::HashSet;
 pub use linkedhashmap::{

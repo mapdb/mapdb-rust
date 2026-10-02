@@ -134,8 +134,17 @@ impl<S> IndexTable<S> {
     /// Resolve a resize before inserting, matching `OpenHashMap`'s policy: grow
     /// when the *next* insert would reach the 0.75 load factor.
     #[inline]
-    fn needs_resize(&self) -> bool {
+    pub(super) fn needs_resize(&self) -> bool {
         (self.len + 1) * LOAD_FACTOR_DEN >= self.cap() * LOAD_FACTOR_NUM
+    }
+
+    /// Grow now if the next insert would, so a later [`probe`](Self::probe)
+    /// does not resize. Lets a caller do all its allocation before it starts
+    /// mutating. Runs no user code.
+    pub(crate) fn reserve_one(&mut self) {
+        if self.needs_resize() {
+            self.resize();
+        }
     }
 
     /// Empty every cell (keeps the current capacity).

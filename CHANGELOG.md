@@ -6,6 +6,20 @@ so a breaking change is a **minor** version bump.
 
 ## [Unreleased] — new `BoundedMap` + `Frozen<C>` types; `entry`/`retain`/`drain`/mutable-iteration/owned-`IntoIterator` completed across the collections; typed `RoaringError`
 
+- **`HashBiMap` is panic-consistent** (plan F72c follow-up). It was two
+  `std::HashMap`s updated one after the other, so a panicking `Hash` or `Eq`
+  between the two updates left a pair in one direction only (e.g. a value
+  findable by `get_inverse` whose key `get` no longer knew). Each pair now lives
+  once in an arena with its two hashes, indexed by two hash-storing
+  `IndexTable`s (the `LinkedHashMap` design). Every mutator runs all user
+  `Hash`/`Eq` before changing the mapping, so such a panic leaves the mapping
+  unchanged (an index may already have grown); displaced pairs are dropped
+  only after both directions agree. Keys and values are stored once, not
+  twice. Source-visible changes:
+  iteration follows insertion order; `&HashBiMap`/`HashBiMap` `IntoIterator`
+  now yield the new `HashBiMapIter`/`HashBiMapIntoIter` (were `std` `hash_map`
+  iterators); `Debug` prints as a map. Fresh inserts are ~1.3–2.2× slower than
+  on the `std` maps; warm `get`/`get_inverse` are within ~10%.
 - **`Index` on the map types** (blueprint T5 std parity). `OpenHashMap`,
   `object::HashMap`, `LinkedHashMap` (all `Index<&Q>` where `K: Borrow<Q>`), and
   `TreeMap` (`Index<&K>`, comparator descent) now support `map[&key] -> &V`

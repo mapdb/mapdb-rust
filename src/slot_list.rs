@@ -301,6 +301,29 @@ impl<T: Clone> Clone for SlotList<T> {
     }
 }
 
+impl<T> SlotList<T> {
+    /// A structural copy with every live value mapped through `f`: free slots,
+    /// links and slot indices are preserved, as in [`Clone`]. If `f` panics the
+    /// partial copy is dropped and `self` is untouched.
+    pub(crate) fn map_structural<U>(&self, mut f: impl FnMut(&T) -> U) -> SlotList<U> {
+        SlotList {
+            arena: self
+                .arena
+                .iter()
+                .map(|s| Slot {
+                    prev: s.prev,
+                    next: s.next,
+                    item: s.item.as_ref().map(&mut f),
+                })
+                .collect(),
+            free_head: self.free_head,
+            head: self.head,
+            tail: self.tail,
+            len: self.len,
+        }
+    }
+}
+
 /// Shared-reference iterator over live values, insertion order. Exact-size.
 pub(crate) struct Iter<'a, T> {
     arena: &'a [Slot<T>],

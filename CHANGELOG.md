@@ -18,8 +18,12 @@ so a breaking change is a **minor** version bump.
   twice. Source-visible changes:
   iteration follows insertion order; `&HashBiMap`/`HashBiMap` `IntoIterator`
   now yield the new `HashBiMapIter`/`HashBiMapIntoIter` (were `std` `hash_map`
-  iterators); `Debug` prints as a map. Fresh inserts are ~1.3–2.2× slower than
+  iterators); `Debug` prints as a map. Fresh inserts are ~1.3–1.8× slower than
   on the `std` maps; warm `get`/`get_inverse` are within ~10%.
+- **`IndexTable` cells are 16 bytes** (were 24): an empty cell is marked by a
+  reserved slot number instead of an enum tag. Shrinks the index behind
+  `LinkedHashMap`, `LinkedHashSet`, the strategy maps/sets and `HashBiMap` by
+  a third.
 - **`Index` on the map types** (blueprint T5 std parity). `OpenHashMap`,
   `object::HashMap`, `LinkedHashMap` (all `Index<&Q>` where `K: Borrow<Q>`), and
   `TreeMap` (`Index<&K>`, comparator descent) now support `map[&key] -> &V`

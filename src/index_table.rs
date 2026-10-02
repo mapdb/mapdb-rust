@@ -46,11 +46,32 @@ const DEFAULT_CAPACITY: usize = 16;
 const LOAD_FACTOR_NUM: usize = 3;
 const LOAD_FACTOR_DEN: usize = 4; // 0.75
 
-/// One table cell: empty, or an occupied `(hash, slot)` pair.
-#[derive(Clone)]
-enum IdxSlot {
-    Empty,
-    Full { hash: u64, slot: usize },
+/// One table cell: empty, or an occupied `(hash, slot)` pair. Packed into
+/// 16 bytes (an enum would take 24) by marking empty with `slot == usize::MAX`,
+/// which is never an external slot index.
+#[derive(Clone, Copy)]
+struct IdxSlot {
+    hash: u64,
+    slot: usize,
+}
+
+impl IdxSlot {
+    const EMPTY: IdxSlot = IdxSlot {
+        hash: 0,
+        slot: usize::MAX,
+    };
+
+    #[inline]
+    fn full(hash: u64, slot: usize) -> IdxSlot {
+        debug_assert_ne!(slot, usize::MAX, "slot index reserved for empty");
+        IdxSlot { hash, slot }
+    }
+
+    /// The `(hash, slot)` pair, or `None` for an empty cell.
+    #[inline]
+    fn get(self) -> Option<(u64, usize)> {
+        (self.slot != usize::MAX).then_some((self.hash, self.slot))
+    }
 }
 
 /// The result of probing for a key: either it is present (its external slot
@@ -100,7 +121,7 @@ impl<S> IndexTable<S> {
     pub(crate) fn with_capacity_and_hasher(cap: usize, hasher: S) -> Self {
         let cap = crate::bulk::open_addressing_capacity(cap, DEFAULT_CAPACITY);
         let mut slots = Vec::with_capacity(cap);
-        slots.resize_with(cap, || IdxSlot::Empty);
+        slots.resize_with(cap, || IdxSlot::EMPTY);
         IndexTable {
             slots,
             len: 0,
@@ -149,7 +170,7 @@ impl<S> IndexTable<S> {
 
     /// Empty every cell (keeps the current capacity).
     pub(crate) fn clear(&mut self) {
-        self.slots.fill(IdxSlot::Empty);
+        self.slots.fill(IdxSlot::EMPTY);
         self.len = 0;
     }
 
@@ -159,10 +180,10 @@ impl<S> IndexTable<S> {
         let mask = self.mask();
         let mut idx = (hash as usize) & mask;
         loop {
-            match &self.slots[idx] {
-                IdxSlot::Empty => return None,
-                IdxSlot::Full { hash: h, slot } if *h == hash && eq(*slot) => return Some(*slot),
-                IdxSlot::Full { .. } => idx = (idx + 1) & mask,
+            match self.slots[idx].get() {
+                None => return None,
+                Some((h, slot)) if h == hash && eq(slot) => return Some(slot),
+                Some(_) => idx = (idx + 1) & mask,
             }
         }
     }
@@ -181,12 +202,10 @@ impl<S> IndexTable<S> {
         let mask = self.mask();
         let mut idx = (hash as usize) & mask;
         loop {
-            match &self.slots[idx] {
-                IdxSlot::Empty => return RawEntry::Vacant(idx),
-                IdxSlot::Full { hash: h, slot } if *h == hash && eq(*slot) => {
-                    return RawEntry::Occupied(*slot)
-                }
-                IdxSlot::Full { .. } => idx = (idx + 1) & mask,
+            match self.slots[idx].get() {
+                None => return RawEntry::Vacant(idx),
+                Some((h, slot)) if h == hash && eq(slot) => return RawEntry::Occupied(slot),
+                Some(_) => idx = (idx + 1) & mask,
             }
         }
     }
@@ -196,8 +215,8 @@ impl<S> IndexTable<S> {
     /// call (no user code runs in between, so this holds by construction in the
     /// `&mut self` window).
     pub(crate) fn fill_vacant(&mut self, cell: usize, hash: u64, slot: usize) {
-        debug_assert!(matches!(self.slots[cell], IdxSlot::Empty));
-        self.slots[cell] = IdxSlot::Full { hash, slot };
+        debug_assert!(self.slots[cell].get().is_none());
+        self.slots[cell] = IdxSlot::full(hash, slot);
         self.len += 1;
     }
 
@@ -208,16 +227,15 @@ impl<S> IndexTable<S> {
         let mask = self.mask();
         let mut idx = (hash as usize) & mask;
         loop {
-            match &self.slots[idx] {
-                IdxSlot::Empty => return None,
-                IdxSlot::Full { hash: h, slot } if *h == hash && eq(*slot) => {
-                    let removed = *slot;
-                    self.slots[idx] = IdxSlot::Empty;
+            match self.slots[idx].get() {
+                None => return None,
+                Some((h, removed)) if h == hash && eq(removed) => {
+                    self.slots[idx] = IdxSlot::EMPTY;
                     self.len -= 1;
                     self.backward_shift(idx);
                     return Some(removed);
                 }
-                IdxSlot::Full { .. } => idx = (idx + 1) & mask,
+                Some(_) => idx = (idx + 1) & mask,
             }
         }
     }
@@ -237,8 +255,8 @@ impl<S> IndexTable<S> {
         let mask = self.mask();
         let mut gap = deleted;
         let mut idx = (deleted + 1) & mask;
-        while let IdxSlot::Full { hash, .. } = &self.slots[idx] {
-            let ideal = (*hash as usize) & mask;
+        while let Some((hash, _)) = self.slots[idx].get() {
+            let ideal = (hash as usize) & mask;
             let dist_current = idx.wrapping_sub(ideal) & mask;
             let dist_gap = gap.wrapping_sub(ideal) & mask;
             if dist_current > dist_gap {
@@ -255,17 +273,17 @@ impl<S> IndexTable<S> {
     fn resize(&mut self) {
         let new_cap = (self.slots.len() * 2).max(DEFAULT_CAPACITY);
         let mut fresh = Vec::with_capacity(new_cap);
-        fresh.resize_with(new_cap, || IdxSlot::Empty);
+        fresh.resize_with(new_cap, || IdxSlot::EMPTY);
         let old = std::mem::replace(&mut self.slots, fresh);
         // Re-place every occupied cell from its stored hash (no user code).
         let mask = new_cap - 1;
         for cell in old {
-            if let IdxSlot::Full { hash, slot } = cell {
+            if let Some((hash, slot)) = cell.get() {
                 let mut idx = (hash as usize) & mask;
-                while !matches!(self.slots[idx], IdxSlot::Empty) {
+                while self.slots[idx].get().is_some() {
                     idx = (idx + 1) & mask;
                 }
-                self.slots[idx] = IdxSlot::Full { hash, slot };
+                self.slots[idx] = IdxSlot::full(hash, slot);
             }
         }
     }

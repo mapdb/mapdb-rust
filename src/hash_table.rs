@@ -52,21 +52,29 @@ enum SetSlot<K> {
     Occupied { key: K },
 }
 
-/// Home slot of `hash` in a table of `mask + 1` slots (a power of two):
-/// the low `k` hash bits XOR the next `k`, where `2^k` is the capacity.
+/// Home slot of `hash` in a table of `2^k = mask + 1` slots: the low `k` hash
+/// bits XOR a Fibonacci hash (top `k` bits of a multiply by 2^64/phi, rotated
+/// down) of the bits above them.
 ///
 /// Plain `hash & mask` makes every table size order keys by the same low bits.
 /// Feeding one table's iteration (slot order) into a smaller, growing table
 /// with the same fixed hasher then lands the keys as dense ascending runs that
 /// lap the target before it grows: linear probing walks ever longer clusters
-/// and the rebuild is quadratic (hashbrown/rust #36481). Folding in the next
-/// `k` bits makes each size's slot order independent of every other size's
+/// and the rebuild is quadratic (hashbrown/rust #36481). Folding in the bits
+/// above `k` makes each size's slot order independent of every other size's
 /// for well-mixed hashes, while hashes below the capacity (small keys under an
-/// identity hasher) still map to themselves.
+/// identity hasher) still map to themselves. Hashing the high bits instead of
+/// XORing them in raw keeps simple strides apart under an identity hasher: a
+/// bare fold sends every multiple of `2^k + 1` to slot 0, as `hash & mask`
+/// does for every multiple of `2^k`.
 #[inline]
 fn home(hash: u64, mask: usize) -> usize {
-    // A slot array never exceeds isize::MAX elements, so the shift is < 64.
-    ((hash ^ (hash >> mask.trailing_ones())) as usize) & mask
+    // A slot array never exceeds isize::MAX elements, so k < 64.
+    let k = mask.trailing_ones();
+    let high = (hash >> k)
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .rotate_left(k);
+    ((hash ^ high) as usize) & mask
 }
 
 // ---------------------------------------------------------------------------
@@ -2087,6 +2095,22 @@ mod tests {
             assert!(prefix().all(|(k, v)| t.get(&k) == Some(&v)));
         }
 
+        // Deletion's backward shift on a rebuilt table keeps every survivor reachable.
+        let mut pruned = collected.clone();
+        for (k, _) in prefix().step_by(3) {
+            assert_eq!(pruned.remove(&k), Some(k));
+        }
+        pruned.retain(|k, _| k % 2 == 0);
+        let survivors: Vec<u64> = prefix()
+            .map(|(k, _)| k)
+            .enumerate()
+            .filter(|&(i, k)| i % 3 != 0 && k % 2 == 0)
+            .map(|(_, k)| k)
+            .collect();
+        assert_eq!(pruned.len(), survivors.len());
+        assert!(survivors.iter().all(|k| pruned.get(k) == Some(k)));
+        assert!(map_displacement(&pruned) < 4.0);
+
         let set: OpenHashSet<u64, FixedSip> = (0..n).collect();
         let rebuilt: OpenHashSet<u64, FixedSip> = set.iter().take(m).copied().collect();
         let mut set_ext: OpenHashSet<u64, FixedSip> = OpenHashSet::default();
@@ -2119,6 +2143,74 @@ mod tests {
                 assert_eq!(home(hash, mask), hash as usize);
             }
             assert!(home(u64::MAX, mask) <= mask);
+        }
+    }
+
+    /// Hashes a `u64` key to itself, like the `nohash` crates.
+    #[derive(Default)]
+    struct IdentityHasher(u64);
+
+    impl Hasher for IdentityHasher {
+        fn finish(&self) -> u64 {
+            self.0
+        }
+
+        fn write(&mut self, _: &[u8]) {
+            unreachable!("only u64 keys")
+        }
+
+        fn write_u64(&mut self, n: u64) {
+            self.0 = n;
+        }
+    }
+
+    type Identity = BuildHasherDefault<IdentityHasher>;
+
+    /// Strided keys under an identity hasher spread over a reserved table. A
+    /// bare `hash & mask` sent every multiple of the capacity (stride 1024) to
+    /// slot 0, and a bare XOR fold every multiple of capacity + 1 (stride 1025).
+    #[test]
+    fn identity_hasher_strides_do_not_cluster() {
+        let n = 511u64;
+        for stride in [
+            1u64,
+            2,
+            3,
+            1023,
+            1024,
+            1025,
+            2048,
+            2049,
+            4096,
+            1 << 32,
+            (1 << 32) + 1,
+        ] {
+            let keys = || (0..n).map(move |i| i.wrapping_mul(stride));
+            let mut map: OpenHashMap<u64, u64, Identity> =
+                OpenHashMap::with_capacity_and_hasher(n as usize, Identity::default());
+            let mut set: OpenHashSet<u64, Identity> =
+                OpenHashSet::with_capacity_and_hasher(n as usize, Identity::default());
+            for k in keys() {
+                map.insert(k, k);
+                set.insert(k);
+            }
+            assert_eq!(map.entries.len(), 1024);
+            assert_eq!(set.entries.len(), 1024);
+            let d = map_displacement(&map);
+            assert!(d < 4.0, "stride {stride}: map mean displacement {d}");
+            let d = set_displacement(&set);
+            assert!(d < 4.0, "stride {stride}: set mean displacement {d}");
+
+            for k in keys().step_by(2) {
+                assert_eq!(map.remove(&k), Some(k));
+                assert!(set.remove(&k));
+            }
+            for (i, k) in keys().enumerate() {
+                assert_eq!(map.get(&k).copied(), (i % 2 == 1).then_some(k));
+                assert_eq!(set.contains(&k), i % 2 == 1);
+            }
+            assert!(map_displacement(&map) < 4.0);
+            assert!(set_displacement(&set) < 4.0);
         }
     }
 

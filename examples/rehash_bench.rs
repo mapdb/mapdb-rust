@@ -6,15 +6,44 @@
 //! Rebuild benchmark: one table's iteration fed into a fresh table with the
 //! same hasher, by `collect`, `extend` and a plain `insert` loop. With a fixed
 //! hasher the source is in slot order, which used to cluster the growing
-//! target quadratically. Also times ordinary random insert and lookup.
+//! target quadratically. Also times ordinary random insert and lookup, a
+//! presized `extend`, and counts the bytes each rebuild allocates.
 //!
 //! `cargo run --release --example rehash_bench`
 
 use mapdb_collections::hash_table::{OpenHashMap, OpenHashSet};
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::hash_map::{DefaultHasher, RandomState};
 use std::collections::HashMap;
 use std::hash::{BuildHasher, BuildHasherDefault, Hasher};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
+
+/// Counts bytes requested from the allocator (allocations plus reallocations).
+struct Counting;
+
+static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+
+unsafe impl GlobalAlloc for Counting {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        ALLOCATED.fetch_add(layout.size(), Ordering::Relaxed);
+        System.alloc(layout)
+    }
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
+    }
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        ALLOCATED.fetch_add(new_size, Ordering::Relaxed);
+        System.realloc(ptr, layout, new_size)
+    }
+}
+
+#[global_allocator]
+static GLOBAL: Counting = Counting;
+
+fn allocated_mb() -> f64 {
+    ALLOCATED.load(Ordering::Relaxed) as f64 / (1 << 20) as f64
+}
 
 /// FxHash-style multiply hasher (rustc's), inlined to stay dependency-free.
 #[derive(Default)]
@@ -70,9 +99,14 @@ fn run<S: BuildHasher + Default + Clone>(name: &str, n: usize) {
     }
     let get = ms(t);
 
-    let t = Instant::now();
+    let (t, mb) = (Instant::now(), allocated_mb());
     let b: OpenHashMap<u64, u64, S> = a.iter().map(|(k, v)| (*k, *v)).collect();
     let collect = ms(t);
+    let collect_mb = allocated_mb() - mb;
+    let t = Instant::now();
+    let mut p: OpenHashMap<u64, u64, S> = OpenHashMap::with_capacity_and_hasher(n, S::default());
+    p.extend(a.iter().map(|(k, v)| (*k, *v)));
+    let presized = ms(t);
     let t = Instant::now();
     let mut c: OpenHashMap<u64, u64, S> = OpenHashMap::default();
     c.extend(a.iter().map(|(k, v)| (*k, *v)));
@@ -91,10 +125,14 @@ fn run<S: BuildHasher + Default + Clone>(name: &str, n: usize) {
     let t = Instant::now();
     let std_a: HashMap<u64, u64, S> = a.iter().map(|(k, v)| (*k, *v)).collect();
     let std_collect = ms(t);
-    assert_eq!(b.len() + c.len() + d.len() + s2.len() + std_a.len(), 5 * n);
+    assert_eq!(
+        b.len() + c.len() + d.len() + p.len() + s2.len() + std_a.len(),
+        6 * n
+    );
     println!(
         "{name:5} n={n:8} insert {insert:7.1} get {get:6.1} | collect {collect:8.1} extend {extend:8.1} \
-         loop {loop_:8.1} set-collect {set_collect:8.1} | std-collect {std_collect:6.1} ms  ({hits})"
+         loop {loop_:8.1} presized {presized:6.1} set-collect {set_collect:8.1} | std-collect {std_collect:6.1} ms \
+         | collect alloc {collect_mb:5.1} MB  ({hits})"
     );
 }
 
